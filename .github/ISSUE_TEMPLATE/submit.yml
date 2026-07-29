@@ -57,7 +57,7 @@ body:
     attributes:
       label: Acknowledgements
       options:
-        - label: I have read the Palomar submission policy and the pinned commit contains every required root file.
+        - label: I have read the [Palomar submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required root file.
           required: true
         - label: I understand that Palomar acceptance records Comparator verification and an automated editorial review, not journal peer review or human endorsement.
           required: true
