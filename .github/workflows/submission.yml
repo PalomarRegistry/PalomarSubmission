@@ -148,7 +148,7 @@ jobs:
 
   report:
     needs: verify
-    if: always()
+    if: always() && github.event.label.name == 'submission'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
