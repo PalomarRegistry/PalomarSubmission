@@ -12,8 +12,17 @@ from scripts.verify_submission import (
     parse_issue_body,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_issue_form_scalar_values(self) -> None:
+        form = (REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "submit.yml").read_text()
+        self.assertIn(
+            'placeholder: "0000000000000000000000000000000000000000"',
+            form,
+        )
+
     def test_issue_form_sections(self):
         body = """### Repository URL
 

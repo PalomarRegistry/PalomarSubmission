@@ -31,7 +31,7 @@ body:
     attributes:
       label: Commit SHA
       description: Full 40-character Git commit to verify. Branches, tags, and abbreviated SHAs are not accepted.
-      placeholder: 0000000000000000000000000000000000000000
+      placeholder: "0000000000000000000000000000000000000000"
     validations:
       required: true
 
