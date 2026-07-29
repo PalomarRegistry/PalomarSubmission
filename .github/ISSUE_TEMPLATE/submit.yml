@@ -1,0 +1,65 @@
+name: Submit a Lean-verified result
+description: Ask Palomar to mechanically verify and review an immutable Lean project snapshot.
+title: "[submission] "
+labels:
+  - submission
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Point Palomar at a **public GitHub repository** and an immutable
+        40-character commit. CI reads the metadata and Comparator files from
+        that snapshot. Please read the
+        [submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md)
+        first.
+
+        The proof project may depend on arbitrary pinned repositories. Only the
+        transitive imports of `Challenge.lean` must come from Lean core,
+        Mathlib/Tau Ceti, or projects already indexed in Palomar.
+
+  - type: input
+    id: repository_url
+    attributes:
+      label: Repository URL
+      description: Public GitHub repository containing the required files at its root.
+      placeholder: https://github.com/owner/formalization
+    validations:
+      required: true
+
+  - type: input
+    id: commit_sha
+    attributes:
+      label: Commit SHA
+      description: Full 40-character Git commit to verify. Branches, tags, and abbreviated SHAs are not accepted.
+      placeholder: 0000000000000000000000000000000000000000
+    validations:
+      required: true
+
+  - type: input
+    id: existing_id
+    attributes:
+      label: Existing Palomar ID (updates only)
+      description: Leave blank for a new result. To publish a new version, give the existing permanent identifier.
+      placeholder: PALOMAR-000123
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context (optional)
+      description: Anything the reviewer should know that is not already in formalization.yaml.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I have read the Palomar submission policy and the pinned commit contains every required root file.
+          required: true
+        - label: I understand that Palomar acceptance records Comparator verification and an automated editorial review, not journal peer review or human endorsement.
+          required: true
+        - label: I authorize Palomar to reproduce submitted metadata and review findings in its public database and website.
+          required: true

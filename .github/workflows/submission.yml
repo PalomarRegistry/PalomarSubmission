@@ -1,0 +1,174 @@
+name: Verify submission
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: palomar-submission-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  mark:
+    if: github.event.label.name == 'submission'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Mark verification in progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for label in \
+            status:awaiting-review \
+            status:changes-requested \
+            status:verification-error \
+            status:review-in-progress \
+            status:accepted \
+            status:rejected \
+            status:escalated
+          do
+            gh issue edit "${{ github.event.issue.number }}" \
+              --repo "${{ github.repository }}" --remove-label "$label" || true
+          done
+          gh issue edit "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" --add-label status:verifying
+
+  verify:
+    if: github.event.label.name == 'submission'
+    needs: mark
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout submission pipeline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: pipeline
+          persist-credentials: false
+
+      - name: Checkout Palomar database
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: kim-em/PalomarDatabase
+          path: palomar-db
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11.10"
+
+      - name: Parse and fetch immutable source
+        id: prepare
+        run: |
+          python pipeline/scripts/verify_submission.py prepare \
+            --event "$GITHUB_EVENT_PATH" \
+            --work-dir "$RUNNER_TEMP/palomar" \
+            --output "$RUNNER_TEMP/mechanical-report.json"
+
+      - name: Install pinned elan
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/elan.tar.gz" \
+            https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
+          echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_TEMP/elan.tar.gz" \
+            | sha256sum --check
+          mkdir "$RUNNER_TEMP/elan"
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
+          "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        if: steps.prepare.outputs.ready == 'true'
+        with:
+          go-version: "1.24.0"
+
+      - name: Build pinned landrun
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build pinned Comparator
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          git clone --filter=blob:none https://github.com/leanprover/comparator.git "$RUNNER_TEMP/comparator"
+          git -C "$RUNNER_TEMP/comparator" checkout 68a064109f01c08f47c8edc9f51d6a2bbffaa188
+          cd "$RUNNER_TEMP/comparator"
+          lake build comparator
+
+      - name: Build toolchain-matched lean4export
+        if: steps.prepare.outputs.ready == 'true'
+        env:
+          LEAN4EXPORT_COMMIT: ${{ steps.prepare.outputs.lean4export_commit }}
+          SUBMISSION_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
+        run: |
+          git clone --filter=blob:none https://github.com/leanprover/lean4export.git "$RUNNER_TEMP/lean4export"
+          git -C "$RUNNER_TEMP/lean4export" checkout "$LEAN4EXPORT_COMMIT"
+          test "$(tr -d '\r\n' < "$RUNNER_TEMP/lean4export/lean-toolchain")" = "$SUBMISSION_TOOLCHAIN"
+          cd "$RUNNER_TEMP/lean4export"
+          lake build lean4export
+
+      - name: Run Comparator and challenge provenance audit
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          python pipeline/scripts/verify_submission.py execute \
+            --work-dir "$RUNNER_TEMP/palomar" \
+            --output "$RUNNER_TEMP/mechanical-report.json" \
+            --database palomar-db \
+            --comparator "$RUNNER_TEMP/comparator/.lake/build/bin/comparator" \
+            --lean4export "$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" \
+            --landrun "$(go env GOPATH)/bin/landrun" \
+            --comparator-commit 68a064109f01c08f47c8edc9f51d6a2bbffaa188 \
+            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Upload bounded mechanical report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mechanical-report
+          path: ${{ runner.temp }}/mechanical-report.json
+          if-no-files-found: error
+          retention-days: 90
+
+  report:
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout trusted reporter
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Download mechanical report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: mechanical-report
+          path: report
+      - name: Report result and transition issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/report_issue.py \
+            --report report/mechanical-report.json \
+            --repo "${{ github.repository }}"

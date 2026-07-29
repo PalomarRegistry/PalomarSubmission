@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11.10"
+      - name: Compile and test
+        run: |
+          python -m py_compile scripts/*.py tests/*.py
+          python -m unittest discover -v
+      - name: Validate configuration JSON
+        run: |
+          python -m json.tool toolchains.json >/dev/null
+          python -m json.tool allowed-challenge-repositories.json >/dev/null
+      - name: Reject mutable action selectors
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          mutable = re.compile(r"uses:\s+\S+@(main|master|v\d+)\s*$")
+          failed = False
+          for path in pathlib.Path(".github/workflows").glob("*.yml"):
+              for number, line in enumerate(path.read_text().splitlines(), 1):
+                  if mutable.search(line):
+                      print(f"{path}:{number}: mutable action selector: {line.strip()}")
+                      failed = True
+          raise SystemExit(failed)
+          PY

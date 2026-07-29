@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Submission policy
+    url: https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md
+    about: Read the required repository shape and editorial standard.
+  - name: Browse the registry
+    url: https://kim-em.github.io/PalomarWeb/
+    about: View accepted Palomar entries.

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lean4export": {
+    "leanprover/lean4:v4.33.0-rc1": "af5aa64bb914c3c2c781f378088dbd38acf4f804",
+    "leanprover/lean4:v4.32.0": "4e7915201d3f9f04470d9eae002fa695f7cdc589",
+    "leanprover/lean4:v4.32.0-rc1": "3de59f10bc4b4a0f2de698597aeb1246caa0df0a",
+    "leanprover/lean4:v4.31.0": "8554815c2dc6b7abe99ec1f08849c9759ba77947",
+    "leanprover/lean4:v4.31.0-rc2": "b66b1cd7b8819db6059bc3d6093b22b0a380e793",
+    "leanprover/lean4:v4.31.0-rc1": "cd502a76e05515e7d3e09eaefee1dfd8349ca592",
+    "leanprover/lean4:v4.30.0": "a3e35a584f59b390667db7269cd37fca8575e4bf",
+    "leanprover/lean4:v4.30.0-rc2": "12581a6b680d8478175596338eb2d53383a323e3",
+    "leanprover/lean4:v4.30.0-rc1": "fb517af7d71065b28c256348afdf764308acc369",
+    "leanprover/lean4:v4.29.1": "6f4e21dd70c3c11d7fbd07d39e3192792c657448",
+    "leanprover/lean4:v4.29.0": "5a53b634f6a3e21e55b4852337c4fcf0781ad1aa",
+    "leanprover/lean4:v4.28.0": "d065b0009aed0520e9e99752847a33b337661690"
+  }
+}

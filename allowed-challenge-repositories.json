@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "roots": [
+    {
+      "repository": "leanprover-community/mathlib4",
+      "include_pinned_manifest_closure": true,
+      "trust_level": "high"
+    },
+    {
+      "repository": "TauCetiProject/TauCeti",
+      "include_pinned_manifest_closure": true,
+      "trust_level": "qualified"
+    }
+  ],
+  "palomar_database": "kim-em/PalomarDatabase"
+}
