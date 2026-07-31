@@ -101,10 +101,10 @@ Challenge/Solution digests.
 The default branches of PalomarSubmission, PalomarDatabase, PalomarWeb,
 PalomarReviewer, and PalomarPolicy require up-to-date CI, one approving review,
 stale-review dismissal, conversation resolution, and administrator enforcement.
-Force pushes and branch deletion are disabled. Required checks are `test` for
-Submission/Web/Reviewer, `validate` and `append-only` for Database, and
-`validate` for Policy. Database publication remains append-only for existing
-versioned record paths.
+Force pushes and branch deletion are disabled. Required checks are `test` and
+the cold `compatibility` run for Submission, `test` for Web/Reviewer,
+`validate` and `append-only` for Database, and `validate` for Policy. Database
+publication remains append-only for existing versioned record paths.
 
 ## Accepted residual risks and deferred work
 
