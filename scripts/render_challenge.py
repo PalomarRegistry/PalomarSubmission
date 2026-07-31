@@ -994,6 +994,9 @@ def execute(args: argparse.Namespace) -> int:
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
         env["LEAN_ABORT_ON_PANIC"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_TERMINAL_PROMPT"] = "0"
         elan_command = shutil.which("elan", path=env["PATH"])
         if not elan_command:
             raise VerificationError("trusted elan executable is unavailable")

@@ -123,7 +123,14 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             landrun=Path("/tools/landrun"),
             writable_directories=[Path("/source/.lake/build")],
             executable_paths=[Path("/usr"), Path("/tools/comparator")],
-            environment={"PATH": "/usr/bin", "HOME": "/source/.lake/config/home", "SECRET": "no"},
+            environment={
+                "PATH": "/usr/bin",
+                "HOME": "/source/.lake/config/home",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+                "SECRET": "no",
+            },
             readable_directories=(Path("/source"),),
         )
         self.assertEqual(command[:4], [
@@ -136,6 +143,9 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         self.assertIn("/source", command)
         self.assertIn("/source/.lake/build", command)
         self.assertIn("/tools/comparator", command)
+        self.assertIn("GIT_CONFIG_GLOBAL", command)
+        self.assertIn("GIT_CONFIG_NOSYSTEM", command)
+        self.assertIn("GIT_TERMINAL_PROMPT", command)
         self.assertNotIn("SECRET", command)
         self.assertNotIn("--unrestricted-network", command)
         self.assertEqual(command[command.index("--") + 1 :], ["/tools/comparator", "comparator.json"])

@@ -54,6 +54,9 @@ SANDBOX_ENVIRONMENT = (
     "LEAN_PATH",
     "LEAN_SRC_PATH",
     "LEAN_ABORT_ON_PANIC",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "COMPARATOR_LANDRUN",
@@ -1336,6 +1339,9 @@ def execute(args: argparse.Namespace) -> int:
                 "COMPARATOR_LEAN4EXPORT": str(lean4export),
                 "PALOMAR_LANDRUN_REAL": str(landrun),
                 "LEAN_ABORT_ON_PANIC": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
             }
         )
         lean_command = shutil.which("lean", path=env["PATH"])
