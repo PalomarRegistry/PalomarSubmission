@@ -777,8 +777,14 @@ def discover_mathlib_cache_hashes(
     hashes = set(re.findall(r"\b([0-9a-f]{16})\.ltar(?:\.part)?\b", transcript))
     expected = int(attempted.group(1)) if attempted else 0
     if expected == 0 or expected != len(hashes):
+        detail = transcript.strip().replace("\n", " ")
+        if len(detail) > 1_000:
+            detail = f"...{detail[-997:]}"
+        diagnostic = f"; cache command exited {proc.returncode}"
+        if detail:
+            diagnostic += f": {detail}"
         raise VerificationError(
-            f"Mathlib cache discovery was incomplete ({len(hashes)} of {expected} keys)"
+            f"Mathlib cache discovery was incomplete ({len(hashes)} of {expected} keys){diagnostic}"
         )
     if expected > MAX_CACHE_ARCHIVES:
         raise VerificationError("Mathlib cache request exceeds the archive-count cap")
