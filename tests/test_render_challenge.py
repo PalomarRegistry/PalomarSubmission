@@ -8,7 +8,9 @@ from scripts.render_challenge import (
     VERSO_RUNTIME,
     VerificationError,
     artifact_manifest,
+    extract_module_doc,
     merge_renderer_manifest,
+    parsed_challenge_metadata,
     sanitize_bundle,
     static_html_sanitize,
     toolchain_verso_commit,
@@ -115,6 +117,69 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertNotIn("http-equiv=\"refresh\"", sanitized.lower())
         self.assertNotIn("data:text/html", sanitized)
 
+    def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            challenge = root / "Challenge.lean"
+            solution = root / "Solution.lean"
+            comparator = root / "comparator.json"
+            challenge.write_text(
+                '''-- /-! not a module doc -/\nimport Mathlib\nimport Batteries\n\n/-!\n# Module title\n\nMetadata body.\n-/\nnamespace Example\n/-- Headline. -/\ntheorem headline : True := trivial\nend Example\n''',
+                encoding="utf-8",
+            )
+            solution.write_text("import ErdosUnitDistance\n", encoding="utf-8")
+            comparator.write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["Example.headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metadata = parsed_challenge_metadata(challenge, solution, comparator)
+            self.assertEqual(metadata["schema_version"], 2)
+            self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
+            self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
+            self.assertEqual(metadata["declarations"], ["Example.headline"])
+            self.assertEqual(metadata["solution_imports"], ["ErdosUnitDistance"])
+
+    def test_module_doc_parser_skips_strings_and_nested_regular_comments(self):
+        source = '''def fake := "/-! nope -/"\n/- outer /-! nested -/ -/\n/-! real doc -/'''
+        self.assertEqual(extract_module_doc(source), "real doc")
+
+    def test_static_html_binds_the_compared_declaration_and_scroll_surface(self):
+        html_text = '''<!doctype html><html><head><base href="../"></head><body>
+<section class="code-content"><div class="md-text"><p>Headline.</p></div>
+<code class="hl lean block"><span class="const token" data-binding="const-Example.headline" id="Example___headline">headline</span></code>
+</section></body></html>'''
+        sanitized = static_html_sanitize(
+            html_text,
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+            ["Example.headline"],
+        )
+        self.assertIn("data-palomar-declarations=\"[&quot;Example.headline&quot;]\"", sanitized)
+        self.assertIn("html { height: auto !important", sanitized)
+        self.assertIn("overflow: visible !important", sanitized)
+        self.assertIn("white-space: nowrap", sanitized)
+        self.assertIn("background: #fff !important", sanitized)
+        self.assertIn("palomar-declaration-style", sanitized)
+
+    def test_static_html_rejects_a_missing_compared_declaration(self):
+        html_text = "<!doctype html><html><head><base href=\"../\"></head><body></body></html>"
+        with self.assertRaisesRegex(VerificationError, "does not contain compared declaration"):
+            static_html_sanitize(
+                html_text,
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+                ["Example.missing"],
+            )
+
     def test_raw_svg_is_not_an_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -143,6 +208,8 @@ class RenderChallengeTests(unittest.TestCase):
             self.assertEqual(len(tree_hash), 64)
             self.assertEqual((output / "palomar-sanitize.js").read_text(), RUNTIME_SANITIZER)
             self.assertEqual((output / "palomar-verso.js").read_text(), VERSO_RUNTIME)
+            metadata = json.loads((output / "challenge-metadata.json").read_text())
+            self.assertEqual(metadata["declarations"], [])
             self.assertFalse((output / "marked.js").exists())
 
     def test_artifact_manifest_rejects_symlinks(self):

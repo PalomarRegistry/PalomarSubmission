@@ -59,7 +59,7 @@ GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{6}$")
+PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
@@ -71,6 +71,9 @@ SANDBOX_ENVIRONMENT = (
     "LEAN_PATH",
     "LEAN_SRC_PATH",
     "LEAN_ABORT_ON_PANIC",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
@@ -436,7 +439,9 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("Commit SHA must be 40 lowercase hexadecimal characters")
         existing_id = values.get("existing_id", "").strip().upper()
         if existing_id and not PALOMAR_ID_RE.fullmatch(existing_id):
-            raise VerificationError("Existing Palomar ID must have the form PALOMAR-000123")
+            raise VerificationError(
+                "Existing Palomar ID must have the form PALOMAR-2026-07-29-000123"
+            )
 
         report.update(
             {
@@ -2077,6 +2082,9 @@ def execute(args: argparse.Namespace) -> int:
                 "GIT_TERMINAL_PROMPT": "0",
                 "PALOMAR_LANDRUN_REAL": str(landrun),
                 "LEAN_ABORT_ON_PANIC": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
             }
         )
         lean_command = shutil.which("lean", path=env["PATH"])

@@ -110,6 +110,7 @@ class VerifySubmissionTests(unittest.TestCase):
             'placeholder: "0000000000000000000000000000000000000000"',
             form,
         )
+        self.assertIn('placeholder: PALOMAR-2026-07-29-000123', form)
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
         expected = re.compile(
@@ -263,6 +264,9 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         self.assertIn("/source/.lake/build", command)
         self.assertNotIn("/source/replay.hash", command)
         self.assertIn("/tools/comparator", command)
+        self.assertIn("GIT_CONFIG_GLOBAL", command)
+        self.assertIn("GIT_CONFIG_NOSYSTEM", command)
+        self.assertIn("GIT_TERMINAL_PROMPT", command)
         self.assertNotIn("SECRET", command)
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)
