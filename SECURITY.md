@@ -104,7 +104,9 @@ to the fresh build and Lake-configuration directories. Unrelated runner
 temporary directories, home-directory contents, the report, and sibling
 process state are outside the read allowlist. Sandboxed Git ignores system and
 global configuration and cannot prompt for credentials, preventing ambient
-runner configuration from rewriting authenticated remotes.
+runner configuration from rewriting authenticated remotes. The protected
+Landrun adapter injects the same fixed Git isolation into Comparator's nested
+challenge and solution build domains.
 
 Normal configuration and comparison also run in a systemd private network
 namespace; Landrun independently restricts supported TCP operations. The

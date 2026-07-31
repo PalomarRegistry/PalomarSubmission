@@ -32,10 +32,29 @@ class LandrunPassthroughTests(unittest.TestCase):
         arguments = ["--ro", "/source", "/usr/bin/lean", "Challenge", "--", "theorem"]
         self.assertEqual(
             adapted_arguments(arguments),
-            ["--ro", "/source", "--", "/usr/bin/lean", "Challenge", "--", "theorem"],
+            [
+                "--ro",
+                "/source",
+                "--env",
+                "GIT_CONFIG_GLOBAL=/dev/null",
+                "--env",
+                "GIT_CONFIG_NOSYSTEM=1",
+                "--env",
+                "GIT_TERMINAL_PROMPT=0",
+                "--",
+                "/usr/bin/lean",
+                "Challenge",
+                "--",
+                "theorem",
+            ],
         )
         already_delimited = ["--ro", "/source", "--", "/usr/bin/lean", "Challenge"]
-        self.assertEqual(adapted_arguments(already_delimited), already_delimited)
+        adapted = adapted_arguments(already_delimited)
+        self.assertEqual(adapted.count("--"), 1)
+        self.assertEqual(adapted[-3:], ["--", "/usr/bin/lean", "Challenge"])
+        self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", adapted)
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1", adapted)
+        self.assertIn("GIT_TERMINAL_PROMPT=0", adapted)
 
 
 if __name__ == "__main__":

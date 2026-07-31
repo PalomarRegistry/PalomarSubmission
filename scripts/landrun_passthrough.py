@@ -37,6 +37,11 @@ FLAG_OPTIONS = {
     "--add-exec",
     "-add-exec",
 }
+FIXED_ENVIRONMENT = (
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "GIT_CONFIG_NOSYSTEM=1",
+    "GIT_TERMINAL_PROMPT=0",
+)
 
 
 def command_index(arguments: list[str]) -> int:
@@ -59,11 +64,11 @@ def command_index(arguments: list[str]) -> int:
 
 
 def adapted_arguments(arguments: list[str]) -> list[str]:
-    """Insert Landrun's delimiter unless the caller already supplied one."""
+    """Inject fixed Git isolation and exactly one Landrun delimiter."""
     index = command_index(arguments)
-    if index and arguments[index - 1] == "--":
-        return arguments
-    return [*arguments[:index], "--", *arguments[index:]]
+    option_end = index - 1 if index and arguments[index - 1] == "--" else index
+    fixed = [item for value in FIXED_ENVIRONMENT for item in ("--env", value)]
+    return [*arguments[:option_end], *fixed, "--", *arguments[index:]]
 
 
 def main() -> int:
