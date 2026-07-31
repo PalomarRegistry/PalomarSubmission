@@ -44,53 +44,84 @@ environment.
   does not run `lake update` or dependency post-update hooks.
 - An allowlisted Mathlib or Tau Ceti revision is trusted only if Git proves that
   it is an ancestor of the configured branch in the canonical repository.
-  Known repository moves are handled as explicit aliases, not as arbitrary URL
-  equivalence.
+  A compatibility exception may name an exact historical commit explicitly;
+  it does not make adjacent history trusted. Known repository moves are handled
+  as explicit aliases, not as arbitrary URL equivalence.
 - The allowlisted root's own `lake-manifest.json` is authoritative for its
   pinned dependency closure. Every package name, canonical repository, and
   revision in that closure must match the submission's flattened manifest.
   Reusing a trusted package name while substituting a fork or commit is rejected.
-- The transitive source closure of `Challenge.lean` may contain only Lean core,
-  the verified pinned closure of an allowlisted root, or the exact revision of
-  a repository already indexed by Palomar. Candidate-local helper imports are
-  rejected in the current protocol. The closure comes from Lean's own
-  `--src-deps` result, and every dependency source attributed to a Git package
-  must be a byte-for-byte match for a file tracked at that package's pinned
-  commit. Sources below a sandbox-writable directory are never trusted.
+- The transitive source closure of `Challenge.lean` may contain only Lean core
+  or the verified pinned closure of an allowlisted root. Candidate-local helper
+  imports are rejected in the current protocol. Palomar-indexed provenance is
+  recorded by the metadata model, but it is not accepted as executable
+  Challenge input until Palomar can reconstruct that earlier statement surface
+  independently. The closure comes from Lean's own `--src-deps` result, and
+  every dependency source attributed to a Git package must be a byte-for-byte
+  match for a file tracked at that package's pinned commit. Sources below a
+  sandbox-writable directory are never trusted.
 
 ### Landrun confinement
 
 Before Lake is started, the verifier deletes all submitted `.lake` state from
 the root project and materialized packages. It creates fresh `.lake/build` and
-`.lake/config` directories; these are the only project directories made
-writable and executable inside the outer sandbox.
+`.lake/config` directories; these are the only project directories ever made
+writable and executable inside the outer sandbox. A suffix scan rejects common
+committed Lean, trace, native, and shared-library artifacts outside that fresh
+state. That scan is an early compatibility rejection, not the proof of module
+integrity: candidate configuration could copy arbitrarily named bytes into a
+fresh build directory.
+
+Statement integrity instead comes from a separate build path. Mathlib's
+authenticated cache is run with official Mathlib as the workspace root and
+with symlinks to the exact independently verified official closure. Other
+allowlisted roots are built from their own verified configuration. Candidate
+Lake configuration never runs during either operation. The official Mathlib
+plan also replays the downloaded cache and receives write access to the one
+exact ProofWidgets replay-marker file it generates; qualified roots receive no
+write access to Mathlib source or build output. Trusted build directories are
+then frozen read/execute-only. The verifier compiles `Challenge.lean`
+directly with trusted Lean against only those frozen dependencies, outside the
+candidate's Lake plan, records the resulting `Challenge.olean` digest, and
+copies only that one module into a fresh protected directory. Comparator's
+`LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
+directory before all candidate build paths. Candidate Lake
+configuration can still build arbitrary proof dependencies in its own fresh
+directories, but it cannot replace the statement module or a trusted dependency
+used to compile it. A nonstandard output layout fails closed.
 
 Every invocation that can load project Lake configuration runs under the same
 outer Landrun policy. This includes Mathlib cache retrieval, `lake env` used to
-discover Lean paths, and Comparator itself. The policy gives read-only access to
-the filesystem, grants read/execute access to the selected Lean toolchain,
-pinned verifier programs, and required system/Python runtime directories, and
-grants write/execute access only to the fresh build and Lake-configuration
-directories.
+discover Lean paths, and Comparator itself. There is no blanket read rule for
+the runner filesystem. The policy grants read-only access to the submitted
+source tree and a small explicit set of certificate/name-service files,
+read/execute access to the selected Lean toolchain, pinned verifier programs,
+and immutable system/Python runtime directories, and write/execute access only
+to the fresh build and Lake-configuration directories. Unrelated runner
+temporary directories, home-directory contents, the report, and sibling
+process state are outside the read allowlist.
 
 Normal configuration and comparison also run in a systemd private network
 namespace; Landrun independently restricts supported TCP operations. The
 verified Mathlib cache client has a narrowly scoped exception because
 downloading official cache artifacts is its purpose. During that phase Mathlib
-is the workspace root and Lake materializes its official pinned closure in a
-separate cache-only directory. That directory is writable only during this
-trusted phase and is deleted immediately afterward, so candidate Lake
-configuration is not loaded while network access is available.
+is the workspace root and its exact official closure is exposed through
+temporary package links. The links are deleted immediately afterward, the
+authenticated output is frozen, and candidate Lake configuration is not loaded
+while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
 solution, and export operations. Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
 The outer Landrun process is launched in an unprivileged systemd unit that also
-applies the private-network and address-family policy. Landrun uses compatibility
-mode across GitHub runner kernel versions, so the verifier first runs a negative
-write probe under the complete outer policy. If the probe can write outside the
-allowlist, or if either confinement layer cannot be established, verification
-fails closed.
+applies the private-network and address-family policy, a private device and
+temporary-file view, `NoNewPrivileges`, and process-information hiding.
+Landrun uses compatibility mode across GitHub runner kernel versions, so the
+verifier first exercises the complete outer policy with positive source-read
+and build-write probes and negative outside-read, outside-write, sibling
+process-environment, and outbound-network probes. If a positive operation is
+denied, a negative operation succeeds, or either confinement layer cannot be
+established, verification fails closed.
 
 Comparator, `lean4export`, Landrun, the Landrun adapter, Lake, and the verifier
 script are outside the writable allowlist. Their hashes are captured before any
@@ -108,7 +139,11 @@ and its own environment filter.
 
 The later reporting job is separate. It receives issue-write permission but
 does not check out or execute the submitted project; it reads only the bounded
-JSON artifact produced by the verification job.
+JSON artifact produced by the verification job. Its authority target comes
+from the trusted workflow event and must agree with the issue number recorded
+in the artifact. It updates only a marker comment owned by
+`github-actions[bot]`; a submitter-authored lookalike cannot claim that slot.
+Build diagnostics are rendered as inert code rather than Markdown structure.
 
 ## Pins and trusted computing base
 
@@ -126,10 +161,15 @@ components infallible.
 
 Current protocol limits include public GitHub repositories, `lakefile.toml` at
 the submission root, a 500 MiB checked-out-source cap, a 100 KiB / 1,000-line
-hard cap on `Challenge.lean`, and a 330-minute comparison timeout. Verification
+hard cap on `Challenge.lean`, standard fresh Lake build locations, and a
+180-minute comparison timeout within a 350-minute job budget. Verification
 returns an infrastructure error or rejection—not a best-effort pass—when a
 toolchain is unsupported, provenance is ambiguous, confinement is unavailable,
 or execution times out.
+
+The current pre-launch component review, adversarial evidence, repository
+controls, and accepted residual risks are recorded in
+[`docs/launch-security-review.md`](docs/launch-security-review.md).
 
 ## Reporting a vulnerability
 

@@ -10,6 +10,7 @@ from scripts.verify_submission import (
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
+    compile_canonical_challenge,
     direct_imports,
     github_repository,
     lake_environment_value,
@@ -19,6 +20,9 @@ from scripts.verify_submission import (
     normalize_repository,
     package_allowlist,
     parse_issue_body,
+    protected_lean_path,
+    reject_committed_build_artifacts,
+    reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
     require_protected_paths,
     run,
@@ -69,6 +73,26 @@ _No response_
         self.assertEqual(parsed["repository_url"], "https://github.com/example/result")
         self.assertEqual(parsed["existing_id"], "")
 
+    def test_duplicate_recognized_issue_section_is_rejected(self):
+        body = """### Repository URL
+
+https://github.com/example/result
+
+### Commit SHA
+
+0123456789012345678901234567890123456789
+
+### Additional context (optional)
+
+Context before a misleading duplicate.
+
+### Commit SHA
+
+1111111111111111111111111111111111111111
+"""
+        with self.assertRaisesRegex(VerificationError, "duplicate recognized issue section"):
+            parse_issue_body(body)
+
     def test_repository_normalization(self):
         self.assertEqual(
             normalize_repository("https://github.com/example/result.git"),
@@ -91,6 +115,11 @@ _No response_
         self.assertEqual(
             canonical_repository("formalfrontier/tauceti", aliases),
             "TauCetiProject/TauCeti",
+        )
+        tauceti = next(root for root in roots if root["repository"] == "TauCetiProject/TauCeti")
+        self.assertEqual(
+            tauceti["accepted_revisions"],
+            ["221bb56a017bb794421eac4fa543d7a5e85add75"],
         )
 
     def test_imports(self):
@@ -117,38 +146,115 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
+            config = json.loads(path.read_text())
+            config["future_relaxation"] = True
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(VerificationError, "unknown keys"):
+                load_comparator_config(path)
+
     def test_outer_landrun_policy(self):
         command = landrun_command(
             ["/tools/comparator", "comparator.json"],
             landrun=Path("/tools/landrun"),
             writable_directories=[Path("/source/.lake/build")],
+            readable_paths=[Path("/source")],
             executable_paths=[Path("/usr"), Path("/tools/comparator")],
             environment={"PATH": "/usr/bin", "HOME": "/source/.lake/config/home", "SECRET": "no"},
             readable_directories=(Path("/source"),),
         )
-        self.assertEqual(command[:4], [
-            "/tools/landrun",
-            "--best-effort",
-            "--ldd",
-            "--add-exec",
-        ])
+        self.assertEqual(
+            command[:4],
+            [
+                "/tools/landrun",
+                "--best-effort",
+                "--ldd",
+                "--add-exec",
+            ],
+        )
         self.assertNotIn("/", command)
         self.assertIn("/source", command)
+        self.assertNotIn("/dev", command)
+        self.assertIn("/dev/null", command)
         self.assertIn("/source/.lake/build", command)
+        self.assertNotIn("/source/replay.hash", command)
         self.assertIn("/tools/comparator", command)
         self.assertNotIn("SECRET", command)
         self.assertNotIn("--unrestricted-network", command)
         self.assertEqual(command[command.index("--") + 1 :], ["/tools/comparator", "comparator.json"])
 
+        replay = landrun_command(
+            ["lake", "build"],
+            landrun=Path("/tools/landrun"),
+            writable_directories=[],
+            writable_files=[Path("/source/replay.hash")],
+            readable_paths=[Path("/source")],
+            executable_paths=[Path("/tools/lake")],
+            environment={},
+        )
+        marker = replay.index("/source/replay.hash")
+        self.assertEqual(replay[marker - 1], "--rw")
+
         networked = landrun_command(
             ["lake", "exe", "cache", "get"],
             landrun=Path("landrun"),
             writable_directories=[],
+            readable_paths=[],
             executable_paths=[],
             environment={},
             unrestricted_network=True,
         )
         self.assertIn("--unrestricted-network", networked)
+
+    def test_protected_lean_path_precedes_candidate_shadow_modules(self):
+        canonical = Path("/protected/Challenge.olean")
+        value = protected_lean_path(
+            canonical,
+            [Path("/toolchain/lib/lean"), Path("/mathlib/lib/lean")],
+            "/evil/lib/lean:/source/.lake/build/lib/lean",
+        )
+        self.assertEqual(
+            value.split(":"),
+            [
+                "/protected",
+                "/toolchain/lib/lean",
+                "/mathlib/lib/lean",
+                "/evil/lib/lean",
+                "/source/.lake/build/lib/lean",
+            ],
+        )
+
+    def test_hostile_canonical_build_cannot_publish_sibling_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text("theorem result : True := by trivial\n")
+            lean_prefix = work / "toolchain"
+            (lean_prefix / "lib" / "lean").mkdir(parents=True)
+
+            def fake_sandbox(command, **_kwargs):
+                if "-o" in command:
+                    output = Path(command[command.index("-o") + 1])
+                    output.write_bytes(b"canonical")
+                    (output.parent / "Mathlib.Forged.olean").write_bytes(b"hostile sibling")
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with mock.patch("scripts.verify_submission.sandboxed_run", side_effect=fake_sandbox):
+                canonical, dependencies, _trusted_paths = compile_canonical_challenge(
+                    work,
+                    source,
+                    lean=Path("/tools/lean"),
+                    lean_prefix=lean_prefix,
+                    allowlist={},
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(canonical.read_bytes(), b"canonical")
+            self.assertEqual([path.name for path in canonical.parent.iterdir()], ["Challenge.olean"])
+            self.assertEqual(dependencies, [])
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -160,6 +266,90 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             self.assertEqual({path.name for path in (package / ".lake").iterdir()}, {"build", "config"})
             self.assertEqual(build, (package / ".lake" / "build").resolve())
             self.assertEqual(config, (package / ".lake" / "config").resolve())
+
+    def test_committed_artifacts_outside_lake_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            artifact = package / "custom-build" / "lib" / "lean" / "Poison.olean"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"not a trusted build")
+            with self.assertRaisesRegex(VerificationError, "committed build artifact"):
+                materialize_packages(package, base_env={"PATH": "/usr/bin"})
+
+    def test_fresh_lake_artifacts_are_removed_not_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            artifact = package / ".lake" / "build" / "lib" / "lean" / "Stale.olean"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"stale")
+            remove_untrusted_lake_state(package)
+            reject_committed_build_artifacts(package)
+            self.assertFalse(artifact.exists())
+
+    def test_official_closure_may_contain_trusted_trace_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            package = source / ".lake" / "packages" / "trusted"
+            trace = package / "widget" / "package-lock.json.trace"
+            trace.parent.mkdir(parents=True)
+            trace.write_text('{"schemaVersion":"trusted"}')
+            packages = [
+                {
+                    "name": "trusted",
+                    "repository": "official/trusted",
+                    "url": "https://github.com/official/trusted",
+                    "revision": "1" * 40,
+                }
+            ]
+            reject_untrusted_package_artifacts(source, packages, {"trusted": ("official/trusted", "high")})
+            with self.assertRaisesRegex(VerificationError, "committed build artifact"):
+                reject_untrusted_package_artifacts(source, packages, {})
+
+    def test_path_dependency_with_custom_prebuilt_output_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            dependency = source / "vendor" / "helper"
+            artifact = dependency / "prebuilt" / "Helper.trace"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("untrusted trace")
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "helper",
+                                "type": "path",
+                                "dir": "vendor/helper",
+                            }
+                        ]
+                    }
+                )
+            )
+            with self.assertRaisesRegex(VerificationError, "committed build artifact"):
+                materialize_packages(source, base_env={"PATH": "/usr/bin"})
+
+    def test_path_dependency_lake_state_is_removed_before_artifact_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            dependency = source / "vendor" / "helper"
+            stale = dependency / ".lake" / "build" / "lib" / "lean" / "Stale.olean"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale object")
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "helper",
+                                "type": "path",
+                                "dir": "vendor/helper",
+                            }
+                        ]
+                    }
+                )
+            )
+            materialize_packages(source, base_env={"PATH": "/usr/bin"})
+            self.assertFalse(stale.exists())
 
     def test_report_and_tools_must_not_be_writable(self):
         with self.assertRaisesRegex(VerificationError, "sandbox-writable"):
@@ -176,9 +366,7 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         remote = mock.Mock(returncode=0)
         fetch = mock.Mock(returncode=0)
         ancestry = mock.Mock(returncode=1)
-        with mock.patch(
-            "scripts.verify_submission.run", side_effect=[remote, fetch, ancestry]
-        ) as run_mock:
+        with mock.patch("scripts.verify_submission.run", side_effect=[remote, fetch, ancestry]) as run_mock:
             with self.assertRaisesRegex(VerificationError, "not an ancestor"):
                 verify_official_revision(
                     Path("/source/.lake/packages/mathlib"),
@@ -195,6 +383,18 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             "+refs/heads/master:refs/remotes/palomar-official/head",
             fetch_command,
         )
+
+    def test_explicit_legacy_revision_is_accepted_without_broadening_history(self):
+        with mock.patch("scripts.verify_submission.run") as run_mock:
+            verify_official_revision(
+                Path("/source/.lake/packages/TauCeti"),
+                repository="TauCetiProject/TauCeti",
+                revision="2" * 40,
+                official_ref="refs/heads/main",
+                accepted_revisions=["2" * 40],
+                git_env={"PATH": "/usr/bin"},
+            )
+        run_mock.assert_not_called()
 
     def test_writable_dependency_source_is_untrusted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -265,6 +465,11 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
         self.assertIn("--property=PrivateNetwork=yes", confined)
         self.assertNotIn("--property=PrivateNetwork=yes", networked)
+        self.assertIn("--property=ProtectProc=invisible", confined)
+        self.assertIn("--property=ProcSubset=pid", confined)
+        self.assertIn("--property=NoNewPrivileges=yes", confined)
+        self.assertIn("--property=PrivateDevices=yes", confined)
+        self.assertIn("--property=RuntimeMaxSec=600s", confined)
 
     def test_systemd_applies_trusted_resource_properties(self):
         def which(command):
@@ -294,8 +499,10 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 environment={},
                 landrun=Path("/tools/landrun"),
                 writable_directories=[],
+                readable_paths=[Path("/source")],
                 executable_paths=[],
                 tools={},
+                allowed_roots=[Path("/")],
             )
         self.assertEqual(value, "/first:/second")
 

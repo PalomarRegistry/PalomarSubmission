@@ -57,9 +57,11 @@ def body_for(report: dict) -> str:
     if report.get("workflow_url"):
         lines.append(f"- [Workflow run]({report['workflow_url']})")
     if errors:
-        lines.extend(["", "### Errors", *[f"- {item}" for item in errors]])
+        lines.extend(["", "### Errors", ""])
+        lines.extend(inert_diagnostics(errors))
     if warnings:
-        lines.extend(["", "### Warnings", *[f"- {item}" for item in warnings]])
+        lines.extend(["", "### Warnings", ""])
+        lines.extend(inert_diagnostics(warnings))
     bounded = dict(report)
     bounded.pop("comparator_log_tail", None)
     lines.extend(
@@ -81,19 +83,56 @@ def body_for(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def inert_diagnostics(items: list[object]) -> list[str]:
+    """Render hostile diagnostics as indented Markdown code, never structure."""
+    lines: list[str] = []
+    for index, item in enumerate(items):
+        if index:
+            lines.append("    ")
+        value = str(item).replace("\r\n", "\n").replace("\r", "\n")
+        lines.extend(f"    {line}" for line in value.split("\n"))
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--issue-number", required=True, type=int)
+    parser.add_argument("--allow-missing-report", action="store_true")
     args = parser.parse_args()
-    report = json.loads(Path(args.report).read_text())
+    if args.issue_number < 1:
+        raise SystemExit("event issue number must be positive")
+    try:
+        report = json.loads(Path(args.report).read_text())
+        if not isinstance(report, dict):
+            raise ValueError("mechanical report root is not an object")
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        if not args.allow_missing_report:
+            raise SystemExit(f"could not read mechanical report: {error}") from error
+        report = {
+            "status": "error",
+            "stage": "infrastructure",
+            "issue": {"number": args.issue_number},
+            "source": {},
+            "errors": ["verification ended without a readable mechanical report"],
+            "warnings": [],
+        }
+    try:
+        reported_issue = int(report["issue"]["number"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit("mechanical report has no valid issue number") from error
+    if reported_issue != args.issue_number:
+        raise SystemExit(
+            f"mechanical report issue {reported_issue} does not match event issue {args.issue_number}"
+        )
     if report.get("status") not in {"pass", "fail", "error"}:
         report["status"] = "error"
         report["stage"] = "infrastructure"
         report.setdefault("errors", []).append(
             "verification infrastructure stopped before producing a final result"
         )
-    issue = int(report["issue"]["number"])
+    issue = args.issue_number
     target = {
         "pass": "status:awaiting-review",
         "fail": "status:changes-requested",
@@ -116,7 +155,15 @@ def main() -> int:
         )
     )
     body = body_for(report)
-    previous = next((comment for comment in comments if MARKER in comment.get("body", "")), None)
+    previous = next(
+        (
+            comment
+            for comment in comments
+            if MARKER in comment.get("body", "")
+            and comment.get("user", {}).get("login") == "github-actions[bot]"
+        ),
+        None,
+    )
     if previous:
         gh(
             [

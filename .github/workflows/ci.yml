@@ -18,10 +18,28 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11.10"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: "1.24.0"
       - name: Compile and test
         run: |
           python -m py_compile scripts/*.py tests/*.py
           python -m unittest discover -v
+      - name: Exercise the real Landrun and systemd boundary
+        run: |
+          go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/elan.tar.gz" \
+            https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
+          echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_TEMP/elan.tar.gz" \
+            | sha256sum --check
+          mkdir "$RUNNER_TEMP/elan"
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
+          "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.0
+          PALOMAR_TEST_LANDRUN="$(go env GOPATH)/bin/landrun" \
+          PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.32.0 "$HOME/.elan/bin/elan" which lean)" \
+            python -m unittest tests.test_sandbox_integration -v
       - name: Validate configuration JSON
         run: |
           python -m json.tool toolchains.json >/dev/null
@@ -32,12 +50,14 @@ jobs:
           import pathlib
           import re
 
-          mutable = re.compile(r"uses:\s+\S+@(main|master|v\d+)\s*$")
+          use = re.compile(r"^\s*uses:\s+(\S+?)(?:\s+#.*)?$")
+          immutable = re.compile(r"^[^@]+@[0-9a-f]{40}$")
           failed = False
           for path in pathlib.Path(".github/workflows").glob("*.yml"):
               for number, line in enumerate(path.read_text().splitlines(), 1):
-                  if mutable.search(line):
-                      print(f"{path}:{number}: mutable action selector: {line.strip()}")
+                  match = use.match(line)
+                  if match and not match.group(1).startswith("./") and not immutable.fullmatch(match.group(1)):
+                      print(f"{path}:{number}: action selector is not a full commit: {line.strip()}")
                       failed = True
           raise SystemExit(failed)
           PY

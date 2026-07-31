@@ -161,6 +161,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download mechanical report
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: mechanical-report
@@ -171,4 +172,6 @@ jobs:
         run: |
           python scripts/report_issue.py \
             --report report/mechanical-report.json \
+            --allow-missing-report \
+            --issue-number "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}"

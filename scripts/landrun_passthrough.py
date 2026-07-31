@@ -58,14 +58,21 @@ def command_index(arguments: list[str]) -> int:
     raise ValueError("missing sandboxed command")
 
 
+def adapted_arguments(arguments: list[str]) -> list[str]:
+    """Insert Landrun's delimiter unless the caller already supplied one."""
+    index = command_index(arguments)
+    if index and arguments[index - 1] == "--":
+        return arguments
+    return [*arguments[:index], "--", *arguments[index:]]
+
+
 def main() -> int:
     try:
         real = Path(os.environ["PALOMAR_LANDRUN_REAL"]).resolve(strict=True)
         if not real.is_file():
             raise ValueError("PALOMAR_LANDRUN_REAL is not a file")
         arguments = sys.argv[1:]
-        index = command_index(arguments)
-        os.execv(str(real), [str(real), *arguments[:index], "--", *arguments[index:]])
+        os.execv(str(real), [str(real), *adapted_arguments(arguments)])
     except (KeyError, OSError, ValueError) as error:
         print(f"landrun adapter: {error}", file=sys.stderr)
         return 2

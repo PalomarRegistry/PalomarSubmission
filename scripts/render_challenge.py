@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
-from scripts.verify_submission import (
+from scripts.verify_submission import (  # noqa: E402
     GITHUB_RE,
     MAX_SOURCE_BYTES,
     SHA_RE,
@@ -1131,7 +1131,10 @@ def execute(args: argparse.Namespace) -> int:
         files, tree_hash = artifact_manifest(clean_output)
         validate_build_metadata_files(writable_files)
         embedded_manifest = load_json_object(clean_output / "artifact-manifest.json")
-        if embedded_manifest.get("files") != files or embedded_manifest.get("artifact_tree_sha256") != tree_hash:
+        if (
+            embedded_manifest.get("files") != files
+            or embedded_manifest.get("artifact_tree_sha256") != tree_hash
+        ):
             raise VerificationError("sanitized artifact manifest is inconsistent")
         result_dir = work / "result"
         if result_dir.exists():
