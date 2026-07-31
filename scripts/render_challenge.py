@@ -987,6 +987,7 @@ def execute(args: argparse.Namespace) -> int:
         landrun = Path(args.landrun).resolve(strict=True)
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
+        env.pop("LAKE_PKG_URL_MAP", None)
         env["LEAN_ABORT_ON_PANIC"] = "1"
         elan_command = shutil.which("elan", path=env["PATH"])
         if not elan_command:

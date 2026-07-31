@@ -76,10 +76,12 @@ Statement integrity instead comes from a separate build path. Mathlib's
 authenticated cache is run with official Mathlib as the workspace root and
 with symlinks to the exact independently verified official closure. Other
 allowlisted roots are built from their own verified configuration. Candidate
-Lake configuration never runs during either operation. The official Mathlib
-plan also replays the downloaded cache and receives write access to the one
-exact ProofWidgets replay-marker file it generates; qualified roots receive no
-write access to Mathlib source or build output. Trusted build directories are
+Lake configuration never runs during either operation. Trusted-root Lake URL
+resolution is pinned to that root's authenticated manifest and is accepted only
+when the flattened submission manifest uses the exact same URL. The official
+Mathlib plan also replays the downloaded cache and receives write access to the
+one exact ProofWidgets replay-marker file it generates; qualified roots receive
+no write access to Mathlib source or build output. Trusted build directories are
 then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only those frozen dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and

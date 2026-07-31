@@ -89,6 +89,7 @@ EXECUTION_BUDGET_SECONDS = 330 * 60
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
+_SYSTEMD_MANAGER: str | None = None
 
 
 def install_execution_deadline(started_at_epoch: str | float | None = None) -> float | None:
@@ -758,19 +759,24 @@ def package_checkout(source: Path, package: dict[str, str]) -> Path:
 
 
 def trusted_package_url_map(
-    packages: list[dict[str, str]], trusted_names: set[str]
+    packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
-    """Lock trusted Lake loading to the already verified flattened checkouts."""
+    """Pin trusted Lake dependency remotes to the authenticated root manifest."""
     by_name = {package["name"]: package for package in packages}
     urls: dict[str, str] = {}
-    for name in sorted(trusted_names):
-        package = by_name.get(name)
-        if package is None:
+    for expected in sorted(authoritative_packages, key=lambda package: package["name"]):
+        name = expected["name"]
+        actual = by_name.get(name)
+        if actual is None:
             raise VerificationError(f"trusted package {name!r} is absent from the manifest")
-        url = package["url"]
-        if url.startswith("path:"):
+        expected_url = expected["url"]
+        if actual["url"].startswith("path:") or expected_url.startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        urls[name] = url
+        if actual["url"] != expected_url:
+            raise VerificationError(
+                f"trusted package {name!r} URL does not exactly match its authenticated manifest"
+            )
+        urls[name] = expected_url
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
 
@@ -859,7 +865,9 @@ def build_allowlisted_roots(
             raise VerificationError(f"trusted root {repository} has an incomplete closure")
         nested = nested_package_links(source, root_dir, allowed_names=closure)
         build_env = base_env.copy()
-        build_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(packages, closure)
+        build_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(
+            packages, manifest_packages(root_dir)
+        )
         home = root_dir / ".lake" / "config" / "home"
         temporary = root_dir / ".lake" / "config" / "tmp"
         home.mkdir(exist_ok=True)
@@ -1052,6 +1060,8 @@ def systemd_command(
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
 ) -> list[str]:
+    global _SYSTEMD_MANAGER
+
     runner = shutil.which("systemd-run")
     if not runner:
         raise VerificationError("systemd-run is required for fail-closed confinement")
@@ -1079,44 +1089,57 @@ def systemd_command(
             raise VerificationError("invalid systemd resource property")
         common.append(f"--property={property_value}")
     sudo = shutil.which("sudo")
-    system_manager = sudo is not None and run([sudo, "-n", "true"], check=False).returncode == 0
-    systemctl = shutil.which("systemctl")
-    user_manager = (
-        systemctl is not None
-        and subprocess.run(
-            [systemctl, "--user", "show-environment"],
-            text=True,
-            capture_output=True,
-            check=False,
-        ).returncode
-        == 0
-    )
-    # Hosted runners expose a user manager that cannot apply all hardening
-    # properties (the transient child exits with EXIT_CAPABILITIES). Prefer the
-    # system manager when passwordless sudo is explicitly available, but run
-    # the confined child as the original unprivileged UID/GID.
-    if system_manager:
-        assert sudo is not None
-        result = [
-            sudo,
-            "-n",
-            runner,
-            *common,
-            f"--uid={os.getuid()}",
-            f"--gid={os.getgid()}",
-        ]
-    elif user_manager:
-        result = [runner, "--user", *common]
-    else:
-        raise VerificationError(
-            "neither passwordless systemd-run nor a user systemd manager is available "
-            "for confinement"
-        )
+    true = shutil.which("true")
+    if not true:
+        raise VerificationError("true is required to probe the systemd confinement manager")
+
+    def manager_command(manager: str, properties: list[str]) -> list[str]:
+        if manager == "system":
+            if sudo is None:
+                raise VerificationError("passwordless sudo disappeared during verification")
+            return [
+                sudo,
+                "-n",
+                runner,
+                *properties,
+                f"--uid={os.getuid()}",
+                f"--gid={os.getgid()}",
+            ]
+        return [runner, "--user", *properties]
+
+    if _SYSTEMD_MANAGER is None:
+        # Probe the properties that hosted user managers commonly reject, not
+        # merely access to sudo or the bus. The successful choice is stable for
+        # this verifier process and avoids repeating transient probe units.
+        probe_common = list(common)
+        if "--property=PrivateNetwork=yes" not in probe_common:
+            probe_common.append("--property=PrivateNetwork=yes")
+        candidates = ["system", "user"] if sudo is not None else ["user"]
+        for candidate in candidates:
+            probe = run(
+                [*manager_command(candidate, probe_common), "--", true],
+                cwd=cwd,
+                env=environment,
+                timeout=30,
+                check=False,
+            )
+            if probe.returncode == 0:
+                _SYSTEMD_MANAGER = candidate
+                break
+        if _SYSTEMD_MANAGER is None:
+            raise VerificationError(
+                "neither passwordless systemd-run nor a user systemd manager can apply "
+                "the required confinement properties"
+            )
+
+    result = manager_command(_SYSTEMD_MANAGER, common)
     for name in SANDBOX_ENVIRONMENT:
         value = environment.get(name)
         if value is not None:
+            if any(character in value for character in ("\0", "\n", "\r")):
+                raise VerificationError(f"invalid control character in sandbox environment {name}")
             result.append(f"--setenv={name}={value}")
-    return result + command
+    return [*result, "--", *command]
 
 
 def sandboxed_run(
@@ -1604,7 +1627,9 @@ def get_mathlib_cache(
             raise VerificationError("ProofWidgets replay marker is not a regular file")
         replay_writable_files.append(lock_hash.resolve())
     cache_env = base_env.copy()
-    cache_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(packages, closure)
+    cache_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(
+        packages, manifest_packages(package_dir)
+    )
     home = package_dir / ".lake" / "config" / "home"
     temporary = package_dir / ".lake" / "config" / "tmp"
     home.mkdir(exist_ok=True)

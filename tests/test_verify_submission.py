@@ -508,8 +508,12 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             {"name": "plausible", "url": "https://github.com/leanprover-community/plausible"},
             {"name": "candidate", "url": "https://github.com/example/candidate"},
         ]
+        authoritative = [
+            {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4"},
+            {"name": "plausible", "url": "https://github.com/leanprover-community/plausible"},
+        ]
         self.assertEqual(
-            json.loads(trusted_package_url_map(packages, {"mathlib", "plausible"})),
+            json.loads(trusted_package_url_map(packages, authoritative)),
             {
                 "mathlib": "https://github.com/leanprover-community/mathlib4",
                 "plausible": "https://github.com/leanprover-community/plausible",
@@ -517,15 +521,21 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         )
         packages[0]["url"] = "path:../mathlib"
         with self.assertRaisesRegex(VerificationError, "may not use a path dependency"):
-            trusted_package_url_map(packages, {"mathlib"})
+            trusted_package_url_map(packages, authoritative[:1])
+        packages[0]["url"] = "https://github.com/leanprover-community/mathlib4.git"
+        with self.assertRaisesRegex(VerificationError, "does not exactly match"):
+            trusted_package_url_map(packages, authoritative[:1])
+        with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
+            trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])
 
     def test_systemd_network_namespace_defaults_closed(self):
         def which(command):
-            return f"/usr/bin/{command}" if command in {"systemd-run", "systemctl"} else None
+            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
 
         with (
             mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
         ):
             confined = systemd_command(["true"], cwd=Path("/source"), environment={})
             networked = systemd_command(
@@ -544,14 +554,14 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
 
     def test_systemd_prefers_privileged_manager_and_drops_to_runner_identity(self):
         def which(command):
-            if command in {"systemd-run", "systemctl", "sudo"}:
+            if command in {"systemd-run", "sudo", "true"}:
                 return f"/usr/bin/{command}"
             return None
 
         with (
             mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
             mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
-            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
             mock.patch("scripts.verify_submission.os.getuid", return_value=1001),
             mock.patch("scripts.verify_submission.os.getgid", return_value=1002),
         ):
@@ -562,13 +572,59 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         self.assertIn("--gid=1002", command)
         self.assertNotIn("--user", command)
 
-    def test_systemd_applies_trusted_resource_properties(self):
+    def test_systemd_falls_back_to_capable_user_manager(self):
         def which(command):
-            return f"/usr/bin/{command}" if command in {"systemd-run", "systemctl"} else None
+            if command in {"systemd-run", "sudo", "true"}:
+                return f"/usr/bin/{command}"
+            return None
 
         with (
             mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+            mock.patch(
+                "scripts.verify_submission.run",
+                side_effect=[mock.Mock(returncode=1), mock.Mock(returncode=0)],
+            ),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+        ):
+            command = systemd_command(["true"], cwd=Path("/source"), environment={})
+
+        self.assertEqual(command[:2], ["/usr/bin/systemd-run", "--user"])
+        self.assertNotIn("--uid=", " ".join(command))
+
+    def test_systemd_rejects_incapable_managers_and_environment_controls(self):
+        def which(command):
+            if command in {"systemd-run", "sudo", "true"}:
+                return f"/usr/bin/{command}"
+            return None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=1)),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+            self.assertRaisesRegex(VerificationError, "can apply the required confinement"),
+        ):
+            systemd_command(["true"], cwd=Path("/source"), environment={})
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+            self.assertRaisesRegex(VerificationError, "invalid control character"),
+        ):
+            systemd_command(
+                ["true"],
+                cwd=Path("/source"),
+                environment={"LAKE_PKG_URL_MAP": "bad\nvalue"},
+            )
+
+    def test_systemd_applies_trusted_resource_properties(self):
+        def which(command):
+            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
         ):
             command = systemd_command(
                 ["true"],
