@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from scripts.verify_submission import (
     parse_issue_body,
     remove_untrusted_lake_state,
     require_protected_paths,
+    run,
     systemd_command,
     verify_official_revision,
 )
@@ -28,6 +30,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_command_output_capture_is_bounded(self):
+        with mock.patch("scripts.verify_submission.MAX_CAPTURE_BYTES", 1024):
+            proc = run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('a' * 4096); print('b' * 4096, file=sys.stderr)",
+                ]
+            )
+        self.assertIn("<output truncated", proc.stdout)
+        self.assertIn("<output truncated", proc.stderr)
+        self.assertTrue(proc.stdout.endswith("\n"))
+        self.assertLess(len(proc.stdout.encode()), 1200)
+        self.assertLess(len(proc.stderr.encode()), 1200)
+
     def test_issue_form_scalar_values(self) -> None:
         form = (REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "submit.yml").read_text()
         self.assertIn(
@@ -107,17 +124,16 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             writable_directories=[Path("/source/.lake/build")],
             executable_paths=[Path("/usr"), Path("/tools/comparator")],
             environment={"PATH": "/usr/bin", "HOME": "/source/.lake/config/home", "SECRET": "no"},
+            readable_directories=(Path("/source"),),
         )
-        self.assertEqual(command[:8], [
+        self.assertEqual(command[:4], [
             "/tools/landrun",
             "--best-effort",
-            "--ro",
-            "/",
-            "--rw",
-            "/dev",
             "--ldd",
             "--add-exec",
         ])
+        self.assertNotIn("/", command)
+        self.assertIn("/source", command)
         self.assertIn("/source/.lake/build", command)
         self.assertIn("/tools/comparator", command)
         self.assertNotIn("SECRET", command)
@@ -249,6 +265,23 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
         self.assertIn("--property=PrivateNetwork=yes", confined)
         self.assertNotIn("--property=PrivateNetwork=yes", networked)
+
+    def test_systemd_applies_trusted_resource_properties(self):
+        def which(command):
+            return f"/usr/bin/{command}" if command in {"systemd-run", "systemctl"} else None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+        ):
+            command = systemd_command(
+                ["true"],
+                cwd=Path("/source"),
+                environment={},
+                resource_properties=("MemoryMax=12G", "TasksMax=512"),
+            )
+        self.assertIn("--property=MemoryMax=12G", command)
+        self.assertIn("--property=TasksMax=512", command)
 
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")

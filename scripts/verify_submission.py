@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,8 @@ SANDBOX_ENVIRONMENT = (
     "LEAN_PATH",
     "LEAN_SRC_PATH",
     "LEAN_ABORT_ON_PANIC",
+    "MATHLIB_CACHE_DIR",
+    "MATHLIB_CACHE_GET_URL",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "PALOMAR_LANDRUN_REAL",
@@ -61,6 +64,28 @@ SANDBOX_ENVIRONMENT = (
 
 class VerificationError(RuntimeError):
     pass
+
+
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+
+
+def _bounded_stream_reader(stream: Any, destination: bytearray) -> None:
+    omitted = 0
+    try:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                break
+            destination.extend(chunk)
+            if len(destination) > MAX_CAPTURE_BYTES:
+                excess = len(destination) - MAX_CAPTURE_BYTES
+                del destination[:excess]
+                omitted += excess
+    finally:
+        stream.close()
+    if omitted:
+        marker = f"<output truncated; omitted {omitted} bytes>\n".encode()
+        destination[:0] = marker
 
 
 def now() -> str:
@@ -75,19 +100,49 @@ def run(
     timeout: int = 600,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    if check and proc.returncode:
-        detail = (proc.stderr or proc.stdout).strip()[-4000:]
-        raise VerificationError(f"{' '.join(command[:3])} failed ({proc.returncode}): {detail}")
-    return proc
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_bytes = bytearray()
+    stderr_bytes = bytearray()
+    readers = [
+        threading.Thread(target=_bounded_stream_reader, args=(proc.stdout, stdout_bytes), daemon=True),
+        threading.Thread(target=_bounded_stream_reader, args=(proc.stderr, stderr_bytes), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for reader in readers:
+            reader.join()
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
+    for reader in readers:
+        reader.join()
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    if check and completed.returncode:
+        streams = []
+        if completed.stdout.strip():
+            streams.append(f"stdout:\n{completed.stdout.strip()}")
+        if completed.stderr.strip():
+            streams.append(f"stderr:\n{completed.stderr.strip()}")
+        detail = "\n".join(streams)[-8000:]
+        raise VerificationError(
+            f"{' '.join(command[:3])} failed ({completed.returncode}): {detail}"
+        )
+    return completed
 
 
 def parse_issue_body(body: str) -> dict[str, str]:
@@ -683,24 +738,29 @@ def landrun_command(
     writable_directories: list[Path],
     executable_paths: list[Path],
     environment: dict[str, str],
+    writable_files: tuple[Path, ...] = (),
+    readable_directories: tuple[Path, ...] = (),
     unrestricted_network: bool = False,
 ) -> list[str]:
     """Build the outer, submission-wide Landrun policy."""
     result = [
         str(landrun),
         "--best-effort",
-        "--ro",
-        "/",
-        "--rw",
-        "/dev",
         "--ldd",
         "--add-exec",
     ]
+    for device in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
+        if Path(device).exists():
+            result.extend(["--rw", device])
     for name in SANDBOX_ENVIRONMENT:
         if name in environment:
             result.extend(["--env", name])
+    for directory in sorted(set(readable_directories)):
+        result.extend(["--ro", str(directory)])
     for directory in sorted(set(writable_directories)):
         result.extend(["--rwx", str(directory)])
+    for path in sorted(set(writable_files)):
+        result.extend(["--rw", str(path)])
     for path in sorted(set(executable_paths)):
         result.extend(["--rox", str(path)])
     if unrestricted_network:
@@ -734,6 +794,7 @@ def systemd_command(
     cwd: Path,
     environment: dict[str, str],
     unrestricted_network: bool = False,
+    resource_properties: tuple[str, ...] = (),
 ) -> list[str]:
     runner = shutil.which("systemd-run")
     if not runner:
@@ -749,6 +810,10 @@ def systemd_command(
     ]
     if not unrestricted_network:
         common.append("--property=PrivateNetwork=yes")
+    for property_value in resource_properties:
+        if not property_value or "\n" in property_value or "\r" in property_value:
+            raise VerificationError("invalid systemd resource property")
+        common.append(f"--property={property_value}")
     systemctl = shutil.which("systemctl")
     user_manager = (
         systemctl is not None
@@ -792,17 +857,21 @@ def sandboxed_run(
     writable_directories: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
+    writable_files: tuple[Path, ...] = (),
     timeout: int = 600,
     check: bool = True,
     unrestricted_network: bool = False,
+    resource_properties: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     verify_tool_snapshot(tools)
     confined = landrun_command(
         command,
         landrun=landrun,
         writable_directories=writable_directories,
+        writable_files=writable_files,
         executable_paths=executable_paths,
         environment=environment,
+        readable_directories=[cwd],
         unrestricted_network=unrestricted_network,
     )
     proc = run(
@@ -811,6 +880,7 @@ def sandboxed_run(
             cwd=cwd,
             environment=environment,
             unrestricted_network=unrestricted_network,
+            resource_properties=resource_properties,
         ),
         cwd=cwd,
         env=environment,
@@ -832,6 +902,15 @@ def verify_filesystem_confinement(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> None:
+    def failure_detail(proc: subprocess.CompletedProcess[str]) -> str:
+        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
+        if len(detail) > 500:
+            detail = f"{detail[:497]}..."
+        suffix = f" (exit {proc.returncode}"
+        if detail:
+            suffix += f": {detail}"
+        return f"{suffix})"
+
     require_protected_paths([probe], writable_directories)
     if probe.exists():
         raise VerificationError(f"filesystem confinement probe path already exists: {probe}")
@@ -852,7 +931,9 @@ def verify_filesystem_confinement(
     if allowed_created:
         allowed_probe.unlink()
     if allowed.returncode or not allowed_created:
-        raise VerificationError("outer Landrun did not permit its writable directory")
+        raise VerificationError(
+            "outer Landrun did not permit its writable directory" + failure_detail(allowed)
+        )
 
     denied = sandboxed_run(
         [str(touch), str(probe)],
@@ -868,7 +949,9 @@ def verify_filesystem_confinement(
     if escaped:
         probe.unlink()
     if escaped or denied.returncode == 0:
-        raise VerificationError("outer Landrun filesystem policy was not enforced")
+        raise VerificationError(
+            "outer Landrun filesystem policy was not enforced" + failure_detail(denied)
+        )
 
 
 def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path]:
@@ -951,6 +1034,7 @@ def get_mathlib_cache(
     writable_directories: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
+    resource_properties: tuple[str, ...] = (),
 ) -> None:
     """Run the cache client only from a clean, pinned official Mathlib checkout."""
     packages = manifest_packages(source)
@@ -1026,6 +1110,7 @@ def get_mathlib_cache(
             tools=tools,
             timeout=1800,
             unrestricted_network=True,
+            resource_properties=resource_properties,
         )
     finally:
         if nested_packages.is_symlink():
