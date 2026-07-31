@@ -41,7 +41,7 @@ jobs:
           go-version: "1.24.0"
       - name: Install pinned Landrun and Lean
         run: |
-          go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
           curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/elan.tar.gz" \
             https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz

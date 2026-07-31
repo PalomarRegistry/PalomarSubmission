@@ -116,6 +116,9 @@ while network access is available.
 Comparator continues to use its own Landrun domains for its separate challenge,
 solution, and export operations. Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
+The pinned Landrun binary is built without cgo so its pre-Landlock-v8
+all-thread enforcement does not enumerate `/proc/$PID/task`; nested confinement
+therefore remains compatible with the outer process-read denial.
 The outer Landrun process is launched in an unprivileged systemd unit that also
 applies the private-network and address-family policy, a private device and
 temporary-file view, `NoNewPrivileges`, and process-information hiding.

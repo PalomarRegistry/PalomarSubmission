@@ -110,6 +110,23 @@ class VerifySubmissionTests(unittest.TestCase):
             form,
         )
 
+    def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
+        expected = (
+            "CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@"
+            "811cfff51ceaf3d9843708aa6d22e9b84ccac8b4"
+        )
+        workflows = REPOSITORY_ROOT / ".github" / "workflows"
+        installers = []
+        for path in workflows.glob("*.yml"):
+            text = path.read_text()
+            if "github.com/zouuup/landrun/cmd/landrun@" in text:
+                installers.append(path.name)
+                self.assertIn(expected, text, path.name)
+        self.assertEqual(
+            sorted(installers),
+            ["ci.yml", "compatibility.yml", "render-challenge.yml", "submission.yml"],
+        )
+
     def test_issue_form_sections(self):
         body = """### Repository URL
 
