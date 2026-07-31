@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest import mock
 
 from scripts.verify_submission import (
     VerificationError,
+    _deadline_timeout,
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
@@ -34,6 +36,19 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_phase_timeout_is_capped_by_global_deadline(self):
+        with (
+            mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),
+            mock.patch("scripts.verify_submission.time.monotonic", return_value=90.0),
+        ):
+            self.assertEqual(_deadline_timeout(600, ["probe"]), 10)
+        with (
+            mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),
+            mock.patch("scripts.verify_submission.time.monotonic", return_value=101.0),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
+            _deadline_timeout(600, ["probe"])
+
     def test_command_output_capture_is_bounded(self):
         with mock.patch("scripts.verify_submission.MAX_CAPTURE_BYTES", 1024):
             proc = run(

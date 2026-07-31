@@ -56,6 +56,7 @@ class SandboxIntegrationTests(unittest.TestCase):
                 python,
                 landrun,
                 touch,
+                frozen,
             ]
             for raw in (
                 "/usr",

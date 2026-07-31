@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,18 @@ class VerificationError(RuntimeError):
 
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+EXECUTION_BUDGET_SECONDS = 330 * 60
+_EXECUTION_DEADLINE: float | None = None
+
+
+def _deadline_timeout(requested: int, command: list[str]) -> int:
+    """Cap one phase by the verifier-wide wall-clock deadline when active."""
+    if _EXECUTION_DEADLINE is None:
+        return requested
+    remaining = int(_EXECUTION_DEADLINE - time.monotonic())
+    if remaining < 1:
+        raise subprocess.TimeoutExpired(command, EXECUTION_BUDGET_SECONDS)
+    return min(requested, remaining)
 
 
 def _bounded_stream_reader(stream: Any, destination: bytearray) -> None:
@@ -115,6 +128,7 @@ def run(
     timeout: int = 600,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    timeout = _deadline_timeout(timeout, command)
     proc = subprocess.Popen(
         command,
         cwd=cwd,
@@ -1073,6 +1087,7 @@ def sandboxed_run(
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
+    timeout = _deadline_timeout(timeout, command)
     verify_tool_snapshot(tools)
     confined = landrun_command(
         command,
@@ -1875,11 +1890,15 @@ def compile_canonical_challenge(
 
 
 def execute(args: argparse.Namespace) -> int:
+    global _EXECUTION_DEADLINE
+
     output = Path(args.output).resolve()
     work = Path(args.work_dir).resolve()
     report = json.loads(output.read_text(encoding="utf-8"))
     if report.get("status") != "pending":
         return 0
+    previous_deadline = _EXECUTION_DEADLINE
+    _EXECUTION_DEADLINE = time.monotonic() + EXECUTION_BUDGET_SECONDS
     source = work / "source"
     report.update(
         {
@@ -2010,6 +2029,7 @@ def execute(args: argparse.Namespace) -> int:
                 touch,
             ]
         )
+        report["stage"] = "confinement-initial"
         # `--best-effort` is accepted only after the composed outer boundary
         # proves that its positive and negative controls work on this runner.
         # No candidate-controlled Lean or Lake code executes before this probe.
@@ -2027,9 +2047,11 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
         )
+        report["stage"] = "dependency-provenance"
         packages = manifest_packages(source)
         allowlist = package_allowlist(source, packages, base_env=env)
         reject_untrusted_package_artifacts(source, packages, allowlist)
+        report["stage"] = "trusted-cache"
         get_mathlib_cache(
             source,
             base_env=env,
@@ -2040,6 +2062,7 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
         )
+        report["stage"] = "trusted-roots"
         build_allowlisted_roots(
             source,
             packages=packages,
@@ -2058,6 +2081,7 @@ def execute(args: argparse.Namespace) -> int:
             directory for directory in writable_directories if directory not in trusted_directories
         ]
         executable_paths = sorted({*executable_paths, *trusted_build_directories})
+        report["stage"] = "canonical-challenge"
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
             source,
@@ -2072,6 +2096,7 @@ def execute(args: argparse.Namespace) -> int:
         )
         readable_paths = sorted({*readable_paths, canonical_olean.parent})
         require_protected_paths([canonical_olean], candidate_writable)
+        report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
             source,
             database=Path(args.database).resolve(),
@@ -2100,6 +2125,7 @@ def execute(args: argparse.Namespace) -> int:
             guarded_write()
             return 0
 
+        report["stage"] = "confinement-final"
         verify_sandbox_confinement(
             work / "landrun-write-denial-probe",
             work / "landrun-read-denial-probe",
@@ -2116,6 +2142,7 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
 
+        report["stage"] = "candidate-configuration"
         env["LEAN_PATH"] = lake_environment_value(
             "LEAN_PATH",
             source=source,
@@ -2147,6 +2174,7 @@ def execute(args: argparse.Namespace) -> int:
             trusted_lean_paths,
             env["LEAN_PATH"],
         )
+        report["stage"] = "comparator"
         proc = sandboxed_run(
             [str(comparator), "comparator.json"],
             cwd=source,
@@ -2180,6 +2208,8 @@ def execute(args: argparse.Namespace) -> int:
         report["status"] = "error"
         report["errors"].append(str(error))
         guarded_write()
+    finally:
+        _EXECUTION_DEADLINE = previous_deadline
     return 0
 
 

@@ -161,8 +161,9 @@ components infallible.
 
 Current protocol limits include public GitHub repositories, `lakefile.toml` at
 the submission root, a 500 MiB checked-out-source cap, a 100 KiB / 1,000-line
-hard cap on `Challenge.lean`, standard fresh Lake build locations, and a
-180-minute comparison timeout within a 350-minute job budget. Verification
+hard cap on `Challenge.lean`, standard fresh Lake build locations, a
+180-minute comparison timeout, and a 330-minute verifier-wide wall-clock
+deadline within a 350-minute job budget. Verification
 returns an infrastructure error or rejection—not a best-effort pass—when a
 toolchain is unsupported, provenance is ambiguous, confinement is unavailable,
 or execution times out.

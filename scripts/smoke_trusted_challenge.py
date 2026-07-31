@@ -38,12 +38,18 @@ def main() -> int:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--landrun", type=Path, required=True)
+    parser.add_argument("--comparator", type=Path, required=True)
+    parser.add_argument("--lean4export", type=Path, required=True)
+    parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
 
     source = args.source.resolve(strict=True)
     database = args.database.resolve(strict=True)
     landrun = args.landrun.resolve(strict=True)
+    comparator = args.comparator.resolve(strict=True)
+    lean4export = args.lean4export.resolve(strict=True)
+    adapter = args.adapter.resolve(strict=True)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
@@ -72,7 +78,10 @@ def main() -> int:
     temporary.mkdir()
     environment.update(
         {
+            "COMPARATOR_LANDRUN": str(adapter),
+            "COMPARATOR_LEAN4EXPORT": str(lean4export),
             "HOME": str(home.resolve()),
+            "PALOMAR_LANDRUN_REAL": str(landrun),
             "TMPDIR": str(temporary.resolve()),
             "LEAN_ABORT_ON_PANIC": "1",
         }
@@ -87,6 +96,9 @@ def main() -> int:
         printenv,
         touch,
         landrun,
+        comparator,
+        lean4export,
+        adapter,
     ]
     for raw in ("/usr", "/bin", "/lib", "/lib64", "/run/current-system/sw", "/nix/store"):
         path = Path(raw)
@@ -94,7 +106,20 @@ def main() -> int:
             executable_paths.append(path.resolve())
     executable_paths = sorted(set(executable_paths))
     readable_paths = sorted({source, *system_readable_paths()})
-    tools = tool_snapshot([Path(__file__).resolve(), lean, lake, python, printenv, touch, landrun])
+    tools = tool_snapshot(
+        [
+            Path(__file__).resolve(),
+            lean,
+            lake,
+            python,
+            printenv,
+            touch,
+            landrun,
+            comparator,
+            lean4export,
+            adapter,
+        ]
+    )
 
     verify_sandbox_confinement(
         work / "initial-write-denied",
@@ -214,6 +239,9 @@ def main() -> int:
         trusted_lean_paths,
         environment["LEAN_PATH"],
     )
+    # These builds exercise arbitrary proof-dependency compatibility. Lake may
+    # put workspace directories before the inherited path while building; the
+    # protected ordering is asserted at Comparator export time below.
     for target in ("Challenge", "Solution"):
         sandboxed_run(
             [str(lake), "build", target],
@@ -227,6 +255,22 @@ def main() -> int:
             timeout=7200,
         )
 
+    comparison = sandboxed_run(
+        [str(comparator), "comparator.json"],
+        cwd=source,
+        environment=environment,
+        landrun=landrun,
+        writable_directories=candidate_writable,
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        tools=tools,
+        timeout=7200,
+        check=False,
+    )
+    if comparison.returncode:
+        detail = (comparison.stdout + "\n" + comparison.stderr).strip()[-4000:]
+        raise VerificationError(f"cold-build Comparator integration failed: {detail}")
+
     print(
         json.dumps(
             {
@@ -235,6 +279,7 @@ def main() -> int:
                 "challenge_sources": audit["source_count"],
                 "challenge_dependencies": audit["dependencies"],
                 "project_dependencies": len(packages),
+                "comparator": "pass",
             },
             indent=2,
         )

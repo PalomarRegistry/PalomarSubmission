@@ -53,13 +53,14 @@ The maintained test surfaces are:
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
   accepted `erdos-unit-distance-comparator` fixture at commit
   `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
-  Lake-file-based, and ordinary proof dependencies.
+  Lake-file-based, and ordinary proof dependencies, followed by the real pinned
+  Comparator and toolchain-matched `lean4export` under the nested sandbox.
 
 The cold fixture passed locally with Lean `v4.31.0-rc2`, Landrun, 16 pinned
 project dependencies, canonical Challenge compilation, source provenance
 audit, the complete confinement probe set, and candidate Challenge/Solution
-builds. The pull-request workflow must reproduce that result on the supported
-GitHub-hosted runner before merge.
+builds and comparison. The pull-request workflow must reproduce that result on
+the supported GitHub-hosted runner before merge.
 
 ## Component review
 
