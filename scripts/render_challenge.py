@@ -988,6 +988,13 @@ def execute(args: argparse.Namespace) -> int:
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
         env.pop("LAKE_PKG_URL_MAP", None)
+        env.update(
+            {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
         env["LEAN_ABORT_ON_PANIC"] = "1"
         elan_command = shutil.which("elan", path=env["PATH"])
         if not elan_command:

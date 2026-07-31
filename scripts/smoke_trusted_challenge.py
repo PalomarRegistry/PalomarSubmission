@@ -83,6 +83,9 @@ def main() -> int:
         {
             "COMPARATOR_LANDRUN": str(adapter),
             "COMPARATOR_LEAN4EXPORT": str(lean4export),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
             "HOME": str(home.resolve()),
             "PALOMAR_LANDRUN_REAL": str(landrun),
             "TMPDIR": str(temporary.resolve()),

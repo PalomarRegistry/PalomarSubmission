@@ -74,6 +74,9 @@ SANDBOX_ENVIRONMENT = (
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "PALOMAR_LANDRUN_REAL",
@@ -1020,9 +1023,10 @@ def landrun_command(
         if value is not None:
             if any(character in value for character in ("\0", "\n", "\r")):
                 raise VerificationError(f"invalid control character in sandbox environment {name}")
-            # Pass the verified value explicitly. The outer systemd manager
-            # does not otherwise inherit caller variables into its service.
-            result.extend(["--env", f"{name}={value}"])
+            # Landrun looks the value up in the environment installed on the
+            # transient service. Passing JSON values inline would let its
+            # string-slice parser split them at commas.
+            result.extend(["--env", name])
     for path in sorted({*(readable_paths or []), *readable_directories}):
         result.extend(["--ro", str(path)])
     for directory in sorted(set(writable_directories)):
@@ -2016,6 +2020,9 @@ def execute(args: argparse.Namespace) -> int:
             {
                 "COMPARATOR_LANDRUN": str(adapter),
                 "COMPARATOR_LEAN4EXPORT": str(lean4export),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
                 "PALOMAR_LANDRUN_REAL": str(landrun),
                 "LEAN_ABORT_ON_PANIC": "1",
             }
