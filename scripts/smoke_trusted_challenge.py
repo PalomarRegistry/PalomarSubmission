@@ -55,6 +55,7 @@ def main() -> int:
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
+    environment.pop("LAKE_PKG_URL_MAP", None)
 
     lean_command = shutil.which("lean", path=environment["PATH"])
     if not lean_command:

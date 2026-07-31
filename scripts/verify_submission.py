@@ -73,6 +73,7 @@ SANDBOX_ENVIRONMENT = (
     "LEAN_ABORT_ON_PANIC",
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
+    "LAKE_PKG_URL_MAP",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "PALOMAR_LANDRUN_REAL",
@@ -756,6 +757,23 @@ def package_checkout(source: Path, package: dict[str, str]) -> Path:
     return (source / ".lake" / "packages" / package["name"]).resolve()
 
 
+def trusted_package_url_map(
+    packages: list[dict[str, str]], trusted_names: set[str]
+) -> str:
+    """Lock trusted Lake loading to the already verified flattened checkouts."""
+    by_name = {package["name"]: package for package in packages}
+    urls: dict[str, str] = {}
+    for name in sorted(trusted_names):
+        package = by_name.get(name)
+        if package is None:
+            raise VerificationError(f"trusted package {name!r} is absent from the manifest")
+        url = package["url"]
+        if url.startswith("path:"):
+            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
+        urls[name] = url
+    return json.dumps(urls, sort_keys=True, separators=(",", ":"))
+
+
 def package_lake_directories(source: Path, name: str) -> tuple[Path, Path]:
     package = next((item for item in manifest_packages(source) if item["name"] == name), None)
     if package is None:
@@ -841,6 +859,7 @@ def build_allowlisted_roots(
             raise VerificationError(f"trusted root {repository} has an incomplete closure")
         nested = nested_package_links(source, root_dir, allowed_names=closure)
         build_env = base_env.copy()
+        build_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(packages, closure)
         home = root_dir / ".lake" / "config" / "home"
         temporary = root_dir / ".lake" / "config" / "tmp"
         home.mkdir(exist_ok=True)
@@ -1585,6 +1604,7 @@ def get_mathlib_cache(
             raise VerificationError("ProofWidgets replay marker is not a regular file")
         replay_writable_files.append(lock_hash.resolve())
     cache_env = base_env.copy()
+    cache_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(packages, closure)
     home = package_dir / ".lake" / "config" / "home"
     temporary = package_dir / ".lake" / "config" / "tmp"
     home.mkdir(exist_ok=True)
@@ -1961,6 +1981,7 @@ def execute(args: argparse.Namespace) -> int:
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
         env = os.environ.copy()
+        env.pop("LAKE_PKG_URL_MAP", None)
         env.update(
             {
                 "COMPARATOR_LANDRUN": str(adapter),

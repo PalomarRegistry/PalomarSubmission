@@ -33,6 +33,7 @@ from scripts.verify_submission import (
     require_protected_paths,
     run,
     systemd_command,
+    trusted_package_url_map,
     verify_official_revision,
 )
 
@@ -500,6 +501,23 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
             with self.assertRaisesRegex(VerificationError, "may not live under .lake"):
                 materialize_packages(source, base_env={"PATH": "/usr/bin"})
+
+    def test_trusted_package_url_map_uses_verified_manifest_urls(self):
+        packages = [
+            {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4"},
+            {"name": "plausible", "url": "https://github.com/leanprover-community/plausible"},
+            {"name": "candidate", "url": "https://github.com/example/candidate"},
+        ]
+        self.assertEqual(
+            json.loads(trusted_package_url_map(packages, {"mathlib", "plausible"})),
+            {
+                "mathlib": "https://github.com/leanprover-community/mathlib4",
+                "plausible": "https://github.com/leanprover-community/plausible",
+            },
+        )
+        packages[0]["url"] = "path:../mathlib"
+        with self.assertRaisesRegex(VerificationError, "may not use a path dependency"):
+            trusted_package_url_map(packages, {"mathlib"})
 
     def test_systemd_network_namespace_defaults_closed(self):
         def which(command):
