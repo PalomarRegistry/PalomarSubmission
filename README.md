@@ -12,13 +12,19 @@ repository itself carries the metadata and comparator configuration. CI then:
 3. runs [Comparator](https://github.com/leanprover/comparator) under its landrun
    sandbox, using the three standard permitted axioms;
 4. computes the transitive source closure of `Challenge.lean`;
-5. verifies that every challenge source comes from Lean core, Mathlib/Tau Ceti,
-   or an exact repository commit already indexed in Palomar;
+5. independently compiles the Challenge against frozen, canonical
+   Mathlib/Tau Ceti closure output and verifies every transitive source;
 6. posts a machine-readable report and marks a passing issue
    `status:awaiting-review`.
 
-The proof project may use arbitrary pinned Git dependencies. Only the trusted
-statement surface—the transitive imports of `Challenge.lean`—is restricted.
+The proof project may use arbitrary pinned Git dependencies that build from
+source inside Palomar's fresh Lake build directories. The Challenge is compiled
+separately without candidate Lake configuration, against only verified
+allowlisted dependencies; its protected module is the statement Comparator
+exports. Common submitted prebuilt artifacts are rejected early, and no
+candidate build output can replace the protected statement or frozen trusted
+dependency modules. Only this statement surface is restricted; arbitrary pinned
+dependencies remain available to the proof in `Solution.lean`.
 
 AI review does not run in CI. An operator runs
 [`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer), which consumes

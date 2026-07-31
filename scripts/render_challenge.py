@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
-from scripts.verify_submission import (
+from scripts.verify_submission import (  # noqa: E402
     GITHUB_RE,
     MAX_SOURCE_BYTES,
     SHA_RE,
@@ -679,8 +679,9 @@ def static_html_sanitize(
     )
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
     for declaration in declarations or []:
+        escaped_declaration = re.escape(html.escape(declaration, quote=True))
         marker = re.compile(
-            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{re.escape(html.escape(declaration, quote=True))}\1[^>]*\bid\s*=",
+            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{escaped_declaration}\1[^>]*\bid\s*=",
             flags=re.IGNORECASE,
         )
         if not marker.search(text):
@@ -759,13 +760,19 @@ def static_html_sanitize(
     )
     text = re.sub(r"(<head\b[^>]*>)", rf"\1\n    {scripts}", text, count=1, flags=re.IGNORECASE)
     surface_style = """<style id="palomar-declaration-style">
-      html { height: auto !important; min-height: 100%; overflow: auto !important; overscroll-behavior: contain; }
-      body { height: auto !important; min-height: 100%; margin: 0; overflow: visible !important; }
+      html { height: auto !important; min-height: 100%; overflow: auto !important;
+        overscroll-behavior: contain; }
+      body { height: auto !important; min-height: 100%; margin: 0;
+        overflow: visible !important; }
       .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
       .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
       .palomar-declaration-surface .md-text::before,
       .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
-      .palomar-hover { padding: .65rem !important; border: 1px solid #888 !important; border-radius: .35rem; background: #fff !important; color: #24292e !important; box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%); }
+      .palomar-hover {
+        padding: .65rem !important; border: 1px solid #888 !important;
+        border-radius: .35rem; background: #fff !important; color: #24292e !important;
+        box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%);
+      }
       .palomar-hover .popup,
       .palomar-hover .hover-info,
       .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }
@@ -1202,6 +1209,14 @@ def execute(args: argparse.Namespace) -> int:
         landrun = Path(args.landrun).resolve(strict=True)
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
+        env.pop("LAKE_PKG_URL_MAP", None)
+        env.update(
+            {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
         env["LEAN_ABORT_ON_PANIC"] = "1"
         env["GIT_CONFIG_GLOBAL"] = "/dev/null"
         env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -1355,7 +1370,10 @@ def execute(args: argparse.Namespace) -> int:
         files, tree_hash = artifact_manifest(clean_output)
         validate_build_metadata_files(writable_files)
         embedded_manifest = load_json_object(clean_output / "artifact-manifest.json")
-        if embedded_manifest.get("files") != files or embedded_manifest.get("artifact_tree_sha256") != tree_hash:
+        if (
+            embedded_manifest.get("files") != files
+            or embedded_manifest.get("artifact_tree_sha256") != tree_hash
+        ):
             raise VerificationError("sanitized artifact manifest is inconsistent")
         surface = load_json_object(clean_output / "challenge-metadata.json")
         result_dir = work / "result"

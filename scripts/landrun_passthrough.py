@@ -37,6 +37,11 @@ FLAG_OPTIONS = {
     "--add-exec",
     "-add-exec",
 }
+FIXED_ENVIRONMENT = (
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "GIT_CONFIG_NOSYSTEM=1",
+    "GIT_TERMINAL_PROMPT=0",
+)
 
 
 def command_index(arguments: list[str]) -> int:
@@ -58,14 +63,21 @@ def command_index(arguments: list[str]) -> int:
     raise ValueError("missing sandboxed command")
 
 
+def adapted_arguments(arguments: list[str]) -> list[str]:
+    """Inject fixed Git isolation and exactly one Landrun delimiter."""
+    index = command_index(arguments)
+    option_end = index - 1 if index and arguments[index - 1] == "--" else index
+    fixed = [item for value in FIXED_ENVIRONMENT for item in ("--env", value)]
+    return [*arguments[:option_end], *fixed, "--", *arguments[index:]]
+
+
 def main() -> int:
     try:
         real = Path(os.environ["PALOMAR_LANDRUN_REAL"]).resolve(strict=True)
         if not real.is_file():
             raise ValueError("PALOMAR_LANDRUN_REAL is not a file")
         arguments = sys.argv[1:]
-        index = command_index(arguments)
-        os.execv(str(real), [str(real), *arguments[:index], "--", *arguments[index:]])
+        os.execv(str(real), [str(real), *adapted_arguments(arguments)])
     except (KeyError, OSError, ValueError) as error:
         print(f"landrun adapter: {error}", file=sys.stderr)
         return 2

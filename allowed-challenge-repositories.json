@@ -14,6 +14,9 @@
         "FormalFrontier/TauCeti"
       ],
       "official_ref": "refs/heads/main",
+      "accepted_revisions": [
+        "221bb56a017bb794421eac4fa543d7a5e85add75"
+      ],
       "include_pinned_manifest_closure": true,
       "trust_level": "qualified"
     }

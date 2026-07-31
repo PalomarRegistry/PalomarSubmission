@@ -43,6 +43,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Record verification deadline origin
+        run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
         with:
@@ -100,7 +103,7 @@ jobs:
       - name: Build pinned landrun
         if: steps.prepare.outputs.ready == 'true'
         run: |
-          go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build pinned Comparator
@@ -161,6 +164,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download mechanical report
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: mechanical-report
@@ -171,4 +175,6 @@ jobs:
         run: |
           python scripts/report_issue.py \
             --report report/mechanical-report.json \
+            --allow-missing-report \
+            --issue-number "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}"
