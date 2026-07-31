@@ -679,8 +679,9 @@ def static_html_sanitize(
     )
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
     for declaration in declarations or []:
+        escaped_declaration = re.escape(html.escape(declaration, quote=True))
         marker = re.compile(
-            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{re.escape(html.escape(declaration, quote=True))}\1[^>]*\bid\s*=",
+            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{escaped_declaration}\1[^>]*\bid\s*=",
             flags=re.IGNORECASE,
         )
         if not marker.search(text):
@@ -759,13 +760,19 @@ def static_html_sanitize(
     )
     text = re.sub(r"(<head\b[^>]*>)", rf"\1\n    {scripts}", text, count=1, flags=re.IGNORECASE)
     surface_style = """<style id="palomar-declaration-style">
-      html { height: auto !important; min-height: 100%; overflow: auto !important; overscroll-behavior: contain; }
-      body { height: auto !important; min-height: 100%; margin: 0; overflow: visible !important; }
+      html { height: auto !important; min-height: 100%; overflow: auto !important;
+        overscroll-behavior: contain; }
+      body { height: auto !important; min-height: 100%; margin: 0;
+        overflow: visible !important; }
       .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
       .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
       .palomar-declaration-surface .md-text::before,
       .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
-      .palomar-hover { padding: .65rem !important; border: 1px solid #888 !important; border-radius: .35rem; background: #fff !important; color: #24292e !important; box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%); }
+      .palomar-hover {
+        padding: .65rem !important; border: 1px solid #888 !important;
+        border-radius: .35rem; background: #fff !important; color: #24292e !important;
+        box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%);
+      }
       .palomar-hover .popup,
       .palomar-hover .hover-info,
       .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }

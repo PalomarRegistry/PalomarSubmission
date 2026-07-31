@@ -124,7 +124,20 @@ class RenderChallengeTests(unittest.TestCase):
             solution = root / "Solution.lean"
             comparator = root / "comparator.json"
             challenge.write_text(
-                '''-- /-! not a module doc -/\nimport Mathlib\nimport Batteries\n\n/-!\n# Module title\n\nMetadata body.\n-/\nnamespace Example\n/-- Headline. -/\ntheorem headline : True := trivial\nend Example\n''',
+                """-- /-! not a module doc -/
+import Mathlib
+import Batteries
+
+/-!
+# Module title
+
+Metadata body.
+-/
+namespace Example
+/-- Headline. -/
+theorem headline : True := trivial
+end Example
+""",
                 encoding="utf-8",
             )
             solution.write_text("import ErdosUnitDistance\n", encoding="utf-8")
@@ -155,7 +168,8 @@ class RenderChallengeTests(unittest.TestCase):
     def test_static_html_binds_the_compared_declaration_and_scroll_surface(self):
         html_text = '''<!doctype html><html><head><base href="../"></head><body>
 <section class="code-content"><div class="md-text"><p>Headline.</p></div>
-<code class="hl lean block"><span class="const token" data-binding="const-Example.headline" id="Example___headline">headline</span></code>
+<code class="hl lean block"><span class="const token"
+data-binding="const-Example.headline" id="Example___headline">headline</span></code>
 </section></body></html>'''
         sanitized = static_html_sanitize(
             html_text,
