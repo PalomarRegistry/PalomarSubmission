@@ -775,9 +775,15 @@ def trusted_package_url_map(
         expected_url = expected["url"]
         if actual["url"].startswith("path:") or expected_url.startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        if actual["url"] != expected_url:
+        actual_repository = github_repository(actual["url"])
+        expected_repository = github_repository(expected_url)
+        if (
+            actual_repository is None
+            or expected_repository is None
+            or actual_repository.lower() != expected_repository.lower()
+        ):
             raise VerificationError(
-                f"trusted package {name!r} URL does not exactly match its authenticated manifest"
+                f"trusted package {name!r} URL does not match its authenticated repository"
             )
         urls[name] = expected_url
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))

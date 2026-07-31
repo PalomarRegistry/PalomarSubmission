@@ -533,7 +533,12 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         with self.assertRaisesRegex(VerificationError, "may not use a path dependency"):
             trusted_package_url_map(packages, authoritative[:1])
         packages[0]["url"] = "https://github.com/leanprover-community/mathlib4.git"
-        with self.assertRaisesRegex(VerificationError, "does not exactly match"):
+        self.assertEqual(
+            json.loads(trusted_package_url_map(packages, authoritative[:1])),
+            {"mathlib": "https://github.com/leanprover-community/mathlib4"},
+        )
+        packages[0]["url"] = "https://github.com/attacker/mathlib4"
+        with self.assertRaisesRegex(VerificationError, "does not match"):
             trusted_package_url_map(packages, authoritative[:1])
         with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
             trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])

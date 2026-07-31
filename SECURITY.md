@@ -78,7 +78,8 @@ with symlinks to the exact independently verified official closure. Other
 allowlisted roots are built from their own verified configuration. Candidate
 Lake configuration never runs during either operation. Trusted-root Lake URL
 resolution is pinned to that root's authenticated manifest and is accepted only
-when the flattened submission manifest uses the exact same URL. The official
+when the flattened submission manifest names the same canonical GitHub
+repository. The official
 Mathlib plan also replays the downloaded cache and receives write access to the
 one exact ProofWidgets replay-marker file it generates; qualified roots receive
 no write access to Mathlib source or build output. Trusted build directories are
