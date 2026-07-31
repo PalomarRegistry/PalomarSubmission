@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -111,17 +112,23 @@ class VerifySubmissionTests(unittest.TestCase):
         )
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
-        expected = (
-            "CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@"
-            "811cfff51ceaf3d9843708aa6d22e9b84ccac8b4"
+        expected = re.compile(
+            r"^\s*CGO_ENABLED=0 go install github\.com/zouuup/landrun/cmd/landrun@"
+            r"811cfff51ceaf3d9843708aa6d22e9b84ccac8b4\s*$"
         )
         workflows = REPOSITORY_ROOT / ".github" / "workflows"
         installers = []
-        for path in workflows.glob("*.yml"):
+        for path in [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]:
             text = path.read_text()
-            if "github.com/zouuup/landrun/cmd/landrun@" in text:
+            lines = [
+                line
+                for line in text.splitlines()
+                if "go install github.com/zouuup/landrun/cmd/landrun@" in line
+            ]
+            if lines:
                 installers.append(path.name)
-                self.assertIn(expected, text, path.name)
+                for line in lines:
+                    self.assertRegex(line, expected, path.name)
         self.assertEqual(
             sorted(installers),
             ["ci.yml", "compatibility.yml", "render-challenge.yml", "submission.yml"],
@@ -556,6 +563,9 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         )
         packages[0]["url"] = "https://github.com/attacker/mathlib4"
         with self.assertRaisesRegex(VerificationError, "does not match"):
+            trusted_package_url_map(packages, authoritative[:1])
+        authoritative[0]["url"] = "git://github.com/leanprover-community/mathlib4"
+        with self.assertRaisesRegex(VerificationError, "credential-free HTTPS"):
             trusted_package_url_map(packages, authoritative[:1])
         with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
             trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])

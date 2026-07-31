@@ -765,6 +765,7 @@ def trusted_package_url_map(
     packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
     """Pin trusted Lake dependency remotes to the authenticated root manifest."""
+    _roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     urls: dict[str, str] = {}
     for expected in sorted(authoritative_packages, key=lambda package: package["name"]):
@@ -775,12 +776,26 @@ def trusted_package_url_map(
         expected_url = expected["url"]
         if actual["url"].startswith("path:") or expected_url.startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
+        parsed_expected = urlparse(expected_url)
+        if (
+            parsed_expected.scheme != "https"
+            or parsed_expected.netloc.lower() != "github.com"
+            or parsed_expected.username
+            or parsed_expected.password
+            or parsed_expected.query
+            or parsed_expected.fragment
+        ):
+            raise VerificationError(
+                f"trusted package {name!r} authenticated URL is not a credential-free "
+                "HTTPS GitHub remote"
+            )
         actual_repository = github_repository(actual["url"])
         expected_repository = github_repository(expected_url)
         if (
             actual_repository is None
             or expected_repository is None
-            or actual_repository.lower() != expected_repository.lower()
+            or canonical_repository(actual_repository, aliases).lower()
+            != canonical_repository(expected_repository, aliases).lower()
         ):
             raise VerificationError(
                 f"trusted package {name!r} URL does not match its authenticated repository"
@@ -1252,6 +1267,37 @@ def verify_sandbox_confinement(
     if allowed.returncode or not allowed_created:
         read_probe.unlink(missing_ok=True)
         raise VerificationError("outer sandbox did not permit its writable directory" + detail(allowed))
+
+    nested_probe = writable_directories[0] / ".palomar-nested-landrun-probe"
+    if nested_probe.exists():
+        read_probe.unlink(missing_ok=True)
+        raise VerificationError(f"nested confinement probe path already exists: {nested_probe}")
+    inner = landrun_command(
+        [str(touch), str(nested_probe)],
+        landrun=landrun,
+        writable_directories=writable_directories,
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        environment=environment,
+        readable_directories=[cwd],
+    )
+    nested = sandboxed_run(
+        inner,
+        cwd=cwd,
+        environment=environment,
+        landrun=landrun,
+        writable_directories=writable_directories,
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        tools=tools,
+        check=False,
+    )
+    nested_created = nested_probe.is_file()
+    if nested_created:
+        nested_probe.unlink()
+    if nested.returncode or not nested_created:
+        read_probe.unlink(missing_ok=True)
+        raise VerificationError("nested Landrun confinement is unavailable" + detail(nested))
 
     denied = sandboxed_run(
         [str(touch), str(write_probe)],

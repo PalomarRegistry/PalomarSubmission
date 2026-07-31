@@ -102,7 +102,9 @@ read/execute access to the selected Lean toolchain, pinned verifier programs,
 and immutable system/Python runtime directories, and write/execute access only
 to the fresh build and Lake-configuration directories. Unrelated runner
 temporary directories, home-directory contents, the report, and sibling
-process state are outside the read allowlist.
+process state are outside the read allowlist. Sandboxed Git ignores system and
+global configuration and cannot prompt for credentials, preventing ambient
+runner configuration from rewriting authenticated remotes.
 
 Normal configuration and comparison also run in a systemd private network
 namespace; Landrun independently restricts supported TCP operations. The
@@ -125,9 +127,9 @@ temporary-file view, `NoNewPrivileges`, and process-information hiding.
 Landrun uses compatibility mode across GitHub runner kernel versions, so the
 verifier first exercises the complete outer policy with positive source-read
 and build-write probes and negative outside-read, outside-write, sibling
-process-environment, and outbound-network probes. If a positive operation is
-denied, a negative operation succeeds, or either confinement layer cannot be
-established, verification fails closed.
+process-environment, and outbound-network probes. It also runs a positive nested
+Landrun probe. If a positive operation is denied, a negative operation succeeds,
+or either confinement layer cannot be established, verification fails closed.
 
 Comparator, `lean4export`, Landrun, the Landrun adapter, Lake, and the verifier
 script are outside the writable allowlist. Their hashes are captured before any
