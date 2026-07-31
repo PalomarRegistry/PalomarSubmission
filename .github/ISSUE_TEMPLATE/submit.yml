@@ -40,7 +40,7 @@ body:
     attributes:
       label: Existing Palomar ID (updates only)
       description: Leave blank for a new result. To publish a new version, give the existing permanent identifier.
-      placeholder: PALOMAR-000123
+      placeholder: PALOMAR-2026-07-29-000123
     validations:
       required: false
 

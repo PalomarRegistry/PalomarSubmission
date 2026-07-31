@@ -284,6 +284,19 @@ VERSO_RUNTIME = r'''(() => {
     }
   }
 
+  function reportSurfaceHeight() {
+    const surface = document.querySelector(".palomar-declaration-surface");
+    if (!surface || parent === window) return;
+    const send = () => {
+      const height = Math.ceil(surface.getBoundingClientRect().height);
+      if (Number.isSafeInteger(height) && height > 0) {
+        parent.postMessage({type: "palomar-render-height", height}, "*");
+      }
+    };
+    requestAnimationFrame(send);
+    if (typeof ResizeObserver === "function") new ResizeObserver(send).observe(surface);
+  }
+
   document.addEventListener("DOMContentLoaded", async () => {
     sanitize(document);
     if (!isolateComparedDeclarations()) {
@@ -304,6 +317,7 @@ VERSO_RUNTIME = r'''(() => {
       docs = {};
     }
     installHovers(docs);
+    reportSurfaceHeight();
   }, {once: true});
 })();
 '''
@@ -361,8 +375,10 @@ def extract_module_doc(text: str) -> str | None:
     return None
 
 
-def parsed_challenge_metadata(challenge: Path, comparator: Path) -> dict[str, Any]:
-    for path in (challenge, comparator):
+def parsed_challenge_metadata(
+    challenge: Path, solution: Path, comparator: Path
+) -> dict[str, Any]:
+    for path in (challenge, solution, comparator):
         if path.is_symlink() or not path.is_file():
             raise VerificationError(f"render metadata input is missing or invalid: {path.name}")
     source = challenge.read_text(encoding="utf-8")
@@ -371,10 +387,11 @@ def parsed_challenge_metadata(challenge: Path, comparator: Path) -> dict[str, An
     if len(declarations) != len(set(declarations)):
         raise VerificationError("comparator declaration names must be unique")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "imports": direct_imports(source),
         "module_doc": extract_module_doc(source),
         "declarations": declarations,
+        "solution_imports": direct_imports(solution.read_text(encoding="utf-8")),
     }
 
 
@@ -744,8 +761,14 @@ def static_html_sanitize(
     surface_style = """<style id="palomar-declaration-style">
       html { height: auto !important; min-height: 100%; overflow: auto !important; overscroll-behavior: contain; }
       body { height: auto !important; min-height: 100%; margin: 0; overflow: visible !important; }
-      .palomar-declaration-surface { box-sizing: border-box; min-height: 100vh; padding: 1rem; }
+      .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
       .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
+      .palomar-declaration-surface .md-text::before,
+      .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
+      .palomar-hover { padding: .65rem !important; border: 1px solid #888 !important; border-radius: .35rem; background: #fff !important; color: #24292e !important; box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%); }
+      .palomar-hover .popup,
+      .palomar-hover .hover-info,
+      .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }
       .palomar-render-error { margin: 1rem; font-family: sans-serif; }
     </style>"""
     text = re.sub(
@@ -871,7 +894,9 @@ def sanitize_bundle(
 
 def sanitize_command(args: argparse.Namespace) -> int:
     metadata = parsed_challenge_metadata(
-        Path(args.challenge).resolve(), Path(args.comparator).resolve()
+        Path(args.challenge).resolve(),
+        Path(args.solution).resolve(),
+        Path(args.comparator).resolve(),
     )
     sanitize_bundle(
         Path(args.input_dir).resolve(),
@@ -1312,6 +1337,8 @@ def execute(args: argparse.Namespace) -> int:
                 str(clean_output),
                 "--challenge",
                 str(workspace / "Challenge.lean"),
+                "--solution",
+                str(workspace / "Solution.lean"),
                 "--comparator",
                 str(workspace / "comparator.json"),
             ],
@@ -1392,6 +1419,7 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser.add_argument("--input-dir", required=True)
     sanitize_parser.add_argument("--output-dir", required=True)
     sanitize_parser.add_argument("--challenge", required=True)
+    sanitize_parser.add_argument("--solution", required=True)
     sanitize_parser.add_argument("--comparator", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result

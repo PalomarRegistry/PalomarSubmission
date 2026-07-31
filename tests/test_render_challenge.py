@@ -121,11 +121,13 @@ class RenderChallengeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             challenge = root / "Challenge.lean"
+            solution = root / "Solution.lean"
             comparator = root / "comparator.json"
             challenge.write_text(
                 '''-- /-! not a module doc -/\nimport Mathlib\nimport Batteries\n\n/-!\n# Module title\n\nMetadata body.\n-/\nnamespace Example\n/-- Headline. -/\ntheorem headline : True := trivial\nend Example\n''',
                 encoding="utf-8",
             )
+            solution.write_text("import ErdosUnitDistance\n", encoding="utf-8")
             comparator.write_text(
                 json.dumps(
                     {
@@ -139,10 +141,12 @@ class RenderChallengeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            metadata = parsed_challenge_metadata(challenge, comparator)
+            metadata = parsed_challenge_metadata(challenge, solution, comparator)
+            self.assertEqual(metadata["schema_version"], 2)
             self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
             self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
             self.assertEqual(metadata["declarations"], ["Example.headline"])
+            self.assertEqual(metadata["solution_imports"], ["ErdosUnitDistance"])
 
     def test_module_doc_parser_skips_strings_and_nested_regular_comments(self):
         source = '''def fake := "/-! nope -/"\n/- outer /-! nested -/ -/\n/-! real doc -/'''
@@ -162,6 +166,8 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertIn("data-palomar-declarations=\"[&quot;Example.headline&quot;]\"", sanitized)
         self.assertIn("html { height: auto !important", sanitized)
         self.assertIn("overflow: visible !important", sanitized)
+        self.assertIn("white-space: nowrap", sanitized)
+        self.assertIn("background: #fff !important", sanitized)
         self.assertIn("palomar-declaration-style", sanitized)
 
     def test_static_html_rejects_a_missing_compared_declaration(self):

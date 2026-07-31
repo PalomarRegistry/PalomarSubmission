@@ -51,6 +51,7 @@ class VerifySubmissionTests(unittest.TestCase):
             'placeholder: "0000000000000000000000000000000000000000"',
             form,
         )
+        self.assertIn('placeholder: PALOMAR-2026-07-29-000123', form)
 
     def test_issue_form_sections(self):
         body = """### Repository URL
