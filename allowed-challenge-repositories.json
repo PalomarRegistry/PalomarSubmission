@@ -3,11 +3,17 @@
   "roots": [
     {
       "repository": "leanprover-community/mathlib4",
+      "repository_aliases": [],
+      "official_ref": "refs/heads/master",
       "include_pinned_manifest_closure": true,
       "trust_level": "high"
     },
     {
       "repository": "TauCetiProject/TauCeti",
+      "repository_aliases": [
+        "FormalFrontier/TauCeti"
+      ],
+      "official_ref": "refs/heads/main",
       "include_pinned_manifest_closure": true,
       "trust_level": "qualified"
     }
