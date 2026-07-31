@@ -1016,8 +1016,13 @@ def landrun_command(
         if Path(device).exists():
             result.extend(["--rw", device])
     for name in SANDBOX_ENVIRONMENT:
-        if name in environment:
-            result.extend(["--env", name])
+        value = environment.get(name)
+        if value is not None:
+            if any(character in value for character in ("\0", "\n", "\r")):
+                raise VerificationError(f"invalid control character in sandbox environment {name}")
+            # Pass the verified value explicitly. The outer systemd manager
+            # does not otherwise inherit caller variables into its service.
+            result.extend(["--env", f"{name}={value}"])
     for path in sorted({*(readable_paths or []), *readable_directories}):
         result.extend(["--ro", str(path)])
     for directory in sorted(set(writable_directories)):

@@ -233,6 +233,8 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         self.assertNotIn("/source/replay.hash", command)
         self.assertIn("/tools/comparator", command)
         self.assertNotIn("SECRET", command)
+        self.assertIn("PATH=/usr/bin", command)
+        self.assertIn("HOME=/source/.lake/config/home", command)
         self.assertNotIn("--unrestricted-network", command)
         self.assertEqual(command[command.index("--") + 1 :], ["/tools/comparator", "comparator.json"])
 
