@@ -7,16 +7,20 @@ from unittest import mock
 from scripts.verify_submission import (
     VerificationError,
     allowed_roots,
+    audit_challenge_sources,
     canonical_repository,
     direct_imports,
     github_repository,
+    lake_environment_value,
     landrun_command,
     load_comparator_config,
+    materialize_packages,
     normalize_repository,
     package_allowlist,
     parse_issue_body,
     remove_untrusted_lake_state,
     require_protected_paths,
+    systemd_command,
     verify_official_revision,
 )
 
@@ -73,8 +77,8 @@ _No response_
         )
 
     def test_imports(self):
-        source = """import Mathlib
-public import TauCeti.Topology
+        source = """/- leading block comment -/ import Mathlib -- trailing comment
+public /- nested /- comment -/ still -/ import TauCeti.Topology
 -- import NotReal
 """
         self.assertEqual(direct_imports(source), ["Mathlib", "TauCeti.Topology"])
@@ -153,9 +157,12 @@ public import TauCeti.Topology
         )
 
     def test_nonofficial_revision_is_rejected(self):
+        remote = mock.Mock(returncode=0)
         fetch = mock.Mock(returncode=0)
         ancestry = mock.Mock(returncode=1)
-        with mock.patch("scripts.verify_submission.run", side_effect=[fetch, ancestry]) as run_mock:
+        with mock.patch(
+            "scripts.verify_submission.run", side_effect=[remote, fetch, ancestry]
+        ) as run_mock:
             with self.assertRaisesRegex(VerificationError, "not an ancestor"):
                 verify_official_revision(
                     Path("/source/.lake/packages/mathlib"),
@@ -164,12 +171,100 @@ public import TauCeti.Topology
                     official_ref="refs/heads/master",
                     git_env={"PATH": "/usr/bin"},
                 )
-        fetch_command = run_mock.call_args_list[0].args[0]
-        self.assertIn("https://github.com/leanprover-community/mathlib4", fetch_command)
+        remote_command = run_mock.call_args_list[0].args[0]
+        fetch_command = run_mock.call_args_list[1].args[0]
+        self.assertIn("https://github.com/leanprover-community/mathlib4", remote_command)
+        self.assertIn("--filter=tree:0", fetch_command)
         self.assertIn(
             "+refs/heads/master:refs/remotes/palomar-official/head",
             fetch_command,
         )
+
+    def test_writable_dependency_source_is_untrusted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            writable = source / ".lake" / "packages" / "mathlib" / ".lake" / "build"
+            writable.mkdir(parents=True)
+            injected = writable / "Evil.lean"
+            injected.write_text("def injected := True")
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "mathlib",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/mathlib4",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
+            database = Path(directory) / "database"
+            (database / "entries").mkdir(parents=True)
+            audit = audit_challenge_sources(
+                source,
+                database=database,
+                dependency_sources=[injected],
+                lean_prefix=Path(directory) / "toolchain",
+                allowlist={"mathlib": ("leanprover-community/mathlib4", "high")},
+                writable_directories=[writable],
+            )
+            self.assertEqual(audit["untrusted_sources"], [str(injected)])
+
+    def test_path_package_may_not_point_under_lake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "helper",
+                                "type": "path",
+                                "dir": ".lake/config",
+                            }
+                        ]
+                    }
+                )
+            )
+            with self.assertRaisesRegex(VerificationError, "may not live under .lake"):
+                materialize_packages(source, base_env={"PATH": "/usr/bin"})
+
+    def test_systemd_network_namespace_defaults_closed(self):
+        def which(command):
+            return f"/usr/bin/{command}" if command in {"systemd-run", "systemctl"} else None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+        ):
+            confined = systemd_command(["true"], cwd=Path("/source"), environment={})
+            networked = systemd_command(
+                ["true"],
+                cwd=Path("/source"),
+                environment={},
+                unrestricted_network=True,
+            )
+        self.assertIn("--property=PrivateNetwork=yes", confined)
+        self.assertNotIn("--property=PrivateNetwork=yes", networked)
+
+    def test_lake_environment_uses_final_absolute_path_line(self):
+        proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")
+        with mock.patch("scripts.verify_submission.sandboxed_run", return_value=proc):
+            value = lake_environment_value(
+                "LEAN_PATH",
+                source=Path("/source"),
+                lake=Path("/tools/lake"),
+                printenv=Path("/usr/bin/printenv"),
+                environment={},
+                landrun=Path("/tools/landrun"),
+                writable_directories=[],
+                executable_paths=[],
+                tools={},
+            )
+        self.assertEqual(value, "/first:/second")
 
     def test_official_manifest_closure_rejects_substitution(self):
         good_revision = "1" * 40

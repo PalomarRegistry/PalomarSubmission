@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ GITHUB_RE = re.compile(
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{6}$")
-IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*(?://.*)?$")
+IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
     "PATH",
@@ -124,7 +125,24 @@ def sha256(path: Path) -> str:
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def workflow_output(**values: str) -> None:
@@ -189,9 +207,62 @@ def tree_size(root: Path) -> int:
     return total
 
 
+def strip_lean_comments(text: str) -> str:
+    """Replace nested Lean comments with whitespace while preserving line boundaries."""
+    result: list[str] = []
+    index = 0
+    block_depth = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        pair = text[index : index + 2]
+        character = text[index]
+        if block_depth:
+            if pair == "/-":
+                block_depth += 1
+                result.extend("  ")
+                index += 2
+            elif pair == "-/":
+                block_depth -= 1
+                result.extend("  ")
+                index += 2
+            else:
+                result.append("\n" if character == "\n" else " ")
+                index += 1
+            continue
+        if not in_string and pair == "--":
+            end = text.find("\n", index)
+            if end == -1:
+                result.extend(" " * (len(text) - index))
+                break
+            result.extend(" " * (end - index))
+            result.append("\n")
+            index = end + 1
+            continue
+        if not in_string and pair == "/-":
+            block_depth = 1
+            result.extend("  ")
+            index += 2
+            continue
+        result.append(character)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        index += 1
+    if block_depth:
+        raise VerificationError("unterminated Lean block comment")
+    return "".join(result)
+
+
 def direct_imports(text: str) -> list[str]:
     imports: list[str] = []
-    for line in text.splitlines():
+    for line in strip_lean_comments(text).splitlines():
         match = IMPORT_RE.match(line)
         if not match:
             continue
@@ -466,14 +537,15 @@ def verify_official_revision(
         "-C",
         str(package_dir),
     ]
+    run([*git, "remote", "add", "palomar-official", f"https://github.com/{repository}"], env=git_env)
     run(
         [
             *git,
             "fetch",
             "--quiet",
-            "--filter=blob:none",
+            "--filter=tree:0",
             "--no-tags",
-            f"https://github.com/{repository}",
+            "palomar-official",
             f"+{official_ref}:{fetched_ref}",
         ],
         env=git_env,
@@ -661,6 +733,7 @@ def systemd_command(
     *,
     cwd: Path,
     environment: dict[str, str],
+    unrestricted_network: bool = False,
 ) -> list[str]:
     runner = shutil.which("systemd-run")
     if not runner:
@@ -674,6 +747,8 @@ def systemd_command(
         "--property=LimitNOFILE=524288",
         f"--working-directory={cwd}",
     ]
+    if not unrestricted_network:
+        common.append("--property=PrivateNetwork=yes")
     systemctl = shutil.which("systemctl")
     user_manager = (
         systemctl is not None
@@ -731,7 +806,12 @@ def sandboxed_run(
         unrestricted_network=unrestricted_network,
     )
     proc = run(
-        systemd_command(confined, cwd=cwd, environment=environment),
+        systemd_command(
+            confined,
+            cwd=cwd,
+            environment=environment,
+            unrestricted_network=unrestricted_network,
+        ),
         cwd=cwd,
         env=environment,
         timeout=timeout,
@@ -739,6 +819,56 @@ def sandboxed_run(
     )
     verify_tool_snapshot(tools)
     return proc
+
+
+def verify_filesystem_confinement(
+    probe: Path,
+    *,
+    touch: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    writable_directories: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> None:
+    require_protected_paths([probe], writable_directories)
+    if probe.exists():
+        raise VerificationError(f"filesystem confinement probe path already exists: {probe}")
+    allowed_probe = writable_directories[0] / ".palomar-landrun-write-probe"
+    if allowed_probe.exists():
+        raise VerificationError(f"filesystem confinement probe path already exists: {allowed_probe}")
+    allowed = sandboxed_run(
+        [str(touch), str(allowed_probe)],
+        cwd=cwd,
+        environment=environment,
+        landrun=landrun,
+        writable_directories=writable_directories,
+        executable_paths=executable_paths,
+        tools=tools,
+        check=False,
+    )
+    allowed_created = allowed_probe.is_file()
+    if allowed_created:
+        allowed_probe.unlink()
+    if allowed.returncode or not allowed_created:
+        raise VerificationError("outer Landrun did not permit its writable directory")
+
+    denied = sandboxed_run(
+        [str(touch), str(probe)],
+        cwd=cwd,
+        environment=environment,
+        landrun=landrun,
+        writable_directories=writable_directories,
+        executable_paths=executable_paths,
+        tools=tools,
+        check=False,
+    )
+    escaped = probe.exists()
+    if escaped:
+        probe.unlink()
+    if escaped or denied.returncode == 0:
+        raise VerificationError("outer Landrun filesystem policy was not enforced")
 
 
 def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path]:
@@ -765,12 +895,15 @@ def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path
             if relative.is_absolute():
                 raise VerificationError(f"path package {name!r} must be relative to the source root")
             package_dir = (source / relative).resolve()
+            lake_root = (source / ".lake").resolve()
             try:
                 package_dir.relative_to(source.resolve())
             except ValueError as error:
                 raise VerificationError(f"path package {name!r} escapes the source tree") from error
             if package_dir == source.resolve() or not package_dir.is_dir():
                 raise VerificationError(f"path package {name!r} is not a distinct source directory")
+            if package_dir == lake_root or lake_root in package_dir.parents:
+                raise VerificationError(f"path package {name!r} may not live under .lake")
             writable.extend(remove_untrusted_lake_state(package_dir))
             continue
         revision = package["revision"]
@@ -868,64 +1001,134 @@ def get_mathlib_cache(
     ).stdout.strip()
     if changes:
         raise VerificationError("Mathlib source was modified while configuring the workspace")
+
+    # Run Mathlib as the workspace root so candidate Lake configuration never
+    # executes during the network-enabled phase. Its official pinned closure is
+    # materialized in a cache-only nested directory that is deleted immediately
+    # afterward and is never visible to the candidate workspace.
+    nested_packages = package_dir / ".lake" / "packages"
+    if nested_packages.exists() or nested_packages.is_symlink():
+        raise VerificationError("Mathlib cache package directory was not freshly prepared")
+    nested_packages.mkdir()
+    cache_writable = validate_writable_directories(
+        source, [*writable_directories, nested_packages.resolve()]
+    )
     cache_env = base_env.copy()
     cache_env["LEAN_ABORT_ON_PANIC"] = "1"
-    sandboxed_run(
-        [str(lake), "exe", "cache", "get"],
-        cwd=package_dir,
-        environment=cache_env,
+    try:
+        sandboxed_run(
+            [str(lake), "exe", "cache", "get"],
+            cwd=package_dir,
+            environment=cache_env,
+            landrun=landrun,
+            writable_directories=cache_writable,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=1800,
+            unrestricted_network=True,
+        )
+    finally:
+        if nested_packages.is_symlink():
+            nested_packages.unlink()
+        elif nested_packages.is_dir():
+            shutil.rmtree(nested_packages)
+
+
+def path_is_within(path: Path, directories: list[Path]) -> bool:
+    for directory in directories:
+        try:
+            path.resolve().relative_to(directory.resolve())
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def source_matches_checkout(path: Path, package_dir: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(package_dir.resolve()).as_posix()
+    except ValueError:
+        return False
+    git = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.file.allow=never",
+        "-C",
+        str(package_dir),
+    ]
+    expected = run([*git, "rev-parse", f"HEAD:{relative}"], check=False)
+    actual = run([*git, "hash-object", "--", str(path.resolve())], check=False)
+    return (
+        expected.returncode == 0
+        and actual.returncode == 0
+        and expected.stdout.strip() == actual.stdout.strip()
+    )
+
+
+def lean_source_dependencies(
+    source: Path,
+    *,
+    lean: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    writable_directories: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> list[Path]:
+    proc = sandboxed_run(
+        [str(lean), "--src-deps", "Challenge.lean"],
+        cwd=source,
+        environment=environment,
         landrun=landrun,
         writable_directories=writable_directories,
         executable_paths=executable_paths,
         tools=tools,
-        timeout=1800,
-        unrestricted_network=True,
     )
+    dependencies: set[Path] = set()
+    for line in proc.stdout.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            raise VerificationError(f"Lean reported a non-absolute source dependency: {value!r}")
+        resolved = path.resolve()
+        if resolved.suffix != ".lean" or not resolved.is_file():
+            raise VerificationError(f"Lean reported an invalid source dependency: {value!r}")
+        dependencies.add(resolved)
+    return sorted(dependencies)
 
 
 def audit_challenge_sources(
     source: Path,
     *,
     database: Path,
-    lean_src_path: str,
+    dependency_sources: list[Path],
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
+    writable_directories: list[Path],
 ) -> dict[str, Any]:
-    search_roots = [Path(path).resolve() for path in lean_src_path.split(os.pathsep) if path]
     packages = manifest_packages(source)
     by_name = {package["name"]: package for package in packages}
     indexed = indexed_versions(database)
-    sources: set[Path] = set()
     untrusted: list[str] = []
     dependencies: dict[tuple[str, str, str | None], None] = {}
     qualified_allowlisted = False
-    root = source.resolve()
     toolchain_prefix = lean_prefix.resolve()
-    pending = direct_imports((root / "Challenge.lean").read_text(encoding="utf-8"))
-    visited_modules: set[str] = set()
 
-    while pending:
-        module = pending.pop()
-        if module in visited_modules:
-            continue
-        visited_modules.add(module)
-        relative = Path(*module.split(".")).with_suffix(".lean")
-        resolved = next(
-            (
-                candidate
-                for search_root in search_roots
-                if (candidate := (search_root / relative).resolve()).is_file()
-            ),
-            None,
-        )
-        if resolved is None:
-            raise VerificationError(f"cannot resolve imported source module {module!r}")
-        sources.add(resolved)
+    for resolved in dependency_sources:
         try:
             resolved.relative_to(toolchain_prefix)
             continue
         except ValueError:
             pass
+        if path_is_within(resolved, writable_directories):
+            untrusted.append(str(resolved))
+            continue
         package_name = source_package(resolved, source)
         if package_name is None:
             # Any candidate-local helper import expands the unaudited statement
@@ -934,6 +1137,10 @@ def audit_challenge_sources(
             continue
         package = by_name.get(package_name)
         if not package:
+            untrusted.append(str(resolved))
+            continue
+        package_dir = source / ".lake" / "packages" / package_name
+        if not source_matches_checkout(resolved, package_dir):
             untrusted.append(str(resolved))
             continue
         if package_name in allowlist:
@@ -946,7 +1153,6 @@ def audit_challenge_sources(
         palomar_id = indexed.get((repository.lower(), revision))
         if palomar_id:
             dependencies[(repository, "palomar-indexed", palomar_id)] = None
-            pending.extend(direct_imports(resolved.read_text(encoding="utf-8")))
             continue
         untrusted.append(str(resolved))
 
@@ -962,7 +1168,7 @@ def audit_challenge_sources(
         item["provenance"] == "palomar-indexed" for item in serialized_dependencies
     )
     return {
-        "source_count": len(sources),
+        "source_count": len(dependency_sources),
         "dependencies": serialized_dependencies,
         "untrusted_sources": untrusted[:100],
         "trust_level": "qualified" if qualified else "high",
@@ -990,7 +1196,14 @@ def lake_environment_value(
         executable_paths=executable_paths,
         tools=tools,
     )
-    return proc.stdout.strip()
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise VerificationError(f"Lake did not report {name}")
+    value = lines[-1]
+    paths = value.split(os.pathsep)
+    if not paths or any(not path or not Path(path).is_absolute() for path in paths):
+        raise VerificationError(f"Lake reported an invalid {name}")
+    return value
 
 
 def execute(args: argparse.Namespace) -> int:
@@ -1051,10 +1264,14 @@ def execute(args: argparse.Namespace) -> int:
         env["PATH"] = f"{lean_prefix / 'bin'}:{env['PATH']}"
         lake_command = shutil.which("lake", path=env["PATH"])
         printenv_command = shutil.which("printenv", path=env["PATH"])
-        if not lake_command or not printenv_command:
+        touch_command = shutil.which("touch", path=env["PATH"])
+        if not lake_command or not printenv_command or not touch_command:
             raise VerificationError("trusted Lake environment tools are unavailable")
         lake = Path(lake_command).resolve(strict=True)
-        printenv = Path(printenv_command).resolve(strict=True)
+        printenv = Path(printenv_command).absolute()
+        lean = (lean_prefix / "bin" / "lean").resolve(strict=True)
+        python = Path(sys.executable).resolve(strict=True)
+        touch = Path(touch_command).absolute()
         try:
             lake.relative_to(lean_prefix)
         except ValueError as error:
@@ -1077,18 +1294,55 @@ def execute(args: argparse.Namespace) -> int:
             landrun,
             adapter,
             lake,
+            lean,
+            python,
             printenv,
+            touch,
         ]
         for system_path in (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64")):
             if system_path.exists():
                 executable_paths.append(system_path.resolve())
         executable_paths = sorted(set(executable_paths))
         require_protected_paths(
-            [output, comparator, lean4export, landrun, adapter, verifier, lake, printenv, lean_prefix],
+            [
+                output,
+                comparator,
+                lean4export,
+                landrun,
+                adapter,
+                verifier,
+                lake,
+                lean,
+                python,
+                printenv,
+                touch,
+                lean_prefix,
+            ],
             writable_directories,
         )
         tools = tool_snapshot(
-            [comparator, lean4export, landrun, adapter, verifier, lake, printenv]
+            [
+                comparator,
+                lean4export,
+                landrun,
+                adapter,
+                verifier,
+                lake,
+                lean,
+                python,
+                printenv,
+                touch,
+            ]
+        )
+        verify_filesystem_confinement(
+            work / "landrun-denial-probe",
+            touch=touch,
+            cwd=source,
+            environment=env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            executable_paths=executable_paths,
+            tools=tools,
         )
 
         packages = manifest_packages(source)
@@ -1113,7 +1367,7 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
         )
-        lean_src_path = lake_environment_value(
+        env["LEAN_SRC_PATH"] = lake_environment_value(
             "LEAN_SRC_PATH",
             source=source,
             lake=lake,
@@ -1144,12 +1398,22 @@ def execute(args: argparse.Namespace) -> int:
             guarded_write()
             return 0
 
+        dependency_sources = lean_source_dependencies(
+            source,
+            lean=lean,
+            environment=env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            executable_paths=executable_paths,
+            tools=tools,
+        )
         audit = audit_challenge_sources(
             source,
             database=Path(args.database).resolve(),
-            lean_src_path=lean_src_path,
+            dependency_sources=dependency_sources,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
+            writable_directories=writable_directories,
         )
         report["project_dependencies"] = packages
         report["challenge"].update(

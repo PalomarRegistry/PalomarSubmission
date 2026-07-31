@@ -53,7 +53,10 @@ environment.
 - The transitive source closure of `Challenge.lean` may contain only Lean core,
   the verified pinned closure of an allowlisted root, or the exact revision of
   a repository already indexed by Palomar. Candidate-local helper imports are
-  rejected in the current protocol.
+  rejected in the current protocol. The closure comes from Lean's own
+  `--src-deps` result, and every dependency source attributed to a Git package
+  must be a byte-for-byte match for a file tracked at that package's pinned
+  commit. Sources below a sandbox-writable directory are never trusted.
 
 ### Landrun confinement
 
@@ -65,18 +68,29 @@ writable and executable inside the outer sandbox.
 Every invocation that can load project Lake configuration runs under the same
 outer Landrun policy. This includes Mathlib cache retrieval, `lake env` used to
 discover Lean paths, and Comparator itself. The policy gives read-only access to
-the filesystem, grants read/execute access to the selected Lean toolchain and
-pinned verifier programs, and grants write/execute access only to the fresh
-build and Lake-configuration directories. Network access is denied for normal
-configuration and comparison. The verified Mathlib cache client has a narrowly
-scoped exception because downloading official cache artifacts is its purpose.
+the filesystem, grants read/execute access to the selected Lean toolchain,
+pinned verifier programs, and required system/Python runtime directories, and
+grants write/execute access only to the fresh build and Lake-configuration
+directories.
+
+Normal configuration and comparison also run in a systemd private network
+namespace; Landrun independently restricts supported TCP operations. The
+verified Mathlib cache client has a narrowly scoped exception because
+downloading official cache artifacts is its purpose. During that phase Mathlib
+is the workspace root and Lake materializes its official pinned closure in a
+separate cache-only directory. That directory is writable only during this
+trusted phase and is deleted immediately afterward, so candidate Lake
+configuration is not loaded while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
 solution, and export operations. Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
-The outer Landrun process is also launched in the unprivileged systemd unit used
-by Palomar for its address-family and resource-limit mitigation. If required
-confinement cannot be established, verification fails closed.
+The outer Landrun process is launched in an unprivileged systemd unit that also
+applies the private-network and address-family policy. Landrun uses compatibility
+mode across GitHub runner kernel versions, so the verifier first runs a negative
+write probe under the complete outer policy. If the probe can write outside the
+allowlist, or if either confinement layer cannot be established, verification
+fails closed.
 
 Comparator, `lean4export`, Landrun, the Landrun adapter, Lake, and the verifier
 script are outside the writable allowlist. Their hashes are captured before any
@@ -89,7 +103,8 @@ written only by the trusted verifier after the sandboxed process exits.
 The verification job has `contents: read` permission and is not given an issue
 token, App token, private-repository credential, or submission secret. Trusted
 checkouts disable credential persistence, and Landrun passes an explicit small
-environment-variable allowlist to untrusted processes.
+environment-variable allowlist to untrusted processes through the systemd unit
+and its own environment filter.
 
 The later reporting job is separate. It receives issue-write permission but
 does not check out or execute the submitted project; it reads only the bounded
