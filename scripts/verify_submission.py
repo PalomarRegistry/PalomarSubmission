@@ -42,7 +42,7 @@ GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{6}$")
+PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
@@ -377,7 +377,9 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("Commit SHA must be 40 lowercase hexadecimal characters")
         existing_id = values.get("existing_id", "").strip().upper()
         if existing_id and not PALOMAR_ID_RE.fullmatch(existing_id):
-            raise VerificationError("Existing Palomar ID must have the form PALOMAR-000123")
+            raise VerificationError(
+                "Existing Palomar ID must have the form PALOMAR-2026-07-29-000123"
+            )
 
         report.update(
             {
