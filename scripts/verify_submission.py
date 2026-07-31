@@ -1059,6 +1059,8 @@ def systemd_command(
         if not property_value or "\n" in property_value or "\r" in property_value:
             raise VerificationError("invalid systemd resource property")
         common.append(f"--property={property_value}")
+    sudo = shutil.which("sudo")
+    system_manager = sudo is not None and run([sudo, "-n", "true"], check=False).returncode == 0
     systemctl = shutil.which("systemctl")
     user_manager = (
         systemctl is not None
@@ -1070,14 +1072,12 @@ def systemd_command(
         ).returncode
         == 0
     )
-    if user_manager:
-        result = [runner, "--user", *common]
-    else:
-        sudo = shutil.which("sudo")
-        if not sudo or run([sudo, "-n", "true"], check=False).returncode:
-            raise VerificationError(
-                "neither a user systemd manager nor passwordless sudo is available for confinement"
-            )
+    # Hosted runners expose a user manager that cannot apply all hardening
+    # properties (the transient child exits with EXIT_CAPABILITIES). Prefer the
+    # system manager when passwordless sudo is explicitly available, but run
+    # the confined child as the original unprivileged UID/GID.
+    if system_manager:
+        assert sudo is not None
         result = [
             sudo,
             "-n",
@@ -1086,6 +1086,13 @@ def systemd_command(
             f"--uid={os.getuid()}",
             f"--gid={os.getgid()}",
         ]
+    elif user_manager:
+        result = [runner, "--user", *common]
+    else:
+        raise VerificationError(
+            "neither passwordless systemd-run nor a user systemd manager is available "
+            "for confinement"
+        )
     for name in SANDBOX_ENVIRONMENT:
         value = environment.get(name)
         if value is not None:

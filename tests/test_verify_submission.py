@@ -524,6 +524,26 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
         self.assertIn("--property=PrivateDevices=yes", confined)
         self.assertIn("--property=RuntimeMaxSec=600s", confined)
 
+    def test_systemd_prefers_privileged_manager_and_drops_to_runner_identity(self):
+        def which(command):
+            if command in {"systemd-run", "systemctl", "sudo"}:
+                return f"/usr/bin/{command}"
+            return None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission.subprocess.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission.os.getuid", return_value=1001),
+            mock.patch("scripts.verify_submission.os.getgid", return_value=1002),
+        ):
+            command = systemd_command(["true"], cwd=Path("/source"), environment={})
+
+        self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "/usr/bin/systemd-run"])
+        self.assertIn("--uid=1001", command)
+        self.assertIn("--gid=1002", command)
+        self.assertNotIn("--user", command)
+
     def test_systemd_applies_trusted_resource_properties(self):
         def which(command):
             return f"/usr/bin/{command}" if command in {"systemd-run", "systemctl"} else None
