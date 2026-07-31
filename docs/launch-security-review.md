@@ -54,7 +54,9 @@ The maintained test surfaces are:
   accepted `erdos-unit-distance-comparator` fixture at commit
   `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
   Lake-file-based, and ordinary proof dependencies, followed by the real pinned
-  Comparator and toolchain-matched `lean4export` under the nested sandbox.
+  Comparator and toolchain-matched `lean4export` under the nested sandbox. It
+  shares production's 330-minute budget measured from the start of its
+  350-minute job, so setup time and candidate execution consume one allowance.
 
 The cold fixture passed locally with Lean `v4.31.0-rc2`, Landrun, 16 pinned
 project dependencies, canonical Challenge compilation, source provenance

@@ -16,6 +16,7 @@ from verify_submission import (
     build_allowlisted_roots,
     compile_canonical_challenge,
     get_mathlib_cache,
+    install_execution_deadline,
     lake_environment_value,
     manifest_packages,
     materialize_packages,
@@ -43,6 +44,7 @@ def main() -> int:
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
+    install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
 
     source = args.source.resolve(strict=True)
     database = args.database.resolve(strict=True)
@@ -164,6 +166,21 @@ def main() -> int:
     trusted = set(trusted_lake_directories(source, allowlist))
     trusted_builds = {package_lake_directories(source, name)[0] for name in allowlist}
     candidate_writable = [path for path in writable_directories if path not in trusted]
+    require_protected_paths(
+        [
+            Path(__file__).resolve(),
+            lean,
+            lake,
+            python,
+            printenv,
+            touch,
+            landrun,
+            comparator,
+            lean4export,
+            adapter,
+        ],
+        candidate_writable,
+    )
     executable_paths = sorted({*executable_paths, *trusted_builds})
     canonical, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
         work,
@@ -241,7 +258,7 @@ def main() -> int:
     )
     # These builds exercise arbitrary proof-dependency compatibility. Lake may
     # put workspace directories before the inherited path while building; the
-    # protected ordering is asserted at Comparator export time below.
+    # protected LEAN_PATH is reapplied above and carried into Comparator below.
     for target in ("Challenge", "Solution"):
         sandboxed_run(
             [str(lake), "build", target],

@@ -10,8 +10,11 @@ permissions:
 jobs:
   compatibility:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 350
     steps:
+      - name: Record verification deadline origin
+        run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
         with:
           tool-cache: false
@@ -55,9 +58,11 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/leanprover/comparator.git comparator
           git -C comparator checkout 68a064109f01c08f47c8edc9f51d6a2bbffaa188
+          test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.33.0-rc1"
           (cd comparator && lake build comparator)
           git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export
-          git -C lean4export checkout b66b1cd7b8819db6059bc3d6093b22b0a380e793
+          LEAN4EXPORT_COMMIT="$(python -c 'import json; print(json.load(open("pipeline/toolchains.json"))["lean4export"]["leanprover/lean4:v4.31.0-rc2"])')"
+          git -C lean4export checkout "$LEAN4EXPORT_COMMIT"
           test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
           (cd lean4export && lake build lean4export)
       - name: Clone the accepted compatibility fixture

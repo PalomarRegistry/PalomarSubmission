@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -85,13 +86,34 @@ class VerificationError(RuntimeError):
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 EXECUTION_BUDGET_SECONDS = 330 * 60
 _EXECUTION_DEADLINE: float | None = None
+_MONOTONIC = time.monotonic
+_WALL_TIME = time.time
+
+
+def install_execution_deadline(started_at_epoch: str | float | None = None) -> float | None:
+    """Arm the shared deadline, including trusted CI setup time when supplied."""
+    global _EXECUTION_DEADLINE
+
+    previous = _EXECUTION_DEADLINE
+    elapsed = 0.0
+    if started_at_epoch is not None:
+        try:
+            started_at = float(started_at_epoch)
+        except (TypeError, ValueError) as error:
+            raise VerificationError("invalid verification job start time") from error
+        if not math.isfinite(started_at) or started_at <= 0:
+            raise VerificationError("invalid verification job start time")
+        elapsed = max(0.0, _WALL_TIME() - started_at)
+    remaining = max(0.0, EXECUTION_BUDGET_SECONDS - elapsed)
+    _EXECUTION_DEADLINE = _MONOTONIC() + remaining
+    return previous
 
 
 def _deadline_timeout(requested: int, command: list[str]) -> int:
     """Cap one phase by the verifier-wide wall-clock deadline when active."""
     if _EXECUTION_DEADLINE is None:
         return requested
-    remaining = int(_EXECUTION_DEADLINE - time.monotonic())
+    remaining = int(_EXECUTION_DEADLINE - _MONOTONIC())
     if remaining < 1:
         raise subprocess.TimeoutExpired(command, EXECUTION_BUDGET_SECONDS)
     return min(requested, remaining)
@@ -1898,12 +1920,11 @@ def execute(args: argparse.Namespace) -> int:
     if report.get("status") != "pending":
         return 0
     previous_deadline = _EXECUTION_DEADLINE
-    _EXECUTION_DEADLINE = time.monotonic() + EXECUTION_BUDGET_SECONDS
     source = work / "source"
     report.update(
         {
             "status": "error",
-            "stage": "comparator",
+            "stage": "setup",
             "comparator_commit": args.comparator_commit,
             "landrun_commit": args.landrun_commit,
             "workflow_url": args.workflow_url,
@@ -1923,6 +1944,7 @@ def execute(args: argparse.Namespace) -> int:
         write_json(output, report)
 
     try:
+        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()
@@ -2190,8 +2212,14 @@ def execute(args: argparse.Namespace) -> int:
         log = (proc.stdout + "\n" + proc.stderr).strip()
         report["comparator_log_tail"] = log[-20000:]
         if proc.returncode:
-            report["status"] = "fail"
-            report["errors"].append(f"Comparator rejected the project (exit {proc.returncode})")
+            if "landrun adapter:" in log:
+                report["status"] = "error"
+                report["errors"].append("Comparator sandbox adapter failed")
+            else:
+                report["status"] = "fail"
+                report["errors"].append(
+                    f"Comparator rejected the project (exit {proc.returncode})"
+                )
             report["stage"] = "comparator"
             guarded_write()
             return 0

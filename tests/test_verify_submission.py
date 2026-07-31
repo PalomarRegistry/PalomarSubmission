@@ -1,11 +1,14 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     VerificationError,
     _deadline_timeout,
@@ -14,6 +17,7 @@ from scripts.verify_submission import (
     canonical_repository,
     compile_canonical_challenge,
     direct_imports,
+    execute,
     github_repository,
     lake_environment_value,
     landrun_command,
@@ -39,15 +43,49 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_phase_timeout_is_capped_by_global_deadline(self):
         with (
             mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),
-            mock.patch("scripts.verify_submission.time.monotonic", return_value=90.0),
+            mock.patch("scripts.verify_submission._MONOTONIC", return_value=90.0),
         ):
             self.assertEqual(_deadline_timeout(600, ["probe"]), 10)
         with (
             mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),
-            mock.patch("scripts.verify_submission.time.monotonic", return_value=101.0),
+            mock.patch("scripts.verify_submission._MONOTONIC", return_value=101.0),
             self.assertRaises(subprocess.TimeoutExpired),
         ):
             _deadline_timeout(600, ["probe"])
+
+    def test_expired_job_deadline_is_reported_and_restored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report_path = root / "report.json"
+            report_path.write_text(json.dumps({"status": "pending", "errors": []}))
+            tools = []
+            for name in ("comparator", "lean4export", "landrun"):
+                tool = root / name
+                tool.touch()
+                tools.append(tool)
+            args = Namespace(
+                output=report_path,
+                work_dir=root / "work",
+                database=root / "database",
+                comparator=tools[0],
+                lean4export=tools[1],
+                landrun=tools[2],
+                comparator_commit="a" * 40,
+                landrun_commit="b" * 40,
+                workflow_url="https://github.com/example/project/actions/runs/1",
+            )
+            with (
+                mock.patch.dict(os.environ, {"PALOMAR_JOB_STARTED_AT": "1"}),
+                mock.patch.object(verifier, "_EXECUTION_DEADLINE", 123.0),
+                mock.patch("scripts.verify_submission.shutil.which", return_value=sys.executable),
+            ):
+                self.assertEqual(execute(args), 0)
+                self.assertEqual(verifier._EXECUTION_DEADLINE, 123.0)
+
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["status"], "error")
+            self.assertEqual(report["stage"], "setup")
+            self.assertIn("mechanical verification timed out", report["errors"])
 
     def test_command_output_capture_is_bounded(self):
         with mock.patch("scripts.verify_submission.MAX_CAPTURE_BYTES", 1024):
