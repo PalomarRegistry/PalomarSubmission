@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -25,7 +26,9 @@ from scripts.verify_submission import (
     SHA_RE,
     VerificationError,
     clone_commit,
+    direct_imports,
     github_repository,
+    load_comparator_config,
     manifest_packages,
     materialize_packages,
     now,
@@ -155,6 +158,51 @@ VERSO_RUNTIME = r'''(() => {
   const runtimeUrl = document.currentScript?.src;
   const sanitize = (root) => window.palomarSanitize && window.palomarSanitize(root);
 
+  function isolateComparedDeclarations() {
+    let declarations;
+    try {
+      declarations = JSON.parse(document.body.dataset.palomarDeclarations || "[]");
+    } catch (_) {
+      declarations = [];
+    }
+    if (!Array.isArray(declarations) || declarations.length === 0) return true;
+    const source = document.querySelector("section.code-content");
+    if (!source) return false;
+
+    const selected = [];
+    for (const name of declarations) {
+      const marker = Array.from(source.querySelectorAll(".const[data-binding]"))
+        .find((element) => element.dataset.binding === `const-${name}` && element.id);
+      const block = marker?.closest("code.hl.lean.block");
+      if (!block) return false;
+      const docstring = block.previousElementSibling;
+      if (docstring?.matches(".md-text:not(.mod-doc)")) selected.push(docstring);
+      selected.push(block);
+    }
+
+    const main = document.createElement("main");
+    main.id = "main-content";
+    main.className = "palomar-declaration-surface";
+    const content = document.createElement("section");
+    content.className = "code-content";
+    for (const element of selected) content.append(element);
+    for (const anchor of content.querySelectorAll("a[href]")) {
+      let fragment = "";
+      try {
+        fragment = new URL(anchor.href, location.href).hash.slice(1);
+      } catch (_) {
+        fragment = "";
+      }
+      if (fragment && !content.querySelector(`#${CSS.escape(fragment)}`)) {
+        anchor.replaceWith(...anchor.childNodes);
+      }
+    }
+    main.append(content);
+    document.body.replaceChildren(main);
+    document.title = "Compared Challenge declaration";
+    return true;
+  }
+
   function renderDocstrings(root) {
     if (typeof marked === "undefined" || typeof marked.parse !== "function") return;
     for (const source of root.querySelectorAll("code.docstring, pre.docstring")) {
@@ -238,6 +286,13 @@ VERSO_RUNTIME = r'''(() => {
 
   document.addEventListener("DOMContentLoaded", async () => {
     sanitize(document);
+    if (!isolateComparedDeclarations()) {
+      const error = document.createElement("p");
+      error.className = "palomar-render-error";
+      error.textContent = "The compared declaration is missing from this rendering.";
+      document.body.replaceChildren(error);
+      return;
+    }
     renderDocstrings(document);
     installBindingHighlights();
     let docs = {};
@@ -256,6 +311,71 @@ VERSO_RUNTIME = r'''(() => {
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def extract_module_doc(text: str) -> str | None:
+    """Return the first Lean module doc comment outside strings and other comments."""
+    index = 0
+    while index < len(text):
+        if text.startswith("--", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/-", index):
+            is_module_doc = text.startswith("/-!", index)
+            content_start = index + 3
+            depth = 1
+            cursor = index + 2
+            while cursor < len(text) and depth:
+                if text.startswith("/-", cursor):
+                    depth += 1
+                    cursor += 2
+                elif text.startswith("-/", cursor):
+                    depth -= 1
+                    if depth == 0:
+                        if is_module_doc:
+                            return text[content_start:cursor].strip()
+                        cursor += 2
+                        break
+                    cursor += 2
+                else:
+                    cursor += 1
+            if depth:
+                raise VerificationError("unterminated Lean block comment")
+            index = cursor
+            continue
+        if text[index] == '"':
+            index += 1
+            escaped = False
+            while index < len(text):
+                character = text[index]
+                index += 1
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    break
+            continue
+        index += 1
+    return None
+
+
+def parsed_challenge_metadata(challenge: Path, comparator: Path) -> dict[str, Any]:
+    for path in (challenge, comparator):
+        if path.is_symlink() or not path.is_file():
+            raise VerificationError(f"render metadata input is missing or invalid: {path.name}")
+    source = challenge.read_text(encoding="utf-8")
+    config = load_comparator_config(comparator)
+    declarations = [*config["theorem_names"], *config.get("definition_names", [])]
+    if len(declarations) != len(set(declarations)):
+        raise VerificationError("comparator declaration names must be unique")
+    return {
+        "schema_version": 1,
+        "imports": direct_imports(source),
+        "module_doc": extract_module_doc(source),
+        "declarations": declarations,
+    }
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -514,7 +634,12 @@ def tree_bytes(root: Path, *, stop_after: int | None = None) -> int:
     return total
 
 
-def static_html_sanitize(text: str, sanitizer_src: str, runtime_src: str) -> str:
+def static_html_sanitize(
+    text: str,
+    sanitizer_src: str,
+    runtime_src: str,
+    declarations: list[str] | None = None,
+) -> str:
     bases = re.findall(
         r"<base\b[^>]*\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>",
         text,
@@ -535,6 +660,30 @@ def static_html_sanitize(text: str, sanitizer_src: str, runtime_src: str) -> str
         text,
         flags=re.IGNORECASE,
     )
+    declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
+    for declaration in declarations or []:
+        marker = re.compile(
+            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{re.escape(html.escape(declaration, quote=True))}\1[^>]*\bid\s*=",
+            flags=re.IGNORECASE,
+        )
+        if not marker.search(text):
+            raise VerificationError(
+                f"Verso output does not contain compared declaration: {declaration}"
+            )
+
+    def annotate_body(match: re.Match[str]) -> str:
+        attributes = match.group(1) or ""
+        if re.search(r"\bdata-palomar-declarations\b", attributes, flags=re.IGNORECASE):
+            raise VerificationError("generated HTML contains reserved Palomar metadata")
+        value = html.escape(declaration_json, quote=True)
+        return f'<body{attributes} data-palomar-declarations="{value}">'
+
+    text, body_count = re.subn(
+        r"<body(\s[^>]*)?>", annotate_body, text, count=1, flags=re.IGNORECASE
+    )
+    if body_count != 1:
+        raise VerificationError("generated HTML does not contain exactly one body element")
+
     def rewrite_url(match: re.Match[str]) -> str:
         prefix, attribute, separator, quote, raw = match.groups()
         value = raw.strip()
@@ -592,6 +741,16 @@ def static_html_sanitize(text: str, sanitizer_src: str, runtime_src: str) -> str
         f'    <script defer src="{runtime_src}"></script>'
     )
     text = re.sub(r"(<head\b[^>]*>)", rf"\1\n    {scripts}", text, count=1, flags=re.IGNORECASE)
+    surface_style = """<style id="palomar-declaration-style">
+      html { height: auto !important; min-height: 100%; overflow: auto !important; overscroll-behavior: contain; }
+      body { height: auto !important; min-height: 100%; margin: 0; overflow: visible !important; }
+      .palomar-declaration-surface { box-sizing: border-box; min-height: 100vh; padding: 1rem; }
+      .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
+      .palomar-render-error { margin: 1rem; font-family: sans-serif; }
+    </style>"""
+    text = re.sub(
+        r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
+    )
     return text
 
 
@@ -642,7 +801,12 @@ def artifact_manifest(bundle: Path) -> tuple[list[dict[str, Any]], str]:
     return files, sha256_bytes(canonical)
 
 
-def sanitize_bundle(input_dir: Path, output_dir: Path) -> str:
+def sanitize_bundle(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> str:
     if not input_dir.is_dir() or input_dir.is_symlink():
         raise VerificationError("Verso output directory is missing or invalid")
     if output_dir.is_symlink() or not output_dir.is_dir():
@@ -659,8 +823,18 @@ def sanitize_bundle(input_dir: Path, output_dir: Path) -> str:
         total += size
         if len(source_files) > MAX_RENDER_FILES or total > MAX_RENDER_BYTES:
             raise VerificationError("raw Verso output exceeds the artifact limits")
+    metadata = metadata or {
+        "schema_version": 1,
+        "imports": [],
+        "module_doc": None,
+        "declarations": [],
+    }
+    declarations = metadata.get("declarations")
+    if not isinstance(declarations, list) or not all(isinstance(item, str) for item in declarations):
+        raise VerificationError("render metadata declarations must be an array of strings")
     (output_dir / "palomar-sanitize.js").write_text(RUNTIME_SANITIZER, encoding="utf-8")
     (output_dir / "palomar-verso.js").write_text(VERSO_RUNTIME, encoding="utf-8")
+    write_json(output_dir / "challenge-metadata.json", metadata)
     for source, relative in source_files:
         if source.suffix.lower() == ".js":
             continue
@@ -675,7 +849,10 @@ def sanitize_bundle(input_dir: Path, output_dir: Path) -> str:
             ).replace(os.sep, "/")
             destination.write_text(
                 static_html_sanitize(
-                    source.read_text(encoding="utf-8"), sanitizer_src, runtime_src
+                    source.read_text(encoding="utf-8"),
+                    sanitizer_src,
+                    runtime_src,
+                    declarations if relative == "Challenge/index.html" else [],
                 ),
                 encoding="utf-8",
             )
@@ -693,7 +870,14 @@ def sanitize_bundle(input_dir: Path, output_dir: Path) -> str:
 
 
 def sanitize_command(args: argparse.Namespace) -> int:
-    sanitize_bundle(Path(args.input_dir).resolve(), Path(args.output_dir).resolve())
+    metadata = parsed_challenge_metadata(
+        Path(args.challenge).resolve(), Path(args.comparator).resolve()
+    )
+    sanitize_bundle(
+        Path(args.input_dir).resolve(),
+        Path(args.output_dir).resolve(),
+        metadata=metadata,
+    )
     return 0
 
 
@@ -1126,6 +1310,10 @@ def execute(args: argparse.Namespace) -> int:
                 str(raw_output),
                 "--output-dir",
                 str(clean_output),
+                "--challenge",
+                str(workspace / "Challenge.lean"),
+                "--comparator",
+                str(workspace / "comparator.json"),
             ],
             cwd=workspace,
             environment=env,
@@ -1142,6 +1330,7 @@ def execute(args: argparse.Namespace) -> int:
         embedded_manifest = load_json_object(clean_output / "artifact-manifest.json")
         if embedded_manifest.get("files") != files or embedded_manifest.get("artifact_tree_sha256") != tree_hash:
             raise VerificationError("sanitized artifact manifest is inconsistent")
+        surface = load_json_object(clean_output / "challenge-metadata.json")
         result_dir = work / "result"
         if result_dir.exists():
             raise VerificationError("render result directory already exists")
@@ -1154,6 +1343,7 @@ def execute(args: argparse.Namespace) -> int:
                 "format": "verso-html",
                 "entrypoint": "Challenge/index.html",
                 "artifact_tree_sha256": tree_hash,
+                "surface": surface,
                 "rendered_at": now(),
                 "limits": {
                     "wall_seconds": BUILD_TIMEOUT_SECONDS,
@@ -1201,6 +1391,8 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser = commands.add_parser("sanitize")
     sanitize_parser.add_argument("--input-dir", required=True)
     sanitize_parser.add_argument("--output-dir", required=True)
+    sanitize_parser.add_argument("--challenge", required=True)
+    sanitize_parser.add_argument("--comparator", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result
 
