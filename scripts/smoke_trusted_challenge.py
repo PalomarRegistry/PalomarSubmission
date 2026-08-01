@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from verify_submission import (
+    EXECUTION_BUDGET_SECONDS,
     VerificationError,
     audit_challenge_sources,
     build_allowlisted_roots,
@@ -44,7 +45,10 @@ def main() -> int:
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
-    install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
+    install_execution_deadline(
+        os.environ.get("PALOMAR_JOB_STARTED_AT"),
+        int(os.environ.get("PALOMAR_EXECUTION_BUDGET_SECONDS", EXECUTION_BUDGET_SECONDS)),
+    )
 
     source = args.source.resolve(strict=True)
     database = args.database.resolve(strict=True)
@@ -192,6 +196,7 @@ def main() -> int:
         lean=lean,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
+        indexed={},
         environment=environment,
         landrun=landrun,
         readable_paths=readable_paths,
@@ -206,6 +211,7 @@ def main() -> int:
         dependency_sources=dependency_sources,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
+        indexed={},
         writable_directories=candidate_writable,
     )
     if audit["untrusted_sources"]:

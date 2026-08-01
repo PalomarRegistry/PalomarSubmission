@@ -54,6 +54,10 @@ def body_for(report: dict) -> str:
     ]
     if challenge.get("trust_level"):
         lines.append(f"- Challenge trust surface: `{challenge['trust_level']}`")
+    if report.get("error_kind"):
+        lines.append(f"- Infrastructure outcome: `{report['error_kind']}`")
+    if report.get("retryable") is True:
+        lines.append("- Retryable on a more capable worker: `yes`")
     if report.get("workflow_url"):
         lines.append(f"- [Workflow run]({report['workflow_url']})")
     if errors:

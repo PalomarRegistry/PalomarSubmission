@@ -11,6 +11,9 @@ from unittest import mock
 
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
+    EXECUTION_BUDGET_SECONDS,
+    PERMISSIVE_RESOURCE_PROPERTIES,
+    ResourceExhausted,
     VerificationError,
     _deadline_timeout,
     allowed_roots,
@@ -20,6 +23,7 @@ from scripts.verify_submission import (
     direct_imports,
     execute,
     github_repository,
+    indexed_versions,
     lake_environment_value,
     landrun_command,
     load_comparator_config,
@@ -33,6 +37,7 @@ from scripts.verify_submission import (
     remove_untrusted_lake_state,
     require_protected_paths,
     run,
+    sandboxed_run,
     systemd_command,
     trusted_package_url_map,
     verify_official_revision,
@@ -86,8 +91,68 @@ class VerifySubmissionTests(unittest.TestCase):
 
             report = json.loads(report_path.read_text())
             self.assertEqual(report["status"], "error")
-            self.assertEqual(report["stage"], "setup")
-            self.assertIn("mechanical verification timed out", report["errors"])
+            self.assertEqual(report["stage"], "resource-exhausted")
+            self.assertEqual(report["error_kind"], "infrastructure/resource-exhausted")
+            self.assertTrue(report["retryable"])
+            self.assertIn("retry on a longer-running worker", report["errors"][0])
+
+    def test_default_capacity_supports_ten_hour_verification(self):
+        self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)
+        self.assertIn("MemoryMax=98%", PERMISSIVE_RESOURCE_PROPERTIES)
+        self.assertFalse(
+            any(
+                property_value.startswith("CPUQuota=")
+                for property_value in PERMISSIVE_RESOURCE_PROPERTIES
+            )
+        )
+
+    def test_clear_resource_termination_is_retryable_not_a_phase_failure(self):
+        completed = subprocess.CompletedProcess(["systemd-run"], 137, "", "killed")
+        with (
+            mock.patch("scripts.verify_submission.verify_tool_snapshot"),
+            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
+            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission.run", return_value=completed),
+            mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
+            self.assertRaisesRegex(ResourceExhausted, "resource ceiling"),
+        ):
+            sandboxed_run(
+                ["lean", "Challenge.lean"],
+                cwd=REPOSITORY_ROOT,
+                environment={},
+                landrun=Path("landrun"),
+                writable_directories=[],
+                executable_paths=[],
+                tools={},
+            )
+
+    def test_resource_wrapper_records_bounded_usage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metrics = Path(temporary) / "metrics.jsonl"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPOSITORY_ROOT / "scripts" / "measure_resources.py"),
+                    "--output",
+                    str(metrics),
+                    "--phase",
+                    "fixture",
+                    "--disk-path",
+                    temporary,
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "value = bytearray(1024 * 1024); print(len(value))",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            record = json.loads(metrics.read_text())
+            self.assertEqual(record["phase"], "fixture")
+            self.assertEqual(record["returncode"], 0)
+            self.assertGreater(record["max_rss_kib"], 0)
+            self.assertGreaterEqual(record["peak_tasks_observed"], 1)
 
     def test_command_output_capture_is_bounded(self):
         with mock.patch("scripts.verify_submission.MAX_CAPTURE_BYTES", 1024):
@@ -321,6 +386,23 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             source = work / "source"
             source.mkdir()
             (source / "Challenge.lean").write_text("theorem result : True := by trivial\n")
+            indexed_package = source / ".lake" / "packages" / "indexed"
+            indexed_lean = indexed_package / ".lake" / "build" / "lib" / "lean"
+            indexed_lean.mkdir(parents=True)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "indexed",
+                                "type": "git",
+                                "url": "https://github.com/example/indexed",
+                                "rev": "8" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
             lean_prefix = work / "toolchain"
             (lean_prefix / "lib" / "lean").mkdir(parents=True)
 
@@ -332,12 +414,13 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 return mock.Mock(stdout="", stderr="", returncode=0)
 
             with mock.patch("scripts.verify_submission.sandboxed_run", side_effect=fake_sandbox):
-                canonical, dependencies, _trusted_paths = compile_canonical_challenge(
+                canonical, dependencies, trusted_paths = compile_canonical_challenge(
                     work,
                     source,
                     lean=Path("/tools/lean"),
                     lean_prefix=lean_prefix,
                     allowlist={},
+                    indexed={"indexed": {}},
                     environment={},
                     landrun=Path("/tools/landrun"),
                     readable_paths=[source],
@@ -347,6 +430,7 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             self.assertEqual(canonical.read_bytes(), b"canonical")
             self.assertEqual([path.name for path in canonical.parent.iterdir()], ["Challenge.olean"])
             self.assertEqual(dependencies, [])
+            self.assertLess(trusted_paths.index(indexed_lean.resolve()), len(trusted_paths))
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -517,9 +601,209 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 dependency_sources=[injected],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={"mathlib": ("leanprover-community/mathlib4", "high")},
+                indexed={},
                 writable_directories=[writable],
             )
             self.assertEqual(audit["untrusted_sources"], [str(injected)])
+
+    def test_indexed_snapshot_resolution_is_versioned_and_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory)
+            entries = database / "entries"
+            entries.mkdir()
+            repository = "example/indexed"
+            revision = "1" * 40
+            records = [
+                ("PALOMAR-2026-07-30-000003", 1, "2026-07-30"),
+                ("PALOMAR-2026-07-29-000002", 2, "2026-07-29"),
+                ("PALOMAR-2026-07-29-000002", 1, "2026-07-29"),
+            ]
+            for identifier, version, accepted_at in records:
+                (entries / f"{identifier}-v{version}.json").write_text(
+                    json.dumps(
+                        {
+                            "id": identifier,
+                            "version": version,
+                            "accepted_at": accepted_at,
+                            "source": {"repository": repository, "commit": revision},
+                        }
+                    )
+                )
+            resolved = indexed_versions(database)[(repository, revision)]
+            self.assertEqual(resolved["palomar_id"], "PALOMAR-2026-07-29-000002")
+            self.assertEqual(resolved["palomar_version"], 1)
+            self.assertEqual(resolved["revision"], revision)
+
+    def test_indexed_challenge_source_has_versioned_review_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            package = source / ".lake" / "packages" / "indexed"
+            package.mkdir(parents=True)
+            dependency = package / "Indexed" / "Definitions.lean"
+            dependency.parent.mkdir()
+            dependency.write_text("def Indexed.answer : Nat := 42\n")
+            subprocess.run(["git", "init", "-q"], cwd=package, check=True)
+            subprocess.run(["git", "add", "."], cwd=package, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Palomar test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                cwd=package,
+                check=True,
+            )
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=package,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "indexed",
+                                "type": "git",
+                                "url": "https://github.com/example/indexed",
+                                "rev": revision,
+                            }
+                        ]
+                    }
+                )
+            )
+            record = {
+                "repository": "example/indexed",
+                "revision": revision,
+                "palomar_id": "PALOMAR-2026-07-29-000001",
+                "palomar_version": 2,
+            }
+            audit = audit_challenge_sources(
+                source,
+                database=Path(directory) / "database",
+                dependency_sources=[dependency],
+                lean_prefix=Path(directory) / "toolchain",
+                allowlist={},
+                indexed={"indexed": record},
+                writable_directories=[],
+            )
+            self.assertEqual(audit["untrusted_sources"], [])
+            self.assertEqual(audit["trust_level"], "qualified")
+            self.assertEqual(
+                audit["dependencies"],
+                [
+                    {
+                        "repository": "example/indexed",
+                        "provenance": "palomar-indexed",
+                        "palomar_id": "PALOMAR-2026-07-29-000001",
+                        "palomar_version": 2,
+                        "revision": revision,
+                    }
+                ],
+            )
+            evidence = audit["review_source_files"][0]
+            self.assertEqual(evidence["path"], "Indexed/Definitions.lean")
+            self.assertEqual(evidence["sha256"], verifier.sha256(dependency))
+
+            substituted = dict(record, revision="2" * 40)
+            bad = audit_challenge_sources(
+                source,
+                database=Path(directory) / "database",
+                dependency_sources=[dependency],
+                lean_prefix=Path(directory) / "toolchain",
+                allowlist={},
+                indexed={"indexed": substituted},
+                writable_directories=[],
+            )
+            self.assertEqual(bad["untrusted_sources"], [str(dependency.resolve())])
+
+            unindexed_package = source / ".lake" / "packages" / "unindexed"
+            unindexed_package.mkdir()
+            recursive = unindexed_package / "Unindexed.lean"
+            recursive.write_text("def hiddenMeaning : Nat := 0\n")
+            subprocess.run(["git", "init", "-q"], cwd=unindexed_package, check=True)
+            subprocess.run(["git", "add", "."], cwd=unindexed_package, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Palomar test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                cwd=unindexed_package,
+                check=True,
+            )
+            unindexed_revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=unindexed_package,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            manifest = json.loads((source / "lake-manifest.json").read_text())
+            manifest["packages"].append(
+                {
+                    "name": "unindexed",
+                    "type": "git",
+                    "url": "https://github.com/example/unindexed",
+                    "rev": unindexed_revision,
+                }
+            )
+            (source / "lake-manifest.json").write_text(json.dumps(manifest))
+            recursive_audit = audit_challenge_sources(
+                source,
+                database=Path(directory) / "database",
+                dependency_sources=[dependency, recursive],
+                lean_prefix=Path(directory) / "toolchain",
+                allowlist={},
+                indexed={"indexed": record},
+                writable_directories=[],
+            )
+            self.assertEqual(
+                recursive_audit["untrusted_sources"],
+                [str(recursive.resolve())],
+            )
+
+    def test_solution_only_package_is_outside_challenge_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "proofOnly",
+                                "type": "git",
+                                "url": "https://github.com/example/proof-only",
+                                "rev": "3" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
+            audit = audit_challenge_sources(
+                source,
+                database=Path(directory) / "database",
+                dependency_sources=[],
+                lean_prefix=Path(directory) / "toolchain",
+                allowlist={},
+                indexed={},
+                writable_directories=[],
+            )
+            self.assertEqual(audit["untrusted_sources"], [])
+            self.assertEqual(audit["dependencies"], [])
 
     def test_path_package_may_not_point_under_lake(self):
         with tempfile.TemporaryDirectory() as directory:

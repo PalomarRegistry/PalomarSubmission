@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -7,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from scripts.verify_submission import (
+    audit_challenge_sources,
+    build_indexed_roots,
     compile_canonical_challenge,
     protected_lean_path,
     remove_untrusted_lake_state,
@@ -125,6 +128,7 @@ class SandboxIntegrationTests(unittest.TestCase):
                 lean=lean,
                 lean_prefix=lean_prefix,
                 allowlist={},
+                indexed={},
                 environment=environment,
                 landrun=landrun,
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
@@ -163,6 +167,152 @@ class SandboxIntegrationTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for indexed compilation",
+    )
+    def test_indexed_challenge_dependency_is_rebuilt_protected_and_audited(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            work = Path(directory).resolve()
+            source = work / "source"
+            package = source / ".lake" / "packages" / "indexed"
+            package.mkdir(parents=True)
+            indexed_source = package / "Indexed.lean"
+            indexed_source.write_text("def Indexed.meaning : Nat := 42\n")
+            (package / "lakefile.toml").write_text(
+                'name = "indexed"\ndefaultTargets = ["Indexed"]\n\n'
+                '[[lean_lib]]\nname = "Indexed"\n'
+            )
+            (package / "lake-manifest.json").write_text(
+                '{"version":"1.2.0","packagesDir":".lake/packages","packages":[]}\n'
+            )
+            subprocess.run(["git", "init", "-q"], cwd=package, check=True)
+            subprocess.run(["git", "add", "."], cwd=package, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Palomar test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "indexed fixture",
+                ],
+                cwd=package,
+                check=True,
+            )
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=package,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            build, config = remove_untrusted_lake_state(package)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "indexed",
+                                "type": "git",
+                                "url": "https://github.com/example/indexed",
+                                "rev": revision,
+                            }
+                        ]
+                    }
+                )
+            )
+            source.mkdir(exist_ok=True)
+            (source / "Challenge.lean").write_text(
+                "import Indexed\ntheorem probe : Indexed.meaning = 42 := rfl\n"
+            )
+            lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
+            lean_prefix = Path(
+                subprocess.run(
+                    [str(lean), "--print-prefix"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            ).resolve(strict=True)
+            lake = (lean_prefix / "bin" / "lake").resolve(strict=True)
+            landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
+            python = Path(sys.executable).resolve(strict=True)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{lean_prefix / 'bin'}:{os.environ['PATH']}",
+                    "LEAN_ABORT_ON_PANIC": "1",
+                }
+            )
+            executable_paths = [lean_prefix, python.parent.parent, lean, lake, landrun]
+            for raw in ("/usr", "/bin", "/lib", "/lib64", "/run/current-system/sw", "/nix/store"):
+                path = Path(raw)
+                if path.exists():
+                    executable_paths.append(path.resolve())
+            executable_paths = sorted(set(executable_paths))
+            readable_paths = sorted({source.resolve(), *system_readable_paths()})
+            tools = tool_snapshot([lean, lake, landrun])
+            packages = [
+                {
+                    "name": "indexed",
+                    "repository": "example/indexed",
+                    "url": "https://github.com/example/indexed",
+                    "revision": revision,
+                }
+            ]
+            record = {
+                "repository": "example/indexed",
+                "revision": revision,
+                "palomar_id": "PALOMAR-2026-08-01-000001",
+                "palomar_version": 1,
+            }
+            build_indexed_roots(
+                source,
+                packages=packages,
+                indexed={"indexed": record},
+                allowlist={},
+                base_env=environment,
+                lake=lake,
+                landrun=landrun,
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                tools=tools,
+            )
+            indexed_olean = build / "lib" / "lean" / "Indexed.olean"
+            self.assertTrue(indexed_olean.is_file())
+            canonical, dependency_sources, trusted_paths = compile_canonical_challenge(
+                work,
+                source,
+                lean=lean,
+                lean_prefix=lean_prefix,
+                allowlist={},
+                indexed={"indexed": record},
+                environment=environment,
+                landrun=landrun,
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                tools=tools,
+            )
+            self.assertTrue(canonical.is_file())
+            self.assertIn(indexed_olean.parent.resolve(), trusted_paths)
+            audit = audit_challenge_sources(
+                source,
+                database=work / "database",
+                dependency_sources=dependency_sources,
+                lean_prefix=lean_prefix,
+                allowlist={},
+                indexed={"indexed": record},
+                writable_directories=[],
+            )
+            self.assertEqual(audit["untrusted_sources"], [])
+            self.assertEqual(audit["trust_level"], "qualified")
+            self.assertEqual(audit["dependencies"][0]["palomar_version"], 1)
+            self.assertEqual(audit["review_source_files"][0]["path"], "Indexed.lean")
+            self.assertFalse(config.is_symlink())
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:

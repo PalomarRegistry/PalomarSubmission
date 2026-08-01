@@ -671,9 +671,13 @@ def static_html_sanitize(
     # Generated scripts are not accepted as executable artifacts.  Palomar
     # supplies the small interaction runtime below from trusted renderer code.
     text = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Browsers still execute an opening script element whose closing tag is
+    # missing, so remove any survivor from the paired-tag pass as well.
+    text = re.sub(r"<script\b[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"\s(?:on[a-z0-9_-]+|srcdoc|action|formaction|ping|target)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
-        "",
+        r"([\s/])(?:on[a-z0-9_-]+|srcdoc|action|formaction|ping|target)"
+        r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?",
+        lambda match: match.group(1),
         text,
         flags=re.IGNORECASE,
     )
@@ -703,30 +707,36 @@ def static_html_sanitize(
         raise VerificationError("generated HTML does not contain exactly one body element")
 
     def rewrite_url(match: re.Match[str]) -> str:
-        prefix, attribute, separator, quote, raw = match.groups()
+        prefix, attribute, separator, quote, quoted, unquoted = match.groups()
+        raw = quoted if quote else unquoted
         value = raw.strip()
+
+        def rewritten(result: str) -> str:
+            escaped = html.escape(result, quote=True)
+            return f'{prefix}{attribute}{separator}"{escaped}"'
+
         if not value or value.startswith("#"):
-            return f"{prefix}{attribute}{separator}{quote}{value}{quote}"
+            return rewritten(value)
         if value.startswith("data:"):
             safe_data = attribute.lower() == "src" and re.match(
                 r"^data:image/(?:gif|jpeg|png|webp);", value, flags=re.IGNORECASE
             )
             value = value if safe_data else "#"
-            return f"{prefix}{attribute}{separator}{quote}{value}{quote}"
+            return rewritten(value)
         if (
             value.startswith(("/", "../"))
             or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
             or any(part == ".." for part in value.split("/"))
         ):
-            return f"{prefix}{attribute}{separator}{quote}#{quote}"
+            return rewritten("#")
         value = value.removeprefix("./")
-        return f"{prefix}{attribute}{separator}{quote}../{value}{quote}"
+        return rewritten(f"../{value}")
 
     text = re.sub(
-        r"(\s)(href|src)(\s*=\s*)([\"'])([^\"']*)[\"']",
+        r"([\s/])(href|src)(\s*=\s*)(?:([\"'])(.*?)\4|([^\s>]+))",
         rewrite_url,
         text,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     policy = "; ".join(
         [
@@ -747,18 +757,23 @@ def static_html_sanitize(
         ]
     )
     meta = (
+        f'<meta http-equiv="Content-Security-Policy" content="{policy}">\n    '
         '<meta charset="utf-8">\n    '
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n    '
-        f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
     )
-    text, count = re.subn(r"(<head\b[^>]*>)", rf"\1\n    {meta}", text, count=1, flags=re.IGNORECASE)
-    if count != 1:
-        raise VerificationError("generated HTML does not contain exactly one head element")
     scripts = (
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
-    text = re.sub(r"(<head\b[^>]*>)", rf"\1\n    {scripts}", text, count=1, flags=re.IGNORECASE)
+    text, count = re.subn(
+        r"(<head\b[^>]*>)",
+        rf"\1\n    {meta}\n    {scripts}",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if count != 1:
+        raise VerificationError("generated HTML does not contain exactly one head element")
     surface_style = """<style id="palomar-declaration-style">
       html { height: auto !important; min-height: 100%; overflow: auto !important;
         overscroll-behavior: contain; }

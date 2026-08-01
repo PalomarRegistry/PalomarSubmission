@@ -117,6 +117,37 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertNotIn("http-equiv=\"refresh\"", sanitized.lower())
         self.assertNotIn("data:text/html", sanitized)
 
+    def test_static_html_removes_unclosed_scripts_and_slash_separated_handlers(self):
+        html = """<html><head><base href="../"></head><body>
+<a href="#"/onclick="alert(1)">safe</a>
+<script src="https://attacker.invalid/payload.js">
+</body></html>"""
+        sanitized = static_html_sanitize(
+            html, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        self.assertNotIn("onclick", sanitized.lower())
+        self.assertNotIn("attacker.invalid", sanitized)
+        self.assertEqual(sanitized.lower().count("<script"), 2)
+
+    def test_static_html_rewrites_unquoted_urls(self):
+        html = """<html><head><base href="../"></head><body>
+<a href=javascript:alert(1)>bad</a><img src=asset.png>
+</body></html>"""
+        sanitized = static_html_sanitize(
+            html, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        self.assertIn('href="#"', sanitized)
+        self.assertIn('src="../asset.png"', sanitized)
+        self.assertNotIn("javascript:", sanitized)
+
+    def test_static_html_places_csp_before_scripts(self):
+        html = '<html><head><base href="../"></head><body></body></html>'
+        sanitized = static_html_sanitize(
+            html, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        head = sanitized[sanitized.index("<head>") : sanitized.index("</head>")]
+        self.assertLess(head.index("Content-Security-Policy"), head.index("<script"))
+
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

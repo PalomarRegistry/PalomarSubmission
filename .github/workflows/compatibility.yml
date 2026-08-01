@@ -74,6 +74,7 @@ jobs:
       - name: Exercise cold trusted and candidate builds
         env:
           ELAN_TOOLCHAIN: leanprover/lean4:v4.31.0-rc2
+          PALOMAR_EXECUTION_BUDGET_SECONDS: "19800"
         run: |
           python pipeline/scripts/smoke_trusted_challenge.py \
             --source fixture \

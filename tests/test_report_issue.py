@@ -86,6 +86,50 @@ class ReportIssueTests(unittest.TestCase):
                 )
             )
 
+    def test_resource_exhaustion_is_retryable_infrastructure_not_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.report(issue=17)
+            report.update(
+                {
+                    "stage": "resource-exhausted",
+                    "error_kind": "infrastructure/resource-exhausted",
+                    "retryable": True,
+                }
+            )
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(report))
+            argv = [
+                "report_issue.py",
+                "--report",
+                str(path),
+                "--repo",
+                "example/repository",
+                "--issue-number",
+                "17",
+            ]
+
+            def fake_gh(args, **kwargs):
+                if args[:2] == ["api", "repos/example/repository/issues/17/comments"]:
+                    return "[]"
+                if args[:4] == ["issue", "comment", "17", "--repo"]:
+                    self.assertIn("infrastructure/resource-exhausted", kwargs["input_text"])
+                    self.assertIn("Retryable on a more capable worker", kwargs["input_text"])
+                return ""
+
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("scripts.report_issue.gh", side_effect=fake_gh) as gh,
+            ):
+                self.assertEqual(report_issue.main(), 0)
+            added = [
+                call.args[0][-1]
+                for call in gh.call_args_list
+                if call.args[0][:2] == ["issue", "edit"]
+                and "--add-label" in call.args[0]
+            ]
+            self.assertEqual(added, ["status:verification-error"])
+            self.assertNotIn("status:changes-requested", added)
+
     def test_matching_event_issue_is_the_only_authority_target(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"
