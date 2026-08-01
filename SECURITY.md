@@ -51,12 +51,15 @@ environment.
   pinned dependency closure. Every package name, canonical repository, and
   revision in that closure must match the submission's flattened manifest.
   Reusing a trusted package name while substituting a fork or commit is rejected.
-- The transitive source closure of `Challenge.lean` may contain only Lean core
-  or the verified pinned closure of an allowlisted root. Candidate-local helper
-  imports are rejected in the current protocol. Palomar-indexed provenance is
-  recorded by the metadata model, but it is not accepted as executable
-  Challenge input until Palomar can reconstruct that earlier statement surface
-  independently. The closure comes from Lean's own `--src-deps` result, and
+- The transitive source closure of `Challenge.lean` may contain only Lean core,
+  the verified pinned closure of an allowlisted root, or exact source snapshots
+  bound to a versioned Palomar record. Candidate-local helper imports remain
+  rejected. An indexed package is independently checked out at its recorded
+  repository commit and must carry its tracked nested manifest. Palomar resolves
+  each reached module to a unique tracked source file and invokes trusted Lean
+  directly, with no indexed Lake configuration or network; only verifier-owned
+  output is exposed to the canonical Challenge build. The closure comes
+  from Lean's own `--src-deps` result, and
   every dependency source attributed to a Git package must be a byte-for-byte
   match for a file tracked at that package's pinned commit. Sources below a
   sandbox-writable directory are never trusted.
@@ -73,18 +76,22 @@ integrity: candidate configuration could copy arbitrarily named bytes into a
 fresh build directory.
 
 Statement integrity instead comes from a separate build path. Mathlib's
-authenticated cache is run with official Mathlib as the workspace root and
+trusted cache is run with official Mathlib as the workspace root and
 with symlinks to the exact independently verified official closure. Other
-allowlisted roots are built from their own verified configuration. Candidate
-Lake configuration never runs during either operation. Trusted-root Lake URL
-resolution is pinned to that root's authenticated manifest and is accepted only
+allowlisted roots are built from their own pinned configuration. Indexed source
+closures are instead compiled directly by trusted Lean into verifier-owned
+output, so an indexed Lake plan cannot select a decoy source or object. Candidate
+Lake configuration never runs during these operations. Trusted-root Lake URL
+resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. The official
 Mathlib plan also replays the downloaded cache and receives write access to the
 one exact ProofWidgets replay-marker file it generates; qualified roots receive
 no write access to Mathlib source or build output. Trusted build directories are
-then frozen read/execute-only. The verifier compiles `Challenge.lean`
-directly with trusted Lean against only those frozen dependencies, outside the
+then frozen read/execute-only. Indexed output is qualified rather than
+Mathlib-level trust, and every indexed file actually reached by the Challenge
+is hashed and supplied to editorial definition review. The verifier compiles `Challenge.lean`
+directly with trusted Lean against only the frozen allowlisted and indexed dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
 copies only that one module into a fresh protected directory. Comparator's
 `LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
@@ -114,7 +121,7 @@ verified Mathlib cache client has a narrowly scoped exception because
 downloading official cache artifacts is its purpose. During that phase Mathlib
 is the workspace root and its exact official closure is exposed through
 temporary package links. The links are deleted immediately afterward, the
-authenticated output is frozen, and candidate Lake configuration is not loaded
+trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
@@ -165,18 +172,39 @@ require security review and an end-to-end comparison probe.
 This design still trusts the GitHub-hosted Linux runner, the Linux kernel and
 Landlock implementation, systemd, Git and its protocol parsers, the selected
 Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
-verifier/reporter, and the governance of the canonical allowlisted repositories.
-The sandbox limits effects of hostile project code; it does not make those
-components infallible.
+verifier/reporter, the governance of the canonical allowlisted repositories,
+and the contents served by Mathlib's cache service. HTTPS authenticates the
+cache endpoint in transit, but the source-derived cache key is not a digest or
+signature of the downloaded archive. A cache publisher or storage service able
+to replace an object is therefore able to affect the compiled definitions used
+by Palomar. This is an explicit trust decision, not a property established by
+the sandbox. The verified implementation details and residual operational
+questions are recorded in
+[`docs/mathlib-cache-trust.md`](docs/mathlib-cache-trust.md).
+
+The sandbox limits effects of hostile project code; it does not make any of
+these trusted components infallible.
 
 Current protocol limits include public GitHub repositories, `lakefile.toml` at
-the submission root, a 500 MiB checked-out-source cap, a 100 KiB / 1,000-line
-hard cap on `Challenge.lean`, standard fresh Lake build locations, a
-180-minute comparison timeout, and a 330-minute job-wide wall-clock deadline
-(including trusted setup) within a 350-minute job budget. Verification
-returns an infrastructure error or rejection—not a best-effort pass—when a
-toolchain is unsupported, provenance is ambiguous, confinement is unavailable,
-or execution times out.
+the submission root, a 500 MiB checked-out-source cap, a 256 KiB cap on
+`formalization.yaml`, a 100 KiB / 1,000-line hard cap on `Challenge.lean`, and
+standard fresh Lake build locations. The
+verifier itself supports a twelve-hour wall-clock allowance and applies no CPU
+quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
+descriptors, and files up to 1 TiB. These are emergency host-containment
+ceilings, not acceptance criteria; deployments may raise them on larger
+workers.
+
+The automatic GitHub-hosted tier currently supplies 330 minutes of verifier
+capacity inside its 350-minute job. Reaching that capacity, an OOM ceiling, a
+task/file ceiling, or disk exhaustion produces the explicit retryable outcome
+`infrastructure/resource-exhausted` and never a mathematical rejection or
+changes-requested result. The report includes bounded per-phase elapsed time,
+CPU time, maximum resident memory, observed task peak, and approximate peak
+workspace disk consumption. A ten-hour submission can be retried by running the
+same trusted workflow on a worker with the required lifetime; lack of such a
+worker leaves verification inconclusive rather than changing what Palomar
+accepts.
 
 The current pre-launch component review, adversarial evidence, repository
 controls, and accepted residual risks are recorded in

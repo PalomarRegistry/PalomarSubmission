@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import pathlib
 import re
 import secrets
 import shutil
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
     "lean-toolchain",
@@ -33,6 +36,7 @@ REQUIRED = (
     "comparator.json",
 )
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
+MAX_FORMALIZATION_BYTES = 256 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
@@ -49,6 +53,14 @@ COMPILED_ARTIFACT_SUFFIXES = {
     ".so",
     ".trace",
 }
+ARXIV_CATEGORY_NAMES = json.loads(
+    (ROOT / "taxonomies" / "arxiv-categories.json").read_text(encoding="utf-8")
+)
+MSC2020_NAMES = json.loads(
+    (ROOT / "taxonomies" / "msc2020-codes.json").read_text(encoding="utf-8")
+)
+ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
+MSC2020_CODES = frozenset(MSC2020_NAMES)
 SECTION_KEYS = {
     "Repository URL": "repository_url",
     "Commit SHA": "commit_sha",
@@ -77,9 +89,6 @@ SANDBOX_ENVIRONMENT = (
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_TERMINAL_PROMPT",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "PALOMAR_LANDRUN_REAL",
@@ -90,19 +99,66 @@ class VerificationError(RuntimeError):
     pass
 
 
+class ResourceExhausted(VerificationError):
+    """The available worker could not complete a verification phase."""
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: UniqueKeySafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise VerificationError("formalization.yaml contains an invalid mapping key") from error
+        if duplicate:
+            raise VerificationError(f"formalization.yaml contains a duplicate key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-EXECUTION_BUDGET_SECONDS = 330 * 60
+EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
+PERMISSIVE_RESOURCE_PROPERTIES = (
+    "MemoryHigh=95%",
+    "MemoryMax=98%",
+    "TasksMax=32768",
+    "LimitNOFILE=1048576",
+    f"LimitFSIZE={1024**4}",
+)
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
 _SYSTEMD_MANAGER: str | None = None
+_RESOURCE_METRICS_PATH: Path | None = None
+_RESOURCE_DISK_PATH: Path | None = None
 
 
-def install_execution_deadline(started_at_epoch: str | float | None = None) -> float | None:
+def install_execution_deadline(
+    started_at_epoch: str | float | None = None,
+    budget_seconds: int = EXECUTION_BUDGET_SECONDS,
+) -> float | None:
     """Arm the shared deadline, including trusted CI setup time when supplied."""
     global _EXECUTION_DEADLINE
 
     previous = _EXECUTION_DEADLINE
+    if budget_seconds < 60:
+        raise VerificationError("verification execution budget must be at least one minute")
     elapsed = 0.0
     if started_at_epoch is not None:
         try:
@@ -112,7 +168,7 @@ def install_execution_deadline(started_at_epoch: str | float | None = None) -> f
         if not math.isfinite(started_at) or started_at <= 0:
             raise VerificationError("invalid verification job start time")
         elapsed = max(0.0, _WALL_TIME() - started_at)
-    remaining = max(0.0, EXECUTION_BUDGET_SECONDS - elapsed)
+    remaining = max(0.0, budget_seconds - elapsed)
     _EXECUTION_DEADLINE = _MONOTONIC() + remaining
     return previous
 
@@ -148,6 +204,20 @@ def _bounded_stream_reader(stream: Any, destination: bytearray) -> None:
 
 def now() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def resource_metrics(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines()[:1000]:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
 
 
 def run(
@@ -237,6 +307,113 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _required_mapping(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise VerificationError(f"formalization.yaml field {path} must be a mapping")
+    return value
+
+
+def _required_text(value: Any, path: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise VerificationError(f"formalization.yaml field {path} must be a nonempty string")
+    return value.strip()
+
+
+def _required_people(value: Any, path: str) -> list[Any]:
+    if not isinstance(value, list) or not value:
+        raise VerificationError(f"formalization.yaml field {path} must be a nonempty list")
+    for index, person in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if isinstance(person, str):
+            _required_text(person, item_path)
+        elif isinstance(person, dict):
+            _required_text(person.get("name"), f"{item_path}.name")
+        else:
+            raise VerificationError(
+                f"formalization.yaml field {item_path} must be a name or a mapping with a name"
+            )
+    return value
+
+
+def _required_classifications(
+    value: Any,
+    path: str,
+    *,
+    allowed: frozenset[str],
+    minimum: int,
+    maximum: int,
+) -> list[str]:
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        count = f"{minimum} or {maximum}" if minimum + 1 == maximum else f"{minimum}–{maximum}"
+        raise VerificationError(
+            f"formalization.yaml field {path} must contain {count} classification codes"
+        )
+    for index, code in enumerate(value):
+        if not isinstance(code, str) or code not in allowed:
+            raise VerificationError(
+                f"formalization.yaml field {path}[{index}] is not a recognized classification code"
+            )
+    if len(value) != len(set(value)):
+        raise VerificationError(f"formalization.yaml field {path} must not contain duplicates")
+    return value
+
+
+def load_formalization_metadata(path: Path) -> dict[str, Any]:
+    """Parse and enforce Palomar's mechanical minimum for formalization.yaml."""
+    if path.stat().st_size > MAX_FORMALIZATION_BYTES:
+        raise VerificationError("formalization.yaml exceeds the 256 KiB hard cap")
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeySafeLoader)
+    except (UnicodeDecodeError, yaml.YAMLError) as error:
+        detail = str(error).splitlines()[0] if str(error) else type(error).__name__
+        raise VerificationError(f"formalization.yaml is not valid YAML: {detail}") from error
+    if not isinstance(data, dict):
+        raise VerificationError("formalization.yaml must contain one top-level mapping")
+
+    project = _required_mapping(data.get("project"), "project")
+    _required_text(project.get("name"), "project.name")
+    _required_people(project.get("authors"), "project.authors")
+    _required_text(project.get("license"), "project.license")
+
+    classification = _required_mapping(data.get("classification"), "classification")
+    _required_classifications(
+        classification.get("arxiv"),
+        "classification.arxiv",
+        allowed=ARXIV_CATEGORIES,
+        minimum=1,
+        maximum=2,
+    )
+    _required_classifications(
+        classification.get("msc2020"),
+        "classification.msc2020",
+        allowed=MSC2020_CODES,
+        minimum=1,
+        maximum=8,
+    )
+
+    sources = data.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise VerificationError("formalization.yaml field sources must be a nonempty list")
+    for index, source in enumerate(sources):
+        source_path = f"sources[{index}]"
+        item = _required_mapping(source, source_path)
+        _required_text(item.get("title"), f"{source_path}.title")
+        _required_people(item.get("authors"), f"{source_path}.authors")
+        _required_text(item.get("id"), f"{source_path}.id")
+
+    automation = _required_mapping(data.get("automation"), "automation")
+    methods = automation.get("methods")
+    if not isinstance(methods, list) or not methods:
+        raise VerificationError("formalization.yaml field automation.methods must be a nonempty list")
+    for index, method in enumerate(methods):
+        item = _required_mapping(method, f"automation.methods[{index}]")
+        _required_text(item.get("method"), f"automation.methods[{index}].method")
+
+    review = _required_mapping(data.get("review"), "review")
+    _required_text(review.get("status"), "review.status")
+    return data
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -476,6 +653,7 @@ def prepare(args: argparse.Namespace) -> int:
         if lakefile.stat().st_size > MAX_CONFIGURATION_BYTES:
             raise VerificationError("lakefile.toml exceeds the 1 MiB hard cap")
         tomllib.loads(lakefile.read_text(encoding="utf-8"))
+        formalization = load_formalization_metadata(source / "formalization.yaml")
 
         toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
@@ -510,6 +688,25 @@ def prepare(args: argparse.Namespace) -> int:
                     "path": "Solution.lean",
                     "sha256": sha256(source / "Solution.lean"),
                 },
+                "formalization": {
+                    "path": "formalization.yaml",
+                    "sha256": sha256(source / "formalization.yaml"),
+                    "project_name": formalization["project"]["name"].strip(),
+                    "source_count": len(formalization["sources"]),
+                    "automation_method_count": len(formalization["automation"]["methods"]),
+                    "review_status": formalization["review"]["status"].strip(),
+                },
+                "classification": {
+                    "arxiv": [
+                        {"code": code, "name": ARXIV_CATEGORY_NAMES[code]}
+                        for code in formalization["classification"]["arxiv"]
+                    ],
+                    "msc2020": [
+                        {"code": code, "name": MSC2020_NAMES[code]}
+                        for code in formalization["classification"]["msc2020"]
+                    ],
+                },
+                # Retained for report-schema compatibility with already published tooling.
                 "formalization_sha256": sha256(source / "formalization.yaml"),
                 "comparator_config_sha256": sha256(source / "comparator.json"),
                 "comparator": {
@@ -581,15 +778,101 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
     return packages
 
 
-def indexed_versions(database: Path) -> dict[tuple[str, str], str]:
-    result: dict[tuple[str, str], str] = {}
+def indexed_versions(database: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Return one stable, versioned certificate for every accepted source snapshot.
+
+    Multiple Palomar records can legitimately cite the same repository commit.
+    Selecting the earliest accepted record is deterministic and remains stable as
+    later records are appended to the database.
+    """
+    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in (database / "entries").glob("*.json"):
         entry = json.loads(path.read_text(encoding="utf-8"))
         source = entry.get("source", {})
         repository = source.get("repository")
         commit = source.get("commit")
-        if repository and commit:
-            result[(repository.lower(), commit)] = entry["id"]
+        identifier = entry.get("id")
+        version = entry.get("version")
+        accepted_at = entry.get("accepted_at")
+        if (
+            isinstance(repository, str)
+            and isinstance(commit, str)
+            and SHA_RE.fullmatch(commit)
+            and isinstance(identifier, str)
+            and PALOMAR_ID_RE.fullmatch(identifier)
+            and isinstance(version, int)
+            and not isinstance(version, bool)
+            and version >= 1
+            and isinstance(accepted_at, str)
+        ):
+            candidates.setdefault((repository.lower(), commit), []).append(
+                {
+                    "repository": repository,
+                    "revision": commit,
+                    "palomar_id": identifier,
+                    "palomar_version": version,
+                    "accepted_at": accepted_at,
+                }
+            )
+    return {
+        key: min(
+            records,
+            key=lambda item: (
+                item["accepted_at"],
+                item["palomar_id"],
+                item["palomar_version"],
+            ),
+        )
+        for key, records in candidates.items()
+    }
+
+
+def indexed_packages(
+    source: Path,
+    database: Path,
+    packages: list[dict[str, str]],
+) -> dict[str, dict[str, Any]]:
+    """Bind materialized Git packages to exact versioned Palomar records."""
+    indexed = indexed_versions(database)
+    result: dict[str, dict[str, Any]] = {}
+    for package in packages:
+        repository = package["repository"]
+        revision = package["revision"]
+        record = indexed.get((repository.lower(), revision))
+        if record is None:
+            continue
+        if package["url"].startswith("path:"):
+            raise VerificationError(
+                f"Palomar-indexed package {package['name']!r} may not use a path dependency"
+            )
+        checkout = package_checkout(source, package)
+        git_env = os.environ.copy()
+        git_env.update(
+            {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
+        head = run(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                str(checkout),
+                "rev-parse",
+                "HEAD",
+            ],
+            env=git_env,
+        ).stdout.strip()
+        if head != revision:
+            raise VerificationError(
+                f"Palomar-indexed package {package['name']!r} checkout does not match its commit"
+            )
+        result[package["name"]] = record
     return result
 
 
@@ -683,7 +966,7 @@ def verify_official_revision(
             f"+{official_ref}:{fetched_ref}",
         ],
         env=git_env,
-        timeout=1800,
+        timeout=EXECUTION_BUDGET_SECONDS,
     )
     ancestry = run(
         [*git, "merge-base", "--is-ancestor", revision, fetched_ref],
@@ -805,6 +1088,10 @@ def trusted_package_url_map(
             raise VerificationError(
                 f"trusted package {name!r} URL does not match its authenticated repository"
             )
+        if actual.get("revision") != expected.get("revision"):
+            raise VerificationError(
+                f"trusted package {name!r} revision does not match its verified manifest"
+            )
         urls[name] = expected_url
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
@@ -817,9 +1104,9 @@ def package_lake_directories(source: Path, name: str) -> tuple[Path, Path]:
     return (checkout / ".lake" / "build").resolve(), (checkout / ".lake" / "config").resolve()
 
 
-def trusted_lake_directories(source: Path, allowlist: dict[str, tuple[str, str]]) -> list[Path]:
+def trusted_lake_directories(source: Path, names: Any) -> list[Path]:
     result: list[Path] = []
-    for name in allowlist:
+    for name in names:
         for directory in package_lake_directories(source, name):
             if not directory.is_dir():
                 raise VerificationError(f"trusted package Lake directory is missing: {directory}")
@@ -848,6 +1135,13 @@ def nested_package_links(
         actual = by_name.get(name)
         if actual is None:
             raise VerificationError(f"trusted root dependency {name!r} is not materialized")
+        if (
+            actual["repository"].lower() != expected["repository"].lower()
+            or actual["revision"] != expected["revision"]
+        ):
+            raise VerificationError(
+                f"trusted root dependency {name!r} does not match its pinned manifest"
+            )
         target = package_checkout(source, actual)
         if not target.is_dir() or target.is_symlink():
             raise VerificationError(f"trusted root dependency is not a real checkout: {target}")
@@ -873,7 +1167,7 @@ def build_allowlisted_roots(
     for root in sorted(roots, key=lambda item: item["trust_level"] != "high"):
         repository = str(root["repository"])
         if repository.lower() == "leanprover-community/mathlib4":
-            # Mathlib and its official closure come from its authenticated cache.
+            # Mathlib and its official closure come from its explicitly trusted cache.
             continue
         root_package = next(
             (
@@ -922,11 +1216,187 @@ def build_allowlisted_roots(
                 readable_paths=readable_paths,
                 executable_paths=executable_paths,
                 tools=tools,
-                timeout=3600,
+                timeout=EXECUTION_BUDGET_SECONDS,
             )
         finally:
             if nested.is_dir():
                 shutil.rmtree(nested)
+
+
+def build_indexed_roots(
+    work: Path,
+    source: Path,
+    *,
+    packages: list[dict[str, str]],
+    indexed: dict[str, dict[str, Any]],
+    allowlist: dict[str, tuple[str, str]],
+    base_env: dict[str, str],
+    lean: Path,
+    lean_prefix: Path,
+    landrun: Path,
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> tuple[Path | None, list[Path]]:
+    """Compile the imported indexed source closure into verifier-owned output.
+
+    Indexed Lake configuration is not a source-to-object authority: a qualified
+    project may select another source directory, run elaborator code, or write a
+    deceptive build artifact. Resolve imported modules to unique tracked source
+    files, follow their imports, and invoke trusted Lean directly. Only the
+    verifier-owned output returned here enters the canonical Challenge path.
+    """
+    by_name = {package["name"]: package for package in packages}
+    indexed_directories = {
+        name: package_checkout(source, by_name[name]) for name in sorted(indexed)
+    }
+    for name, directory in indexed_directories.items():
+        if not directory.is_dir() or not source_matches_checkout(
+            directory / "lake-manifest.json", directory
+        ):
+            raise VerificationError(
+                f"Palomar-indexed package {name!r} lacks its tracked pinned manifest"
+            )
+
+    output = work / "indexed-olean"
+    scratch = work / "indexed-compile-scratch"
+    for directory in (output, scratch):
+        if directory.exists() or directory.is_symlink():
+            raise VerificationError(f"indexed compilation path is not fresh: {directory}")
+        directory.mkdir()
+    home = scratch / "home"
+    temporary = scratch / "tmp"
+    home.mkdir()
+    temporary.mkdir()
+
+    allowlisted_paths: list[Path] = []
+    for name in sorted(allowlist):
+        path = package_lake_directories(source, name)[0] / "lib" / "lean"
+        if path.is_dir():
+            allowlisted_paths.append(path.resolve())
+    core_path = (lean_prefix / "lib" / "lean").resolve()
+    trusted_lean_paths = [
+        *([core_path] if core_path.is_dir() else []),
+        *allowlisted_paths,
+    ]
+    compile_env = base_env.copy()
+    compile_env.update(
+        {
+            "HOME": str(home.resolve()),
+            "TMPDIR": str(temporary.resolve()),
+            "LEAN_ABORT_ON_PANIC": "1",
+            "LEAN_PATH": os.pathsep.join(
+                str(path) for path in [*trusted_lean_paths, output.resolve()]
+            ),
+        }
+    )
+
+    def module_suffix(module: str) -> pathlib.PurePosixPath:
+        parts = module.split(".")
+        if (
+            not parts
+            or any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts)
+        ):
+            raise VerificationError(f"unsafe imported Lean module name: {module!r}")
+        return pathlib.PurePosixPath(*parts).with_suffix(".lean")
+
+    resolved_sources: dict[str, tuple[Path, Path] | None] = {}
+
+    def source_for(module: str) -> tuple[Path, Path] | None:
+        if module in resolved_sources:
+            return resolved_sources[module]
+        suffix = module_suffix(module)
+        matches: list[tuple[Path, Path]] = []
+        for package_dir in indexed_directories.values():
+            for candidate in package_dir.rglob(suffix.name):
+                relative = candidate.relative_to(package_dir)
+                if relative.parts and relative.parts[0] in {".git", ".lake"}:
+                    continue
+                if tuple(relative.parts[-len(suffix.parts) :]) != suffix.parts:
+                    continue
+                if (
+                    candidate.is_symlink()
+                    or not candidate.is_file()
+                    or not source_matches_checkout(candidate, package_dir)
+                ):
+                    raise VerificationError(
+                        f"indexed module {module!r} is not a tracked source file"
+                    )
+                root = candidate.resolve()
+                for _part in suffix.parts:
+                    root = root.parent
+                matches.append((candidate.resolve(), root))
+        if len(matches) > 1:
+            raise VerificationError(f"indexed module {module!r} resolves ambiguously")
+        if matches and any(
+            (root / suffix).with_suffix(".olean").is_file()
+            for root in trusted_lean_paths
+        ):
+            raise VerificationError(
+                f"indexed module {module!r} shadows a Lean core or allowlisted module"
+            )
+        resolved_sources[module] = matches[0] if matches else None
+        return resolved_sources[module]
+
+    compiled: dict[str, Path] = {}
+    visiting: set[str] = set()
+    source_roots: set[Path] = set()
+
+    def compile_module(module: str) -> None:
+        if module in compiled:
+            return
+        resolved = source_for(module)
+        if resolved is None:
+            return  # Lean core or an independently built allowlisted module.
+        if module in visiting:
+            raise VerificationError(f"indexed module import cycle reaches {module!r}")
+        visiting.add(module)
+        source_file, source_root = resolved
+        for imported in direct_imports(source_file.read_text(encoding="utf-8")):
+            compile_module(imported)
+        visiting.remove(module)
+        target = output.joinpath(*module.split(".")).with_suffix(".olean")
+        if target.exists() or target.is_symlink():
+            raise VerificationError(f"indexed compiler output was pre-created: {target}")
+        module_work = scratch / "modules" / hashlib.sha256(module.encode()).hexdigest()
+        if module_work.exists() or module_work.is_symlink():
+            raise VerificationError(f"indexed module work path was pre-created: {module_work}")
+        untrusted_target = module_work.joinpath(*module.split(".")).with_suffix(".olean")
+        untrusted_target.parent.mkdir(parents=True)
+        sandboxed_run(
+            [str(lean), "-o", str(untrusted_target), str(source_file)],
+            cwd=source_file.parent,
+            environment=compile_env,
+            landrun=landrun,
+            writable_directories=[home.resolve(), temporary.resolve(), module_work.resolve()],
+            readable_paths=[*readable_paths, output.resolve()],
+            executable_paths=[*executable_paths, *trusted_lean_paths],
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        if untrusted_target.is_symlink() or not untrusted_target.is_file():
+            raise VerificationError(f"trusted indexed compilation produced no module: {module}")
+        actual = {
+            path.resolve()
+            for path in module_work.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }
+        if actual != {untrusted_target.resolve()}:
+            raise VerificationError("indexed elaboration wrote unexpected protected output")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(untrusted_target, target)
+        if target.is_symlink() or not target.is_file():
+            raise VerificationError(f"protected indexed module is not regular: {module}")
+        compiled[module] = target.resolve()
+        source_roots.add(source_root)
+
+    for imported in direct_imports((source / "Challenge.lean").read_text(encoding="utf-8")):
+        compile_module(imported)
+    if not compiled:
+        shutil.rmtree(output)
+        return None, []
+    tools.update({path: sha256(path) for path in compiled.values()})
+    return output.resolve(), sorted(source_roots)
 
 
 def source_package(path: Path, source: Path) -> str | None:
@@ -1206,21 +1676,57 @@ def sandboxed_run(
         readable_directories=[cwd],
         unrestricted_network=unrestricted_network,
     )
+    systemd_payload = confined
+    if _RESOURCE_METRICS_PATH is not None:
+        metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
+        python = Path(sys.executable).resolve()
+        if not metrics_wrapper.is_file():
+            raise VerificationError("trusted resource measurement wrapper is missing")
+        phase = Path(command[0]).name[:80] or "phase"
+        systemd_payload = [
+            str(python),
+            str(metrics_wrapper),
+            "--output",
+            str(_RESOURCE_METRICS_PATH),
+            "--phase",
+            phase,
+            "--disk-path",
+            str(_RESOURCE_DISK_PATH or cwd),
+            "--",
+            *confined,
+        ]
     proc = run(
         systemd_command(
-            confined,
+            systemd_payload,
             cwd=cwd,
             environment=environment,
             timeout=timeout,
             unrestricted_network=unrestricted_network,
-            resource_properties=resource_properties,
+            resource_properties=tuple(
+                dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
+            ),
         ),
         cwd=cwd,
         env=environment,
         timeout=timeout,
-        check=check,
+        check=False,
     )
     verify_tool_snapshot(tools)
+    # Payload output is attacker-controlled and must never manufacture an
+    # infrastructure outcome merely by printing an OOM or timeout phrase.
+    # Signal-style wrapper exits are the bounded evidence available here;
+    # Python-enforced wall-clock expiry is reported by TimeoutExpired.
+    resource_signals = {124, 137, 143, 152, 153}
+    if proc.returncode in resource_signals:
+        raise ResourceExhausted(
+            f"worker resource ceiling reached while running {Path(command[0]).name} "
+            f"(exit {proc.returncode})"
+        )
+    if check and proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()[-8000:]
+        raise VerificationError(
+            f"{' '.join(command[:3])} failed ({proc.returncode}): {detail}"
+        )
     return proc
 
 
@@ -1398,9 +1904,17 @@ def verify_sandbox_confinement(
         stderr=subprocess.DEVNULL,
     )
     try:
-        unconfined = Path(f"/proc/{holder.pid}/environ").read_bytes()
-        if token.encode() not in unconfined or holder.poll() is not None:
-            raise VerificationError("process-environment probe lacks a live positive control")
+        # Popen returns before the child necessarily completes exec; until then
+        # /proc can still expose the pre-exec environment. Wait briefly for the
+        # sentinel so a scheduler race does not masquerade as failed isolation.
+        positive_deadline = time.monotonic() + 2
+        while True:
+            unconfined = Path(f"/proc/{holder.pid}/environ").read_bytes()
+            if token.encode() in unconfined and holder.poll() is None:
+                break
+            if holder.poll() is not None or time.monotonic() >= positive_deadline:
+                raise VerificationError("process-environment probe lacks a live positive control")
+            time.sleep(0.01)
         proc_read = sandboxed_run(
             [str(python), "-c", read_script, f"/proc/{holder.pid}/environ"],
             cwd=cwd,
@@ -1582,7 +2096,7 @@ def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path
         run(
             [*git, "fetch", "--quiet", "--depth=1", "origin", revision],
             env=git_env,
-            timeout=1800,
+            timeout=EXECUTION_BUDGET_SECONDS,
         )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
         writable.extend(remove_untrusted_lake_state(package_dir))
@@ -1668,7 +2182,7 @@ def get_mathlib_cache(
 
     # Run Mathlib as the workspace root so candidate Lake configuration never
     # executes during the network-enabled phase. Symlinks expose only Mathlib's
-    # independently verified official closure, so authenticated cache output is
+    # independently verified official closure, so trusted cache output is
     # written into the exact flattened checkouts the candidate will later read.
     closure = {
         mathlib["name"],
@@ -1713,11 +2227,11 @@ def get_mathlib_cache(
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            timeout=1800,
+            timeout=EXECUTION_BUDGET_SECONDS,
             unrestricted_network=True,
             resource_properties=resource_properties,
         )
-        # Replay the authenticated cache while the high-trust Mathlib closure
+        # Replay the trusted cache while the high-trust Mathlib closure
         # is still the only writable package surface. Lake records local hash
         # metadata during replay; creating it here prevents a qualified root
         # from later needing write access to Mathlib or its dependencies.
@@ -1731,7 +2245,7 @@ def get_mathlib_cache(
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            timeout=3600,
+            timeout=EXECUTION_BUDGET_SECONDS,
         )
     finally:
         if nested_packages.is_symlink():
@@ -1816,13 +2330,14 @@ def audit_challenge_sources(
     dependency_sources: list[Path],
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
+    indexed: dict[str, dict[str, Any]],
     writable_directories: list[Path],
 ) -> dict[str, Any]:
     packages = manifest_packages(source)
     by_name = {package["name"]: package for package in packages}
-    indexed = indexed_versions(database)
     untrusted: list[str] = []
-    dependencies: dict[tuple[str, str, str | None], None] = {}
+    dependencies: dict[tuple[str, str, str | None, int | None, str | None], None] = {}
+    review_source_files: list[dict[str, Any]] = []
     qualified_allowlisted = False
     toolchain_prefix = lean_prefix.resolve()
 
@@ -1851,14 +2366,35 @@ def audit_challenge_sources(
             continue
         if package_name in allowlist:
             repository, level = allowlist[package_name]
-            dependencies[(repository, "allowlisted", None)] = None
+            dependencies[(repository, "allowlisted", None, None, None)] = None
             qualified_allowlisted = qualified_allowlisted or level == "qualified"
             continue
-        repository = str(package["repository"])
-        revision = package["revision"]
-        palomar_id = indexed.get((repository.lower(), revision))
-        if palomar_id:
-            dependencies[(repository, "palomar-indexed", palomar_id)] = None
+        record = indexed.get(package_name)
+        if record:
+            repository = str(record["repository"])
+            revision = str(record["revision"])
+            palomar_id = str(record["palomar_id"])
+            palomar_version = int(record["palomar_version"])
+            if (
+                package["repository"].lower() != repository.lower()
+                or package["revision"] != revision
+            ):
+                untrusted.append(str(resolved))
+                continue
+            dependencies[
+                (repository, "palomar-indexed", palomar_id, palomar_version, revision)
+            ] = None
+            relative = resolved.relative_to(package_dir.resolve()).as_posix()
+            review_source_files.append(
+                {
+                    "repository": repository,
+                    "revision": revision,
+                    "palomar_id": palomar_id,
+                    "palomar_version": palomar_version,
+                    "path": relative,
+                    "sha256": sha256(resolved),
+                }
+            )
             continue
         untrusted.append(str(resolved))
 
@@ -1867,8 +2403,10 @@ def audit_challenge_sources(
             "repository": repository,
             "provenance": provenance,
             **({"palomar_id": palomar_id} if palomar_id else {}),
+            **({"palomar_version": palomar_version} if palomar_version else {}),
+            **({"revision": revision} if revision else {}),
         }
-        for repository, provenance, palomar_id in sorted(dependencies)
+        for repository, provenance, palomar_id, palomar_version, revision in sorted(dependencies)
     ]
     qualified = qualified_allowlisted or any(
         item["provenance"] == "palomar-indexed" for item in serialized_dependencies
@@ -1878,6 +2416,10 @@ def audit_challenge_sources(
         "dependencies": serialized_dependencies,
         "untrusted_sources": untrusted[:100],
         "trust_level": "qualified" if qualified else "high",
+        "review_source_files": sorted(
+            review_source_files,
+            key=lambda item: (item["repository"].lower(), item["revision"], item["path"]),
+        ),
     }
 
 
@@ -1936,6 +2478,8 @@ def compile_canonical_challenge(
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
+    indexed_lean_path: Path | None,
+    indexed_source_roots: list[Path],
     environment: dict[str, str],
     landrun: Path,
     readable_paths: list[Path],
@@ -1973,8 +2517,17 @@ def compile_canonical_challenge(
         path = package_dir / ".lake" / "build" / "lib" / "lean"
         if path.is_dir():
             lean_paths.append(path.resolve())
+    if indexed_lean_path is not None:
+        lean_paths.append(indexed_lean_path.resolve())
     lean_paths = list(dict.fromkeys(lean_paths))
-    source_paths = [source.resolve(), *trusted_packages.values()]
+    canonical_readable_paths = list(readable_paths)
+    if indexed_lean_path is not None:
+        canonical_readable_paths.append(indexed_lean_path.resolve())
+    source_paths = [
+        source.resolve(),
+        *trusted_packages.values(),
+        *indexed_source_roots,
+    ]
     lake_source = lean_prefix / "src" / "lean" / "lake"
     if lake_source.is_dir():
         source_paths.append(lake_source.resolve())
@@ -1995,10 +2548,10 @@ def compile_canonical_challenge(
         environment=canonical_env,
         landrun=landrun,
         writable_directories=[scratch.resolve()],
-        readable_paths=readable_paths,
+        readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
         tools=tools,
-        timeout=1800,
+        timeout=EXECUTION_BUDGET_SECONDS,
     )
     if compiled_olean.is_symlink() or not compiled_olean.is_file():
         raise VerificationError("trusted Challenge compilation produced no module")
@@ -2010,7 +2563,7 @@ def compile_canonical_challenge(
         environment=canonical_env,
         landrun=landrun,
         writable_directories=[scratch.resolve()],
-        readable_paths=readable_paths,
+        readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
         tools=tools,
     )
@@ -2030,7 +2583,7 @@ def compile_canonical_challenge(
 
 
 def execute(args: argparse.Namespace) -> int:
-    global _EXECUTION_DEADLINE
+    global _EXECUTION_DEADLINE, _RESOURCE_DISK_PATH, _RESOURCE_METRICS_PATH
 
     output = Path(args.output).resolve()
     work = Path(args.work_dir).resolve()
@@ -2038,7 +2591,10 @@ def execute(args: argparse.Namespace) -> int:
     if report.get("status") != "pending":
         return 0
     previous_deadline = _EXECUTION_DEADLINE
+    previous_metrics_path = _RESOURCE_METRICS_PATH
+    previous_disk_path = _RESOURCE_DISK_PATH
     source = work / "source"
+    metrics_path = work / "resource-metrics.jsonl"
     report.update(
         {
             "status": "error",
@@ -2051,6 +2607,7 @@ def execute(args: argparse.Namespace) -> int:
     tools: dict[Path, str] = {}
 
     def guarded_write() -> None:
+        report["resource_usage"] = resource_metrics(metrics_path)
         if tools:
             try:
                 verify_tool_snapshot(tools)
@@ -2062,13 +2619,22 @@ def execute(args: argparse.Namespace) -> int:
         write_json(output, report)
 
     try:
-        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
+        if metrics_path.is_symlink() or (metrics_path.exists() and not metrics_path.is_file()):
+            raise VerificationError("resource metrics path is not a regular file")
+        metrics_path.unlink(missing_ok=True)
+        _RESOURCE_METRICS_PATH = metrics_path
+        _RESOURCE_DISK_PATH = source
+        install_execution_deadline(
+            os.environ.get("PALOMAR_JOB_STARTED_AT"),
+            getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
+        )
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()
         adapter = (ROOT / "scripts" / "landrun_passthrough.py").resolve()
+        metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         verifier = Path(__file__).resolve()
-        for tool in (comparator, lean4export, landrun, adapter, verifier):
+        for tool in (comparator, lean4export, landrun, adapter, metrics_wrapper, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
         env = os.environ.copy()
@@ -2124,6 +2690,7 @@ def execute(args: argparse.Namespace) -> int:
             lean4export,
             landrun,
             adapter,
+            metrics_wrapper,
             lake,
             lean,
             python,
@@ -2149,6 +2716,7 @@ def execute(args: argparse.Namespace) -> int:
                 lean4export,
                 landrun,
                 adapter,
+                metrics_wrapper,
                 verifier,
                 lake,
                 lean,
@@ -2165,6 +2733,7 @@ def execute(args: argparse.Namespace) -> int:
                 lean4export,
                 landrun,
                 adapter,
+                metrics_wrapper,
                 verifier,
                 lake,
                 lean,
@@ -2219,12 +2788,45 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
 
-        trusted_directories = set(trusted_lake_directories(source, allowlist))
-        trusted_build_directories = {package_lake_directories(source, name)[0] for name in allowlist}
+        database = Path(args.database).resolve()
+        indexed = {
+            name: record
+            for name, record in indexed_packages(source, database, packages).items()
+            if name not in allowlist
+        }
+        report["stage"] = "indexed-roots"
+        indexed_lean_path, indexed_source_roots = build_indexed_roots(
+            work,
+            source,
+            packages=packages,
+            indexed=indexed,
+            allowlist=allowlist,
+            base_env=env,
+            lean=lean,
+            lean_prefix=lean_prefix,
+            landrun=landrun,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+        )
+
+        trusted_names = set(allowlist)
+        trusted_directories = set(trusted_lake_directories(source, trusted_names))
+        trusted_build_directories = {
+            package_lake_directories(source, name)[0] for name in trusted_names
+        }
         candidate_writable = [
             directory for directory in writable_directories if directory not in trusted_directories
         ]
-        executable_paths = sorted({*executable_paths, *trusted_build_directories})
+        if indexed_lean_path is not None:
+            require_protected_paths([indexed_lean_path], candidate_writable)
+        executable_paths = sorted(
+            {
+                *executable_paths,
+                *trusted_build_directories,
+                *([indexed_lean_path] if indexed_lean_path is not None else []),
+            }
+        )
         report["stage"] = "canonical-challenge"
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
@@ -2232,6 +2834,8 @@ def execute(args: argparse.Namespace) -> int:
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
+            indexed_lean_path=indexed_lean_path,
+            indexed_source_roots=indexed_source_roots,
             environment=env,
             landrun=landrun,
             readable_paths=readable_paths,
@@ -2243,10 +2847,11 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
             source,
-            database=Path(args.database).resolve(),
+            database=database,
             dependency_sources=dependency_sources,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
+            indexed=indexed,
             writable_directories=candidate_writable,
         )
         report["project_dependencies"] = packages
@@ -2257,6 +2862,7 @@ def execute(args: argparse.Namespace) -> int:
                 "trust_level": audit["trust_level"],
                 "untrusted_sources": audit["untrusted_sources"],
                 "canonical_olean_sha256": sha256(canonical_olean),
+                "review_source_files": audit["review_source_files"],
             }
         )
         if audit["untrusted_sources"]:
@@ -2328,7 +2934,7 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            timeout=180 * 60,
+            timeout=EXECUTION_BUDGET_SECONDS,
             check=False,
         )
         log = (proc.stdout + "\n" + proc.stderr).strip()
@@ -2350,9 +2956,17 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "complete"
         report["checked_at"] = now()
         guarded_write()
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, ResourceExhausted) as error:
         report["status"] = "error"
-        report["errors"].append("mechanical verification timed out")
+        report["stage"] = "resource-exhausted"
+        report["error_kind"] = "infrastructure/resource-exhausted"
+        report["retryable"] = True
+        if isinstance(error, subprocess.TimeoutExpired):
+            report["errors"].append(
+                "worker wall-clock capacity was exhausted; retry on a longer-running worker"
+            )
+        else:
+            report["errors"].append(str(error))
         guarded_write()
     except Exception as error:  # noqa: BLE001 -- all verifier failures become a bounded report
         report["status"] = "error"
@@ -2360,6 +2974,8 @@ def execute(args: argparse.Namespace) -> int:
         guarded_write()
     finally:
         _EXECUTION_DEADLINE = previous_deadline
+        _RESOURCE_METRICS_PATH = previous_metrics_path
+        _RESOURCE_DISK_PATH = previous_disk_path
     return 0
 
 
@@ -2381,6 +2997,12 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--comparator-commit", required=True)
     execute_parser.add_argument("--landrun-commit", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
+    execute_parser.add_argument(
+        "--execution-budget-seconds",
+        type=int,
+        default=EXECUTION_BUDGET_SECONDS,
+        help="trusted worker wall-clock capacity (default: 12 hours)",
+    )
     execute_parser.set_defaults(func=execute)
     return result
 

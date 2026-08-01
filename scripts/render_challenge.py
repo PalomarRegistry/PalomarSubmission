@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -651,44 +652,152 @@ def tree_bytes(root: Path, *, stop_after: int | None = None) -> int:
     return total
 
 
+class _StaticHTMLSanitizer(HTMLParser):
+    """Serialize generated HTML while removing executable/navigation attributes.
+
+    Attribute rewriting must be parser-based: whole-document regular
+    expressions also see words inside quoted attribute values (including valid
+    Lean identifiers) and can corrupt them.
+    """
+
+    _STRIPPED_ATTRIBUTES = {
+        "srcdoc",
+        "action",
+        "formaction",
+        "ping",
+        "target",
+    }
+
+    def __init__(self, declarations: list[str]) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self.bases: list[str | None] = []
+        self.declarations = set(declarations)
+        self.found_declarations: set[str] = set()
+        self.script_depth = 0
+
+    @staticmethod
+    def _rewrite_url(attribute: str, raw: str) -> str:
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            return value
+        if value.startswith("data:"):
+            safe_data = attribute == "src" and re.match(
+                r"^data:image/(?:gif|jpeg|png|webp);", value, flags=re.IGNORECASE
+            )
+            return value if safe_data else "#"
+        if (
+            value.startswith(("/", "../"))
+            or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
+            or any(part == ".." for part in value.split("/"))
+        ):
+            return "#"
+        return f"../{value.removeprefix('./')}"
+
+    def _start_tag(
+        self, tag: str, attrs: list[tuple[str, str | None]], *, closed: bool
+    ) -> None:
+        tag = tag.lower()
+        if self.script_depth:
+            return
+        if tag == "script":
+            if not closed:
+                self.script_depth = 1
+            return
+        if tag == "meta":
+            return
+        if tag == "base":
+            self.bases.append(dict(attrs).get("href"))
+            return
+
+        attr_names = {name.lower() for name, _value in attrs}
+        binding = next(
+            (value for name, value in attrs if name.lower() == "data-binding"), None
+        )
+        if binding and binding.startswith("const-") and "id" in attr_names:
+            declaration = binding.removeprefix("const-")
+            if declaration in self.declarations:
+                self.found_declarations.add(declaration)
+
+        rendered: list[str] = []
+        for name, value in attrs:
+            name = name.lower()
+            if name.startswith("on") or name in self._STRIPPED_ATTRIBUTES:
+                continue
+            if value is None:
+                rendered.append(name)
+                continue
+            if name in {"href", "src", "xlink:href"}:
+                value = self._rewrite_url(name, value)
+            rendered.append(f'{name}="{html.escape(value, quote=True)}"')
+        suffix = " /" if closed else ""
+        attributes = f" {' '.join(rendered)}" if rendered else ""
+        self.parts.append(f"<{tag}{attributes}{suffix}>")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._start_tag(tag, attrs, closed=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._start_tag(tag, attrs, closed=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self.script_depth:
+            if tag == "script":
+                self.script_depth = 0
+            return
+        if tag not in {"base", "meta", "script"}:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self.script_depth:
+            self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if not self.script_depth:
+            self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self.script_depth:
+            self.parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        if not self.script_depth:
+            self.parts.append(f"<!--{data}-->")
+
+    def handle_decl(self, decl: str) -> None:
+        if not self.script_depth:
+            self.parts.append(f"<!{decl}>")
+
+    def handle_pi(self, data: str) -> None:
+        if not self.script_depth:
+            self.parts.append(f"<?{data}>")
+
+
 def static_html_sanitize(
     text: str,
     sanitizer_src: str,
     runtime_src: str,
     declarations: list[str] | None = None,
 ) -> str:
-    bases = re.findall(
-        r"<base\b[^>]*\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if bases != ["../"]:
+    sanitizer = _StaticHTMLSanitizer(declarations or [])
+    sanitizer.feed(text)
+    if sanitizer.rawdata:
+        raise VerificationError("generated HTML ends with incomplete markup")
+    sanitizer.close()
+    if sanitizer.bases != ["../"]:
         raise VerificationError("generated HTML has an unexpected base URL")
-    text = re.sub(r"<base\b[^>]*>", "", text, flags=re.IGNORECASE)
-    # Meta refresh can navigate before the runtime sanitizer starts. Replace
-    # every generated meta element with trusted inert metadata below.
-    text = re.sub(r"<meta\b[^>]*>", "", text, flags=re.IGNORECASE)
-    # Generated scripts are not accepted as executable artifacts.  Palomar
-    # supplies the small interaction runtime below from trusted renderer code.
-    text = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(
-        r"\s(?:on[a-z0-9_-]+|srcdoc|action|formaction|ping|target)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    text = "".join(sanitizer.parts)
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
     for declaration in declarations or []:
-        escaped_declaration = re.escape(html.escape(declaration, quote=True))
-        marker = re.compile(
-            rf"<[^>]*\bdata-binding\s*=\s*([\"'])const-{escaped_declaration}\1[^>]*\bid\s*=",
-            flags=re.IGNORECASE,
-        )
-        if not marker.search(text):
+        if declaration not in sanitizer.found_declarations:
             raise VerificationError(
                 f"Verso output does not contain compared declaration: {declaration}"
             )
 
+    # Inject trusted declaration metadata only after every whole-document regex
+    # pass. Otherwise an escaped Lean identifier containing text such as
+    # `` href=x`` can be mistaken for markup by a later URL rewrite.
     def annotate_body(match: re.Match[str]) -> str:
         attributes = match.group(1) or ""
         if re.search(r"\bdata-palomar-declarations\b", attributes, flags=re.IGNORECASE):
@@ -702,32 +811,6 @@ def static_html_sanitize(
     if body_count != 1:
         raise VerificationError("generated HTML does not contain exactly one body element")
 
-    def rewrite_url(match: re.Match[str]) -> str:
-        prefix, attribute, separator, quote, raw = match.groups()
-        value = raw.strip()
-        if not value or value.startswith("#"):
-            return f"{prefix}{attribute}{separator}{quote}{value}{quote}"
-        if value.startswith("data:"):
-            safe_data = attribute.lower() == "src" and re.match(
-                r"^data:image/(?:gif|jpeg|png|webp);", value, flags=re.IGNORECASE
-            )
-            value = value if safe_data else "#"
-            return f"{prefix}{attribute}{separator}{quote}{value}{quote}"
-        if (
-            value.startswith(("/", "../"))
-            or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
-            or any(part == ".." for part in value.split("/"))
-        ):
-            return f"{prefix}{attribute}{separator}{quote}#{quote}"
-        value = value.removeprefix("./")
-        return f"{prefix}{attribute}{separator}{quote}../{value}{quote}"
-
-    text = re.sub(
-        r"(\s)(href|src)(\s*=\s*)([\"'])([^\"']*)[\"']",
-        rewrite_url,
-        text,
-        flags=re.IGNORECASE,
-    )
     policy = "; ".join(
         [
             "default-src 'none'",
@@ -747,18 +830,23 @@ def static_html_sanitize(
         ]
     )
     meta = (
+        f'<meta http-equiv="Content-Security-Policy" content="{policy}">\n    '
         '<meta charset="utf-8">\n    '
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n    '
-        f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
     )
-    text, count = re.subn(r"(<head\b[^>]*>)", rf"\1\n    {meta}", text, count=1, flags=re.IGNORECASE)
-    if count != 1:
-        raise VerificationError("generated HTML does not contain exactly one head element")
     scripts = (
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
-    text = re.sub(r"(<head\b[^>]*>)", rf"\1\n    {scripts}", text, count=1, flags=re.IGNORECASE)
+    text, count = re.subn(
+        r"(<head\b[^>]*>)",
+        rf"\1\n    {meta}\n    {scripts}",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if count != 1:
+        raise VerificationError("generated HTML does not contain exactly one head element")
     surface_style = """<style id="palomar-declaration-style">
       html { height: auto !important; min-height: 100%; overflow: auto !important;
         overscroll-behavior: contain; }

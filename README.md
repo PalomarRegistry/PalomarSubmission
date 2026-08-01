@@ -7,24 +7,29 @@ Issue-based intake and mechanical verification for the Palomar registry.
 The form asks only for a public GitHub repository and an immutable commit. The
 repository itself carries the metadata and comparator configuration. CI then:
 
-1. validates the required root files and pinned commit;
+1. validates the required root files and pinned commit, including parsing
+   `formalization.yaml` and enforcing Palomar's documented metadata minimum;
 2. installs a matching `lean4export`;
 3. runs [Comparator](https://github.com/leanprover/comparator) under its landrun
    sandbox, using the three standard permitted axioms;
 4. computes the transitive source closure of `Challenge.lean`;
-5. independently compiles the Challenge against frozen, canonical
-   Mathlib/Tau Ceti closure output and verifies every transitive source;
+5. independently compiles exact tracked Palomar-indexed source closures, then
+   compiles the Challenge against those verifier-owned modules and frozen,
+   canonical Mathlib/Tau Ceti output, and
+   verifies every transitive source byte;
 6. posts a machine-readable report and marks a passing issue
    `status:awaiting-review`.
 
 The proof project may use arbitrary pinned Git dependencies that build from
 source inside Palomar's fresh Lake build directories. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
-allowlisted dependencies; its protected module is the statement Comparator
+allowlisted or Palomar-indexed dependencies; its protected module is the statement Comparator
 exports. Common submitted prebuilt artifacts are rejected early, and no
 candidate build output can replace the protected statement or frozen trusted
 dependency modules. Only this statement surface is restricted; arbitrary pinned
-dependencies remain available to the proof in `Solution.lean`.
+dependencies remain available to the proof in `Solution.lean`. Indexed imports
+are recorded as a qualified trust surface with their exact Palomar record
+version, repository, commit, and imported source-file hashes.
 
 AI review does not run in CI. An operator runs
 [`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer), which consumes
@@ -45,8 +50,26 @@ Solution.lean
 comparator.json
 ```
 
+`formalization.yaml` must be valid YAML with one top-level mapping and nonempty
+project identity, authorship, license, classification, source citation,
+automation-method, and review-status fields. Classification requires one or two
+official arXiv subject classes and at least one MSC2020 code. The exact
+mechanical minimum is documented in
+[`PalomarPolicy/CONTRIBUTING.md`](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md#1-required-repository-shape).
+
+The checked-in identifier lists under [`taxonomies/`](taxonomies/) are snapshots
+of the official [arXiv taxonomy](https://arxiv.org/category_taxonomy) and
+[MSC2020](https://msc2020.org/). Their purpose is exact intake validation; the
+editorial AI separately checks whether the selected subjects are plausible for
+the submitted result.
+
 The prototype accepts public GitHub repositories and supported released or RC
 Lean toolchains listed in [`toolchains.json`](toolchains.json).
+
+## Licensing
+
+PalomarSubmission's software is MIT-licensed. The vendored taxonomy data is a
+separate work under the terms recorded in [`taxonomies/LICENSE.md`](taxonomies/LICENSE.md).
 
 ## Security
 
