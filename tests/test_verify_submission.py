@@ -28,6 +28,7 @@ from scripts.verify_submission import (
     lake_environment_value,
     landrun_command,
     load_comparator_config,
+    load_formalization_metadata,
     materialize_packages,
     normalize_repository,
     package_allowlist,
@@ -318,6 +319,112 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             path.write_text(json.dumps(config))
             with self.assertRaisesRegex(VerificationError, "unknown keys"):
                 load_comparator_config(path)
+
+    def test_formalization_metadata_mechanical_minimum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+version: v0.3
+project:
+  name: Example result
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+classification:
+  arxiv: [math.LO, cs.LO]
+  msc2020: [03B35, 68V15]
+sources:
+  - title: A source theorem
+    authors:
+      - name: Emmy Noether
+    id: doi:10.1000/example
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+            )
+            metadata = load_formalization_metadata(path)
+            self.assertEqual(metadata["project"]["name"], "Example result")
+            self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
+
+    def test_formalization_metadata_rejects_unknown_or_too_many_classifications(self):
+        valid = """\
+project:
+  name: Example result
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+classification:
+  arxiv: [math.LO]
+  msc2020: [03B35]
+sources:
+  - title: A source theorem
+    authors: [Emmy Noether]
+    id: doi:10.1000/example
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(valid.replace("math.LO", "math.NOTREAL"))
+            with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
+                load_formalization_metadata(path)
+            path.write_text(valid.replace("[math.LO]", "[{code: math.LO}]"))
+            with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
+                load_formalization_metadata(path)
+            path.write_text(valid.replace("[math.LO]", "[math.LO, cs.LO, math.CO]"))
+            with self.assertRaisesRegex(VerificationError, "1 or 2 classification codes"):
+                load_formalization_metadata(path)
+            path.write_text(valid.replace("03B35", "99Z99"))
+            with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
+                load_formalization_metadata(path)
+
+    def test_formalization_metadata_must_be_valid_yaml(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text("project: [unterminated\n")
+            with self.assertRaisesRegex(VerificationError, "not valid YAML"):
+                load_formalization_metadata(path)
+
+    def test_formalization_metadata_must_contain_required_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text("{}\n")
+            with self.assertRaisesRegex(VerificationError, "field project must be a mapping"):
+                load_formalization_metadata(path)
+
+    def test_formalization_metadata_rejects_empty_required_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+project:
+  name: ""
+  authors: []
+  license: ""
+classification:
+  arxiv: []
+  msc2020: []
+sources: []
+automation:
+  methods: []
+review:
+  status: ""
+"""
+            )
+            with self.assertRaisesRegex(VerificationError, "project.name"):
+                load_formalization_metadata(path)
+
+    def test_formalization_metadata_rejects_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text("project:\n  name: first\n  name: second\n")
+            with self.assertRaisesRegex(VerificationError, "duplicate key"):
+                load_formalization_metadata(path)
 
     def test_outer_landrun_policy(self):
         command = landrun_command(

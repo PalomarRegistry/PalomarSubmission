@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
     "lean-toolchain",
@@ -34,6 +36,7 @@ REQUIRED = (
     "comparator.json",
 )
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
+MAX_FORMALIZATION_BYTES = 256 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
@@ -50,6 +53,14 @@ COMPILED_ARTIFACT_SUFFIXES = {
     ".so",
     ".trace",
 }
+ARXIV_CATEGORY_NAMES = json.loads(
+    (ROOT / "taxonomies" / "arxiv-categories.json").read_text(encoding="utf-8")
+)
+MSC2020_NAMES = json.loads(
+    (ROOT / "taxonomies" / "msc2020-codes.json").read_text(encoding="utf-8")
+)
+ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
+MSC2020_CODES = frozenset(MSC2020_NAMES)
 SECTION_KEYS = {
     "Repository URL": "repository_url",
     "Commit SHA": "commit_sha",
@@ -90,6 +101,35 @@ class VerificationError(RuntimeError):
 
 class ResourceExhausted(VerificationError):
     """The available worker could not complete a verification phase."""
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: UniqueKeySafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise VerificationError("formalization.yaml contains an invalid mapping key") from error
+        if duplicate:
+            raise VerificationError(f"formalization.yaml contains a duplicate key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
@@ -267,6 +307,113 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _required_mapping(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise VerificationError(f"formalization.yaml field {path} must be a mapping")
+    return value
+
+
+def _required_text(value: Any, path: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise VerificationError(f"formalization.yaml field {path} must be a nonempty string")
+    return value.strip()
+
+
+def _required_people(value: Any, path: str) -> list[Any]:
+    if not isinstance(value, list) or not value:
+        raise VerificationError(f"formalization.yaml field {path} must be a nonempty list")
+    for index, person in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if isinstance(person, str):
+            _required_text(person, item_path)
+        elif isinstance(person, dict):
+            _required_text(person.get("name"), f"{item_path}.name")
+        else:
+            raise VerificationError(
+                f"formalization.yaml field {item_path} must be a name or a mapping with a name"
+            )
+    return value
+
+
+def _required_classifications(
+    value: Any,
+    path: str,
+    *,
+    allowed: frozenset[str],
+    minimum: int,
+    maximum: int,
+) -> list[str]:
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        count = f"{minimum} or {maximum}" if minimum + 1 == maximum else f"{minimum}–{maximum}"
+        raise VerificationError(
+            f"formalization.yaml field {path} must contain {count} classification codes"
+        )
+    for index, code in enumerate(value):
+        if not isinstance(code, str) or code not in allowed:
+            raise VerificationError(
+                f"formalization.yaml field {path}[{index}] is not a recognized classification code"
+            )
+    if len(value) != len(set(value)):
+        raise VerificationError(f"formalization.yaml field {path} must not contain duplicates")
+    return value
+
+
+def load_formalization_metadata(path: Path) -> dict[str, Any]:
+    """Parse and enforce Palomar's mechanical minimum for formalization.yaml."""
+    if path.stat().st_size > MAX_FORMALIZATION_BYTES:
+        raise VerificationError("formalization.yaml exceeds the 256 KiB hard cap")
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeySafeLoader)
+    except (UnicodeDecodeError, yaml.YAMLError) as error:
+        detail = str(error).splitlines()[0] if str(error) else type(error).__name__
+        raise VerificationError(f"formalization.yaml is not valid YAML: {detail}") from error
+    if not isinstance(data, dict):
+        raise VerificationError("formalization.yaml must contain one top-level mapping")
+
+    project = _required_mapping(data.get("project"), "project")
+    _required_text(project.get("name"), "project.name")
+    _required_people(project.get("authors"), "project.authors")
+    _required_text(project.get("license"), "project.license")
+
+    classification = _required_mapping(data.get("classification"), "classification")
+    _required_classifications(
+        classification.get("arxiv"),
+        "classification.arxiv",
+        allowed=ARXIV_CATEGORIES,
+        minimum=1,
+        maximum=2,
+    )
+    _required_classifications(
+        classification.get("msc2020"),
+        "classification.msc2020",
+        allowed=MSC2020_CODES,
+        minimum=1,
+        maximum=8,
+    )
+
+    sources = data.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise VerificationError("formalization.yaml field sources must be a nonempty list")
+    for index, source in enumerate(sources):
+        source_path = f"sources[{index}]"
+        item = _required_mapping(source, source_path)
+        _required_text(item.get("title"), f"{source_path}.title")
+        _required_people(item.get("authors"), f"{source_path}.authors")
+        _required_text(item.get("id"), f"{source_path}.id")
+
+    automation = _required_mapping(data.get("automation"), "automation")
+    methods = automation.get("methods")
+    if not isinstance(methods, list) or not methods:
+        raise VerificationError("formalization.yaml field automation.methods must be a nonempty list")
+    for index, method in enumerate(methods):
+        item = _required_mapping(method, f"automation.methods[{index}]")
+        _required_text(item.get("method"), f"automation.methods[{index}].method")
+
+    review = _required_mapping(data.get("review"), "review")
+    _required_text(review.get("status"), "review.status")
+    return data
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -506,6 +653,7 @@ def prepare(args: argparse.Namespace) -> int:
         if lakefile.stat().st_size > MAX_CONFIGURATION_BYTES:
             raise VerificationError("lakefile.toml exceeds the 1 MiB hard cap")
         tomllib.loads(lakefile.read_text(encoding="utf-8"))
+        formalization = load_formalization_metadata(source / "formalization.yaml")
 
         toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
@@ -540,6 +688,25 @@ def prepare(args: argparse.Namespace) -> int:
                     "path": "Solution.lean",
                     "sha256": sha256(source / "Solution.lean"),
                 },
+                "formalization": {
+                    "path": "formalization.yaml",
+                    "sha256": sha256(source / "formalization.yaml"),
+                    "project_name": formalization["project"]["name"].strip(),
+                    "source_count": len(formalization["sources"]),
+                    "automation_method_count": len(formalization["automation"]["methods"]),
+                    "review_status": formalization["review"]["status"].strip(),
+                },
+                "classification": {
+                    "arxiv": [
+                        {"code": code, "name": ARXIV_CATEGORY_NAMES[code]}
+                        for code in formalization["classification"]["arxiv"]
+                    ],
+                    "msc2020": [
+                        {"code": code, "name": MSC2020_NAMES[code]}
+                        for code in formalization["classification"]["msc2020"]
+                    ],
+                },
+                # Retained for report-schema compatibility with already published tooling.
                 "formalization_sha256": sha256(source / "formalization.yaml"),
                 "comparator_config_sha256": sha256(source / "comparator.json"),
                 "comparator": {

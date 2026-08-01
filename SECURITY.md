@@ -186,8 +186,9 @@ The sandbox limits effects of hostile project code; it does not make any of
 these trusted components infallible.
 
 Current protocol limits include public GitHub repositories, `lakefile.toml` at
-the submission root, a 500 MiB checked-out-source cap, a 100 KiB / 1,000-line
-hard cap on `Challenge.lean`, and standard fresh Lake build locations. The
+the submission root, a 500 MiB checked-out-source cap, a 256 KiB cap on
+`formalization.yaml`, a 100 KiB / 1,000-line hard cap on `Challenge.lean`, and
+standard fresh Lake build locations. The
 verifier itself supports a twelve-hour wall-clock allowance and applies no CPU
 quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
 descriptors, and files up to 1 TiB. These are emergency host-containment

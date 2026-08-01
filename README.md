@@ -7,7 +7,8 @@ Issue-based intake and mechanical verification for the Palomar registry.
 The form asks only for a public GitHub repository and an immutable commit. The
 repository itself carries the metadata and comparator configuration. CI then:
 
-1. validates the required root files and pinned commit;
+1. validates the required root files and pinned commit, including parsing
+   `formalization.yaml` and enforcing Palomar's documented metadata minimum;
 2. installs a matching `lean4export`;
 3. runs [Comparator](https://github.com/leanprover/comparator) under its landrun
    sandbox, using the three standard permitted axioms;
@@ -49,8 +50,26 @@ Solution.lean
 comparator.json
 ```
 
+`formalization.yaml` must be valid YAML with one top-level mapping and nonempty
+project identity, authorship, license, classification, source citation,
+automation-method, and review-status fields. Classification requires one or two
+official arXiv subject classes and at least one MSC2020 code. The exact
+mechanical minimum is documented in
+[`PalomarPolicy/CONTRIBUTING.md`](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md#1-required-repository-shape).
+
+The checked-in identifier lists under [`taxonomies/`](taxonomies/) are snapshots
+of the official [arXiv taxonomy](https://arxiv.org/category_taxonomy) and
+[MSC2020](https://msc2020.org/). Their purpose is exact intake validation; the
+editorial AI separately checks whether the selected subjects are plausible for
+the submitted result.
+
 The prototype accepts public GitHub repositories and supported released or RC
 Lean toolchains listed in [`toolchains.json`](toolchains.json).
+
+## Licensing
+
+PalomarSubmission's software is MIT-licensed. The vendored taxonomy data is a
+separate work under the terms recorded in [`taxonomies/LICENSE.md`](taxonomies/LICENSE.md).
 
 ## Security
 

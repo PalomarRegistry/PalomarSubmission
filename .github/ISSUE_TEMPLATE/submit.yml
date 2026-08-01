@@ -17,6 +17,10 @@ body:
         transitive imports of `Challenge.lean` must come from Lean core,
         Mathlib/Tau Ceti, or projects already indexed in Palomar.
 
+        `formalization.yaml` must include one or two official arXiv subject
+        classes and at least one MSC2020 code. Intake checks that the codes
+        exist, and editorial review checks that they plausibly fit the result.
+
   - type: input
     id: repository_url
     attributes:
