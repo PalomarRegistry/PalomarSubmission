@@ -1,5 +1,5 @@
 name: Verify submission
-run-name: Verify submission #${{ github.event.issue.number }}
+run-name: "Verify submission #${{ github.event.issue.number }}"
 
 on:
   issues:
