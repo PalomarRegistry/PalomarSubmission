@@ -10,6 +10,10 @@ import subprocess
 from pathlib import Path
 
 MARKER = "<!-- palomar-mechanical-report -->"
+MAX_COMMENT_BYTES = 60 * 1024
+MAX_DIAGNOSTIC_ITEMS = 20
+MAX_DIAGNOSTIC_CHARS = 4_000
+MAX_EMBEDDED_ITEMS = 100
 STATUS_LABELS = (
     "status:verifying",
     "status:awaiting-review",
@@ -41,8 +45,8 @@ def body_for(report: dict) -> str:
     icon = {"pass": "✅", "fail": "❌", "error": "⚠️"}.get(status, "⚠️")
     source = report.get("source", {})
     challenge = report.get("challenge", {})
-    errors = report.get("errors", [])
-    warnings = report.get("warnings", [])
+    errors = bounded_diagnostics(report.get("errors", []))
+    warnings = bounded_diagnostics(report.get("warnings", []))
     lines = [
         MARKER,
         f"## {icon} Palomar mechanical verification: `{status}`",
@@ -66,8 +70,7 @@ def body_for(report: dict) -> str:
     if warnings:
         lines.extend(["", "### Warnings", ""])
         lines.extend(inert_diagnostics(warnings))
-    bounded = dict(report)
-    bounded.pop("comparator_log_tail", None)
+    bounded = report_for_comment(report)
     lines.extend(
         [
             "",
@@ -84,7 +87,64 @@ def body_for(report: dict) -> str:
             ),
         ]
     )
-    return "\n".join(lines) + "\n"
+    body = "\n".join(lines) + "\n"
+    if len(body.encode("utf-8")) > MAX_COMMENT_BYTES:
+        # The compact fallback retains the authoritative binding/outcome while
+        # directing operators to the workflow artifact for the complete JSON.
+        workflow = report.get("workflow_url")
+        compact = lines[:7]
+        if workflow:
+            compact.extend([f"- [Complete report artifact]({workflow})"])
+        if errors:
+            compact.extend(["", "### First error", "", *inert_diagnostics(errors[:1])])
+        compact.extend(
+            [
+                "",
+                "The detailed diagnostics exceed GitHub's comment limit and are available in the workflow artifact.",
+                "",
+                "This checks the pinned Lean snapshot and trusted challenge surface. It is not an editorial acceptance.",
+            ]
+        )
+        body = "\n".join(compact) + "\n"
+    return body
+
+
+def bounded_diagnostics(items: object) -> list[str]:
+    if not isinstance(items, list):
+        return ["malformed diagnostic list omitted"]
+    result: list[str] = []
+    for item in items[:MAX_DIAGNOSTIC_ITEMS]:
+        value = str(item)
+        if len(value) > MAX_DIAGNOSTIC_CHARS:
+            value = value[:MAX_DIAGNOSTIC_CHARS] + "\n<diagnostic truncated>"
+        result.append(value)
+    if len(items) > MAX_DIAGNOSTIC_ITEMS:
+        result.append(f"<{len(items) - MAX_DIAGNOSTIC_ITEMS} additional diagnostics omitted>")
+    return result
+
+
+def report_for_comment(report: dict) -> dict:
+    """Keep the issue comment bounded; the workflow artifact stays complete."""
+    bounded = dict(report)
+    bounded.pop("comparator_log_tail", None)
+    bounded["errors"] = bounded_diagnostics(bounded.get("errors", []))
+    bounded["warnings"] = bounded_diagnostics(bounded.get("warnings", []))
+    challenge = bounded.get("challenge")
+    if isinstance(challenge, dict):
+        challenge = dict(challenge)
+        bounded["challenge"] = challenge
+        records = challenge.pop("review_source_files", None)
+        if isinstance(records, list):
+            challenge["review_source_file_count"] = len(records)
+            challenge["review_source_files"] = records[:MAX_EMBEDDED_ITEMS]
+            if len(records) > MAX_EMBEDDED_ITEMS:
+                challenge["review_source_files_omitted"] = len(records) - MAX_EMBEDDED_ITEMS
+    for key in ("project_dependencies", "resource_usage"):
+        records = bounded.get(key)
+        if isinstance(records, list) and len(records) > MAX_EMBEDDED_ITEMS:
+            bounded[key] = records[:MAX_EMBEDDED_ITEMS]
+            bounded[f"{key}_omitted"] = len(records) - MAX_EMBEDDED_ITEMS
+    return bounded
 
 
 def inert_diagnostics(items: list[object]) -> list[str]:

@@ -12,8 +12,9 @@ repository itself carries the metadata and comparator configuration. CI then:
 3. runs [Comparator](https://github.com/leanprover/comparator) under its landrun
    sandbox, using the three standard permitted axioms;
 4. computes the transitive source closure of `Challenge.lean`;
-5. independently compiles the Challenge against frozen, canonical
-   Mathlib/Tau Ceti output plus exact versioned Palomar-indexed snapshots, and
+5. independently compiles exact tracked Palomar-indexed source closures, then
+   compiles the Challenge against those verifier-owned modules and frozen,
+   canonical Mathlib/Tau Ceti output, and
    verifies every transitive source byte;
 6. posts a machine-readable report and marks a passing issue
    `status:awaiting-review`.

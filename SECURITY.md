@@ -54,9 +54,11 @@ environment.
 - The transitive source closure of `Challenge.lean` may contain only Lean core,
   the verified pinned closure of an allowlisted root, or exact source snapshots
   bound to a versioned Palomar record. Candidate-local helper imports remain
-  rejected. An indexed package is independently checked out and rebuilt at its
-  recorded repository commit with its exact nested manifest and no network;
-  its output is frozen before candidate configuration runs. The closure comes
+  rejected. An indexed package is independently checked out at its recorded
+  repository commit and must carry its tracked nested manifest. Palomar resolves
+  each reached module to a unique tracked source file and invokes trusted Lean
+  directly, with no indexed Lake configuration or network; only verifier-owned
+  output is exposed to the canonical Challenge build. The closure comes
   from Lean's own `--src-deps` result, and
   every dependency source attributed to a Git package must be a byte-for-byte
   match for a file tracked at that package's pinned commit. Sources below a
@@ -76,9 +78,11 @@ fresh build directory.
 Statement integrity instead comes from a separate build path. Mathlib's
 trusted cache is run with official Mathlib as the workspace root and
 with symlinks to the exact independently verified official closure. Other
-allowlisted roots and Palomar-indexed snapshots are built from their own pinned
-configuration. Candidate Lake configuration never runs during these
-operations. Trusted-root Lake URL resolution is pinned to that root's verified manifest and is accepted only
+allowlisted roots are built from their own pinned configuration. Indexed source
+closures are instead compiled directly by trusted Lean into verifier-owned
+output, so an indexed Lake plan cannot select a decoy source or object. Candidate
+Lake configuration never runs during these operations. Trusted-root Lake URL
+resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. The official
 Mathlib plan also replays the downloaded cache and receives write access to the

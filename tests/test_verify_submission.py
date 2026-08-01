@@ -18,6 +18,7 @@ from scripts.verify_submission import (
     _deadline_timeout,
     allowed_roots,
     audit_challenge_sources,
+    build_indexed_roots,
     canonical_repository,
     compile_canonical_challenge,
     direct_imports,
@@ -125,6 +126,28 @@ class VerifySubmissionTests(unittest.TestCase):
                 executable_paths=[],
                 tools={},
             )
+
+    def test_candidate_output_cannot_forge_resource_exhaustion(self):
+        completed = subprocess.CompletedProcess(
+            ["systemd-run"], 0, "out of memory; timed out; no space left on device", ""
+        )
+        with (
+            mock.patch("scripts.verify_submission.verify_tool_snapshot"),
+            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
+            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission.run", return_value=completed),
+            mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
+        ):
+            result = sandboxed_run(
+                ["lean", "Challenge.lean"],
+                cwd=REPOSITORY_ROOT,
+                environment={},
+                landrun=Path("landrun"),
+                writable_directories=[],
+                executable_paths=[],
+                tools={},
+            )
+        self.assertEqual(result.returncode, 0)
 
     def test_resource_wrapper_records_bounded_usage(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -380,29 +403,75 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             ],
         )
 
+    def test_indexed_source_cannot_shadow_a_trusted_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source"
+            package = source / ".lake" / "packages" / "indexed"
+            package.mkdir(parents=True)
+            (package / "Indexed.lean").write_text("import Init\ndef indexed := true\n")
+            (package / "Init.lean").write_text("axiom forged : False\n")
+            (package / "lake-manifest.json").write_text(
+                '{"version":"1.2.0","packages":[]}\n'
+            )
+            subprocess.run(["git", "init", "-q"], cwd=package, check=True)
+            subprocess.run(["git", "add", "."], cwd=package, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Palomar test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "indexed shadow fixture",
+                ],
+                cwd=package,
+                check=True,
+            )
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=package,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            source.mkdir(exist_ok=True)
+            (source / "Challenge.lean").write_text("import Indexed\n")
+            lean_prefix = work / "toolchain"
+            trusted_init = lean_prefix / "lib" / "lean" / "Init.olean"
+            trusted_init.parent.mkdir(parents=True)
+            trusted_init.write_bytes(b"trusted core module")
+            package_record = {
+                "name": "indexed",
+                "repository": "example/indexed",
+                "url": "https://github.com/example/indexed",
+                "revision": revision,
+            }
+            with self.assertRaisesRegex(VerificationError, "shadows a Lean core"):
+                build_indexed_roots(
+                    work,
+                    source,
+                    packages=[package_record],
+                    indexed={"indexed": {}},
+                    allowlist={},
+                    base_env={},
+                    lean=Path("/tools/lean"),
+                    lean_prefix=lean_prefix,
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
     def test_hostile_canonical_build_cannot_publish_sibling_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             source = work / "source"
             source.mkdir()
             (source / "Challenge.lean").write_text("theorem result : True := by trivial\n")
-            indexed_package = source / ".lake" / "packages" / "indexed"
-            indexed_lean = indexed_package / ".lake" / "build" / "lib" / "lean"
-            indexed_lean.mkdir(parents=True)
-            (source / "lake-manifest.json").write_text(
-                json.dumps(
-                    {
-                        "packages": [
-                            {
-                                "name": "indexed",
-                                "type": "git",
-                                "url": "https://github.com/example/indexed",
-                                "rev": "8" * 40,
-                            }
-                        ]
-                    }
-                )
-            )
+            indexed_lean = work / "indexed-olean"
+            indexed_lean.mkdir()
             lean_prefix = work / "toolchain"
             (lean_prefix / "lib" / "lean").mkdir(parents=True)
 
@@ -420,7 +489,8 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                     lean=Path("/tools/lean"),
                     lean_prefix=lean_prefix,
                     allowlist={},
-                    indexed={"indexed": {}},
+                    indexed_lean_path=indexed_lean,
+                    indexed_source_roots=[],
                     environment={},
                     landrun=Path("/tools/landrun"),
                     readable_paths=[source],

@@ -1,3 +1,4 @@
+import html
 import json
 import tempfile
 import unittest
@@ -117,17 +118,23 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertNotIn("http-equiv=\"refresh\"", sanitized.lower())
         self.assertNotIn("data:text/html", sanitized)
 
-    def test_static_html_removes_unclosed_scripts_and_slash_separated_handlers(self):
+    def test_static_html_strips_slash_separated_handlers_and_rejects_unclosed_scripts(self):
         html = """<html><head><base href="../"></head><body>
 <a href="#"/onclick="alert(1)">safe</a>
-<script src="https://attacker.invalid/payload.js">
 </body></html>"""
         sanitized = static_html_sanitize(
             html, "../palomar-sanitize.js", "../palomar-verso.js"
         )
         self.assertNotIn("onclick", sanitized.lower())
-        self.assertNotIn("attacker.invalid", sanitized)
         self.assertEqual(sanitized.lower().count("<script"), 2)
+        with self.assertRaisesRegex(VerificationError, "incomplete markup"):
+            static_html_sanitize(
+                """<html><head><base href="../"></head><body>
+<script src="https://attacker.invalid/payload.js">
+</body></html>""",
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+            )
 
     def test_static_html_rewrites_unquoted_urls(self):
         html = """<html><head><base href="../"></head><body>
@@ -140,6 +147,23 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertIn('src="../asset.png"', sanitized)
         self.assertNotIn("javascript:", sanitized)
 
+    def test_static_html_rewrites_namespaced_urls_and_rejects_incomplete_markup(self):
+        html_text = (
+            '<html><head><base href="../"></head><body>'
+            '<svg><a xlink:href="javascript:bad">bad</a></svg></body></html>'
+        )
+        sanitized = static_html_sanitize(
+            html_text, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        self.assertIn('xlink:href="#"', sanitized)
+        self.assertNotIn("javascript:bad", sanitized)
+        with self.assertRaisesRegex(VerificationError, "incomplete markup"):
+            static_html_sanitize(
+                '<html><head><base href="../"></head><body><',
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+            )
+
     def test_static_html_places_csp_before_scripts(self):
         html = '<html><head><base href="../"></head><body></body></html>'
         sanitized = static_html_sanitize(
@@ -147,6 +171,16 @@ class RenderChallengeTests(unittest.TestCase):
         )
         head = sanitized[sanitized.index("<head>") : sanitized.index("</head>")]
         self.assertLess(head.index("Content-Security-Policy"), head.index("<script"))
+
+    def test_static_html_does_not_strip_words_that_resemble_attribute_names(self):
+        html = (
+            '<html><head><base href="../"></head><body>'
+            '<p>one only once target action ping</p></body></html>'
+        )
+        sanitized = static_html_sanitize(
+            html, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        self.assertIn("one only once target action ping", sanitized)
 
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -214,6 +248,23 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
         self.assertIn("white-space: nowrap", sanitized)
         self.assertIn("background: #fff !important", sanitized)
         self.assertIn("palomar-declaration-style", sanitized)
+
+    def test_declaration_metadata_is_injected_after_url_rewriting(self):
+        declaration = "Example.«one href=x onload=y»"
+        html_text = f'''<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-{declaration}" id="decl">headline</span>
+</body></html>'''
+        sanitized = static_html_sanitize(
+            html_text,
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+            [declaration],
+        )
+        encoded = html.escape(
+            json.dumps([declaration], ensure_ascii=False, separators=(",", ":")),
+            quote=True,
+        )
+        self.assertIn(f'data-palomar-declarations="{encoded}"', sanitized)
 
     def test_static_html_rejects_a_missing_compared_declaration(self):
         html_text = "<!doctype html><html><head><base href=\"../\"></head><body></body></html>"

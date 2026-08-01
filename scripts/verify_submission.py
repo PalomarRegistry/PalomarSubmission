@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import pathlib
 import re
 import secrets
 import shutil
@@ -77,9 +78,6 @@ SANDBOX_ENVIRONMENT = (
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_TERMINAL_PROMPT",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "PALOMAR_LANDRUN_REAL",
@@ -681,6 +679,14 @@ def indexed_packages(
                 f"Palomar-indexed package {package['name']!r} may not use a path dependency"
             )
         checkout = package_checkout(source, package)
+        git_env = os.environ.copy()
+        git_env.update(
+            {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
         head = run(
             [
                 "git",
@@ -692,7 +698,8 @@ def indexed_packages(
                 str(checkout),
                 "rev-parse",
                 "HEAD",
-            ]
+            ],
+            env=git_env,
         ).stdout.strip()
         if head != revision:
             raise VerificationError(
@@ -1050,87 +1057,179 @@ def build_allowlisted_roots(
 
 
 def build_indexed_roots(
+    work: Path,
     source: Path,
     *,
     packages: list[dict[str, str]],
     indexed: dict[str, dict[str, Any]],
     allowlist: dict[str, tuple[str, str]],
     base_env: dict[str, str],
-    lake: Path,
+    lean: Path,
+    lean_prefix: Path,
     landrun: Path,
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
-) -> None:
-    """Rebuild exact Palomar-indexed packages before candidate configuration runs.
+) -> tuple[Path | None, list[Path]]:
+    """Compile the imported indexed source closure into verifier-owned output.
 
-    The indexed checkout and every nested manifest edge are commit-pinned. Only
-    fresh Lake state is writable, the network remains closed, and the resulting
-    indexed package output is frozen before canonical Challenge compilation.
-    Unindexed packages in an indexed project's wider manifest may be built here,
-    but they are not exposed to the canonical compiler unless Lean reports them
-    in the actual Challenge source closure (which is then rejected).
+    Indexed Lake configuration is not a source-to-object authority: a qualified
+    project may select another source directory, run elaborator code, or write a
+    deceptive build artifact. Resolve imported modules to unique tracked source
+    files, follow their imports, and invoke trusted Lean directly. Only the
+    verifier-owned output returned here enters the canonical Challenge path.
     """
     by_name = {package["name"]: package for package in packages}
-    for name in sorted(indexed):
-        root_package = by_name[name]
-        root_dir = package_checkout(source, root_package)
-        authoritative = manifest_packages(root_dir)
-        closure = {name, *(dependency["name"] for dependency in authoritative)}
-        if not closure <= by_name.keys():
-            missing = ", ".join(sorted(closure - by_name.keys()))
+    indexed_directories = {
+        name: package_checkout(source, by_name[name]) for name in sorted(indexed)
+    }
+    for name, directory in indexed_directories.items():
+        if not directory.is_dir() or not source_matches_checkout(
+            directory / "lake-manifest.json", directory
+        ):
             raise VerificationError(
-                f"Palomar-indexed package {name!r} has an incomplete manifest closure: {missing}"
+                f"Palomar-indexed package {name!r} lacks its tracked pinned manifest"
             )
-        nested = nested_package_links(source, root_dir, allowed_names=closure)
-        build_env = base_env.copy()
-        build_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(packages, authoritative)
-        home = root_dir / ".lake" / "config" / "home"
-        temporary = root_dir / ".lake" / "config" / "tmp"
-        home.mkdir(exist_ok=True)
-        temporary.mkdir(exist_ok=True)
-        build_env.update(
-            {
-                "HOME": str(home.resolve()),
-                "TMPDIR": str(temporary.resolve()),
-                "LEAN_ABORT_ON_PANIC": "1",
-            }
-        )
-        writable = validate_writable_directories(
-            source,
-            [
-                *(
-                    directory
-                    for dependency_name in closure
-                    if dependency_name not in allowlist
-                    for directory in package_lake_directories(source, dependency_name)
-                ),
-                nested,
-            ],
-        )
-        require_protected_paths(
-            [
-                directory
-                for dependency_name in closure & set(allowlist)
-                for directory in package_lake_directories(source, dependency_name)
-            ],
-            writable,
-        )
-        try:
-            sandboxed_run(
-                [str(lake), "build"],
-                cwd=root_dir,
-                environment=build_env,
-                landrun=landrun,
-                writable_directories=writable,
-                readable_paths=readable_paths,
-                executable_paths=executable_paths,
-                tools=tools,
-                timeout=EXECUTION_BUDGET_SECONDS,
+
+    output = work / "indexed-olean"
+    scratch = work / "indexed-compile-scratch"
+    for directory in (output, scratch):
+        if directory.exists() or directory.is_symlink():
+            raise VerificationError(f"indexed compilation path is not fresh: {directory}")
+        directory.mkdir()
+    home = scratch / "home"
+    temporary = scratch / "tmp"
+    home.mkdir()
+    temporary.mkdir()
+
+    allowlisted_paths: list[Path] = []
+    for name in sorted(allowlist):
+        path = package_lake_directories(source, name)[0] / "lib" / "lean"
+        if path.is_dir():
+            allowlisted_paths.append(path.resolve())
+    core_path = (lean_prefix / "lib" / "lean").resolve()
+    trusted_lean_paths = [
+        *([core_path] if core_path.is_dir() else []),
+        *allowlisted_paths,
+    ]
+    compile_env = base_env.copy()
+    compile_env.update(
+        {
+            "HOME": str(home.resolve()),
+            "TMPDIR": str(temporary.resolve()),
+            "LEAN_ABORT_ON_PANIC": "1",
+            "LEAN_PATH": os.pathsep.join(
+                str(path) for path in [*trusted_lean_paths, output.resolve()]
+            ),
+        }
+    )
+
+    def module_suffix(module: str) -> pathlib.PurePosixPath:
+        parts = module.split(".")
+        if (
+            not parts
+            or any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts)
+        ):
+            raise VerificationError(f"unsafe imported Lean module name: {module!r}")
+        return pathlib.PurePosixPath(*parts).with_suffix(".lean")
+
+    resolved_sources: dict[str, tuple[Path, Path] | None] = {}
+
+    def source_for(module: str) -> tuple[Path, Path] | None:
+        if module in resolved_sources:
+            return resolved_sources[module]
+        suffix = module_suffix(module)
+        matches: list[tuple[Path, Path]] = []
+        for package_dir in indexed_directories.values():
+            for candidate in package_dir.rglob(suffix.name):
+                relative = candidate.relative_to(package_dir)
+                if relative.parts and relative.parts[0] in {".git", ".lake"}:
+                    continue
+                if tuple(relative.parts[-len(suffix.parts) :]) != suffix.parts:
+                    continue
+                if (
+                    candidate.is_symlink()
+                    or not candidate.is_file()
+                    or not source_matches_checkout(candidate, package_dir)
+                ):
+                    raise VerificationError(
+                        f"indexed module {module!r} is not a tracked source file"
+                    )
+                root = candidate.resolve()
+                for _part in suffix.parts:
+                    root = root.parent
+                matches.append((candidate.resolve(), root))
+        if len(matches) > 1:
+            raise VerificationError(f"indexed module {module!r} resolves ambiguously")
+        if matches and any(
+            (root / suffix).with_suffix(".olean").is_file()
+            for root in trusted_lean_paths
+        ):
+            raise VerificationError(
+                f"indexed module {module!r} shadows a Lean core or allowlisted module"
             )
-        finally:
-            if nested.is_dir():
-                shutil.rmtree(nested)
+        resolved_sources[module] = matches[0] if matches else None
+        return resolved_sources[module]
+
+    compiled: dict[str, Path] = {}
+    visiting: set[str] = set()
+    source_roots: set[Path] = set()
+
+    def compile_module(module: str) -> None:
+        if module in compiled:
+            return
+        resolved = source_for(module)
+        if resolved is None:
+            return  # Lean core or an independently built allowlisted module.
+        if module in visiting:
+            raise VerificationError(f"indexed module import cycle reaches {module!r}")
+        visiting.add(module)
+        source_file, source_root = resolved
+        for imported in direct_imports(source_file.read_text(encoding="utf-8")):
+            compile_module(imported)
+        visiting.remove(module)
+        target = output.joinpath(*module.split(".")).with_suffix(".olean")
+        if target.exists() or target.is_symlink():
+            raise VerificationError(f"indexed compiler output was pre-created: {target}")
+        module_work = scratch / "modules" / hashlib.sha256(module.encode()).hexdigest()
+        if module_work.exists() or module_work.is_symlink():
+            raise VerificationError(f"indexed module work path was pre-created: {module_work}")
+        untrusted_target = module_work.joinpath(*module.split(".")).with_suffix(".olean")
+        untrusted_target.parent.mkdir(parents=True)
+        sandboxed_run(
+            [str(lean), "-o", str(untrusted_target), str(source_file)],
+            cwd=source_file.parent,
+            environment=compile_env,
+            landrun=landrun,
+            writable_directories=[home.resolve(), temporary.resolve(), module_work.resolve()],
+            readable_paths=[*readable_paths, output.resolve()],
+            executable_paths=[*executable_paths, *trusted_lean_paths],
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        if untrusted_target.is_symlink() or not untrusted_target.is_file():
+            raise VerificationError(f"trusted indexed compilation produced no module: {module}")
+        actual = {
+            path.resolve()
+            for path in module_work.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }
+        if actual != {untrusted_target.resolve()}:
+            raise VerificationError("indexed elaboration wrote unexpected protected output")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(untrusted_target, target)
+        if target.is_symlink() or not target.is_file():
+            raise VerificationError(f"protected indexed module is not regular: {module}")
+        compiled[module] = target.resolve()
+        source_roots.add(source_root)
+
+    for imported in direct_imports((source / "Challenge.lean").read_text(encoding="utf-8")):
+        compile_module(imported)
+    if not compiled:
+        shutil.rmtree(output)
+        return None, []
+    tools.update({path: sha256(path) for path in compiled.values()})
+    return output.resolve(), sorted(source_roots)
 
 
 def source_package(path: Path, source: Path) -> str | None:
@@ -1446,21 +1545,12 @@ def sandboxed_run(
         check=False,
     )
     verify_tool_snapshot(tools)
-    combined = f"{proc.stdout}\n{proc.stderr}".lower()
+    # Payload output is attacker-controlled and must never manufacture an
+    # infrastructure outcome merely by printing an OOM or timeout phrase.
+    # Signal-style wrapper exits are the bounded evidence available here;
+    # Python-enforced wall-clock expiry is reported by TimeoutExpired.
     resource_signals = {124, 137, 143, 152, 153}
-    resource_messages = (
-        "cannot allocate memory",
-        "memory limit",
-        "oom-kill",
-        "out of memory",
-        "resource temporarily unavailable",
-        "file size limit exceeded",
-        "too many open files",
-        "no space left on device",
-        "disk quota exceeded",
-        "timed out",
-    )
-    if proc.returncode in resource_signals or any(message in combined for message in resource_messages):
+    if proc.returncode in resource_signals:
         raise ResourceExhausted(
             f"worker resource ceiling reached while running {Path(command[0]).name} "
             f"(exit {proc.returncode})"
@@ -1647,9 +1737,17 @@ def verify_sandbox_confinement(
         stderr=subprocess.DEVNULL,
     )
     try:
-        unconfined = Path(f"/proc/{holder.pid}/environ").read_bytes()
-        if token.encode() not in unconfined or holder.poll() is not None:
-            raise VerificationError("process-environment probe lacks a live positive control")
+        # Popen returns before the child necessarily completes exec; until then
+        # /proc can still expose the pre-exec environment. Wait briefly for the
+        # sentinel so a scheduler race does not masquerade as failed isolation.
+        positive_deadline = time.monotonic() + 2
+        while True:
+            unconfined = Path(f"/proc/{holder.pid}/environ").read_bytes()
+            if token.encode() in unconfined and holder.poll() is None:
+                break
+            if holder.poll() is not None or time.monotonic() >= positive_deadline:
+                raise VerificationError("process-environment probe lacks a live positive control")
+            time.sleep(0.01)
         proc_read = sandboxed_run(
             [str(python), "-c", read_script, f"/proc/{holder.pid}/environ"],
             cwd=cwd,
@@ -2213,7 +2311,8 @@ def compile_canonical_challenge(
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
-    indexed: dict[str, dict[str, Any]],
+    indexed_lean_path: Path | None,
+    indexed_source_roots: list[Path],
     environment: dict[str, str],
     landrun: Path,
     readable_paths: list[Path],
@@ -2238,10 +2337,10 @@ def compile_canonical_challenge(
     temporary.mkdir()
 
     packages_by_name = {package["name"]: package for package in manifest_packages(source)}
-    trusted_names = [
-        *sorted(allowlist, key=lambda name: (allowlist[name][1] != "high", name.lower())),
-        *sorted(set(indexed) - set(allowlist)),
-    ]
+    trusted_names = sorted(
+        allowlist,
+        key=lambda name: (allowlist[name][1] != "high", name.lower()),
+    )
     trusted_packages = {name: package_checkout(source, packages_by_name[name]) for name in trusted_names}
     lean_paths: list[Path] = []
     core_path = lean_prefix / "lib" / "lean"
@@ -2251,8 +2350,17 @@ def compile_canonical_challenge(
         path = package_dir / ".lake" / "build" / "lib" / "lean"
         if path.is_dir():
             lean_paths.append(path.resolve())
+    if indexed_lean_path is not None:
+        lean_paths.append(indexed_lean_path.resolve())
     lean_paths = list(dict.fromkeys(lean_paths))
-    source_paths = [source.resolve(), *trusted_packages.values()]
+    canonical_readable_paths = list(readable_paths)
+    if indexed_lean_path is not None:
+        canonical_readable_paths.append(indexed_lean_path.resolve())
+    source_paths = [
+        source.resolve(),
+        *trusted_packages.values(),
+        *indexed_source_roots,
+    ]
     lake_source = lean_prefix / "src" / "lean" / "lake"
     if lake_source.is_dir():
         source_paths.append(lake_source.resolve())
@@ -2273,7 +2381,7 @@ def compile_canonical_challenge(
         environment=canonical_env,
         landrun=landrun,
         writable_directories=[scratch.resolve()],
-        readable_paths=readable_paths,
+        readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
         tools=tools,
         timeout=EXECUTION_BUDGET_SECONDS,
@@ -2288,7 +2396,7 @@ def compile_canonical_challenge(
         environment=canonical_env,
         landrun=landrun,
         writable_directories=[scratch.resolve()],
-        readable_paths=readable_paths,
+        readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
         tools=tools,
     )
@@ -2320,11 +2428,6 @@ def execute(args: argparse.Namespace) -> int:
     previous_disk_path = _RESOURCE_DISK_PATH
     source = work / "source"
     metrics_path = work / "resource-metrics.jsonl"
-    if metrics_path.is_symlink() or (metrics_path.exists() and not metrics_path.is_file()):
-        raise VerificationError("resource metrics path is not a regular file")
-    metrics_path.unlink(missing_ok=True)
-    _RESOURCE_METRICS_PATH = metrics_path
-    _RESOURCE_DISK_PATH = source
     report.update(
         {
             "status": "error",
@@ -2349,6 +2452,11 @@ def execute(args: argparse.Namespace) -> int:
         write_json(output, report)
 
     try:
+        if metrics_path.is_symlink() or (metrics_path.exists() and not metrics_path.is_file()):
+            raise VerificationError("resource metrics path is not a regular file")
+        metrics_path.unlink(missing_ok=True)
+        _RESOURCE_METRICS_PATH = metrics_path
+        _RESOURCE_DISK_PATH = source
         install_execution_deadline(
             os.environ.get("PALOMAR_JOB_STARTED_AT"),
             getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
@@ -2520,20 +2628,22 @@ def execute(args: argparse.Namespace) -> int:
             if name not in allowlist
         }
         report["stage"] = "indexed-roots"
-        build_indexed_roots(
+        indexed_lean_path, indexed_source_roots = build_indexed_roots(
+            work,
             source,
             packages=packages,
             indexed=indexed,
             allowlist=allowlist,
             base_env=env,
-            lake=lake,
+            lean=lean,
+            lean_prefix=lean_prefix,
             landrun=landrun,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
         )
 
-        trusted_names = set(allowlist) | set(indexed)
+        trusted_names = set(allowlist)
         trusted_directories = set(trusted_lake_directories(source, trusted_names))
         trusted_build_directories = {
             package_lake_directories(source, name)[0] for name in trusted_names
@@ -2541,7 +2651,15 @@ def execute(args: argparse.Namespace) -> int:
         candidate_writable = [
             directory for directory in writable_directories if directory not in trusted_directories
         ]
-        executable_paths = sorted({*executable_paths, *trusted_build_directories})
+        if indexed_lean_path is not None:
+            require_protected_paths([indexed_lean_path], candidate_writable)
+        executable_paths = sorted(
+            {
+                *executable_paths,
+                *trusted_build_directories,
+                *([indexed_lean_path] if indexed_lean_path is not None else []),
+            }
+        )
         report["stage"] = "canonical-challenge"
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
@@ -2549,7 +2667,8 @@ def execute(args: argparse.Namespace) -> int:
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
-            indexed=indexed,
+            indexed_lean_path=indexed_lean_path,
+            indexed_source_roots=indexed_source_roots,
             environment=env,
             landrun=landrun,
             readable_paths=readable_paths,

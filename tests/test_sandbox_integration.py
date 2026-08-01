@@ -128,7 +128,8 @@ class SandboxIntegrationTests(unittest.TestCase):
                 lean=lean,
                 lean_prefix=lean_prefix,
                 allowlist={},
-                indexed={},
+                indexed_lean_path=None,
+                indexed_source_roots=[],
                 environment=environment,
                 landrun=landrun,
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
@@ -178,11 +179,12 @@ class SandboxIntegrationTests(unittest.TestCase):
             source = work / "source"
             package = source / ".lake" / "packages" / "indexed"
             package.mkdir(parents=True)
-            indexed_source = package / "Indexed.lean"
+            indexed_source = package / "src" / "Indexed.lean"
+            indexed_source.parent.mkdir()
             indexed_source.write_text("def Indexed.meaning : Nat := 42\n")
             (package / "lakefile.toml").write_text(
                 'name = "indexed"\ndefaultTargets = ["Indexed"]\n\n'
-                '[[lean_lib]]\nname = "Indexed"\n'
+                '[[lean_lib]]\nname = "Indexed"\nsrcDir = "src"\n'
             )
             (package / "lake-manifest.json").write_text(
                 '{"version":"1.2.0","packagesDir":".lake/packages","packages":[]}\n'
@@ -270,19 +272,22 @@ class SandboxIntegrationTests(unittest.TestCase):
                 "palomar_id": "PALOMAR-2026-08-01-000001",
                 "palomar_version": 1,
             }
-            build_indexed_roots(
+            indexed_lean_path, indexed_source_roots = build_indexed_roots(
+                work,
                 source,
                 packages=packages,
                 indexed={"indexed": record},
                 allowlist={},
                 base_env=environment,
-                lake=lake,
+                lean=lean,
+                lean_prefix=lean_prefix,
                 landrun=landrun,
                 readable_paths=readable_paths,
                 executable_paths=executable_paths,
                 tools=tools,
             )
-            indexed_olean = build / "lib" / "lean" / "Indexed.olean"
+            self.assertIsNotNone(indexed_lean_path)
+            indexed_olean = indexed_lean_path / "Indexed.olean"
             self.assertTrue(indexed_olean.is_file())
             canonical, dependency_sources, trusted_paths = compile_canonical_challenge(
                 work,
@@ -290,7 +295,8 @@ class SandboxIntegrationTests(unittest.TestCase):
                 lean=lean,
                 lean_prefix=lean_prefix,
                 allowlist={},
-                indexed={"indexed": record},
+                indexed_lean_path=indexed_lean_path,
+                indexed_source_roots=indexed_source_roots,
                 environment=environment,
                 landrun=landrun,
                 readable_paths=readable_paths,
@@ -299,6 +305,7 @@ class SandboxIntegrationTests(unittest.TestCase):
             )
             self.assertTrue(canonical.is_file())
             self.assertIn(indexed_olean.parent.resolve(), trusted_paths)
+            self.assertFalse((build / "lib" / "lean" / "Indexed.olean").exists())
             audit = audit_challenge_sources(
                 source,
                 database=work / "database",
@@ -311,7 +318,7 @@ class SandboxIntegrationTests(unittest.TestCase):
             self.assertEqual(audit["untrusted_sources"], [])
             self.assertEqual(audit["trust_level"], "qualified")
             self.assertEqual(audit["dependencies"][0]["palomar_version"], 1)
-            self.assertEqual(audit["review_source_files"][0]["path"], "Indexed.lean")
+            self.assertEqual(audit["review_source_files"][0]["path"], "src/Indexed.lean")
             self.assertFalse(config.is_symlink())
 
 

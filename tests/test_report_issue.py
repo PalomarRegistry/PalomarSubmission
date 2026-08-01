@@ -31,6 +31,20 @@ class ReportIssueTests(unittest.TestCase):
         self.assertNotIn("\n## ✅ fake success\n", body)
         self.assertNotIn("\n[click](javascript:alert(1))\n", body)
 
+    def test_large_source_evidence_and_diagnostics_fit_in_one_comment(self):
+        data = self.report()
+        data["workflow_url"] = "https://github.com/example/project/actions/runs/1"
+        data["challenge"] = {
+            "review_source_files": [
+                {"path": f"src/File{index}.lean", "source": "x" * 2_000}
+                for index in range(1_000)
+            ]
+        }
+        data["errors"] = ["failure " + "x" * 20_000 for _ in range(100)]
+        body = report_issue.body_for(data)
+        self.assertLessEqual(len(body.encode("utf-8")), report_issue.MAX_COMMENT_BYTES)
+        self.assertIn("Complete report artifact", body)
+
     def test_report_issue_must_match_event_issue(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"

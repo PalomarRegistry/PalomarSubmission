@@ -23,8 +23,9 @@ artifact as hostile. Its security-relevant sequence is:
 4. Fetch and replay Mathlib's trusted cache from the official Mathlib
    workspace, then freeze the high-trust closure. Build qualified roots without
    granting them write access to that closure, then freeze their output.
-5. Independently rebuild exact Palomar-indexed dependency snapshots, freeze
-   their output, then compile `Challenge.lean` directly with trusted Lean
+5. Resolve the reached modules in exact Palomar-indexed snapshots to unique
+   tracked source files, compile that closure directly with trusted Lean into
+   verifier-owned output, then compile `Challenge.lean` directly with trusted Lean
    against frozen allowlisted and indexed output. Snapshot its
    `Challenge.olean` and audit Lean's source dependency list and source bytes
    before candidate Lake configuration executes.
@@ -117,10 +118,9 @@ publication remains append-only for existing versioned record paths.
 
 - Automatic issue-triggered verification remains enabled. Compute abuse and
   rate limiting are tracked separately in issue #3.
-- The database workflow still runs the validator from the proposed revision.
-  The base-revision validator/migration design (D5) is intentionally deferred;
-  required human review, CI, and append-only checks are its current operational
-  backstops.
+- Database pull requests run both the proposed validator and the validator from
+  the base revision. Runtime/CSP pins are append-only compatibility data, while
+  the existing base-owned append-only checker continues to judge record history.
 - Arbitrary pinned public Git dependencies remain supported for proof code.
   They execute only in candidate-writable build/configuration directories and
   cannot enter the protected Challenge source surface.
