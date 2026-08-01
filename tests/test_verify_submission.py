@@ -373,6 +373,9 @@ review:
             path.write_text(valid.replace("math.LO", "math.NOTREAL"))
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
+            path.write_text(valid.replace("[math.LO]", "[{code: math.LO}]"))
+            with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
+                load_formalization_metadata(path)
             path.write_text(valid.replace("[math.LO]", "[math.LO, cs.LO, math.CO]"))
             with self.assertRaisesRegex(VerificationError, "1 or 2 classification codes"):
                 load_formalization_metadata(path)

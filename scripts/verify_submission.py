@@ -350,13 +350,13 @@ def _required_classifications(
         raise VerificationError(
             f"formalization.yaml field {path} must contain {count} classification codes"
         )
-    if len(value) != len(set(value)):
-        raise VerificationError(f"formalization.yaml field {path} must not contain duplicates")
     for index, code in enumerate(value):
         if not isinstance(code, str) or code not in allowed:
             raise VerificationError(
                 f"formalization.yaml field {path}[{index}] is not a recognized classification code"
             )
+    if len(value) != len(set(value)):
+        raise VerificationError(f"formalization.yaml field {path} must not contain duplicates")
     return value
 
 
