@@ -11,6 +11,7 @@ The submitter controls the issue fields and every byte of the referenced Git
 commit. In particular, the following are treated as potentially hostile:
 
 - `Challenge.lean`, `Solution.lean`, and any other source file;
+- `formalization.yaml`, including parser-expansion and malformed-structure attacks;
 - `lakefile.toml`, `lake-manifest.json`, and dependency Lake files;
 - dependency repositories and all Git objects fetched for them;
 - Lake elaborator-time IO, build scripts, compiler subprocesses, and generated
@@ -38,6 +39,9 @@ environment.
   `https://github.com/owner/repository` URL and a full 40-character commit SHA.
   Dynamic issue values are passed as files or subprocess arguments, not
   interpolated into shell programs.
+- `formalization.yaml` is capped at 256 KiB and parsed in the credential-free
+  intake job with PyYAML's safe loader, duplicate-key rejection, and explicit
+  rejection of YAML merge keys before they can be expanded.
 - Git dependencies are materialized directly at the full commits recorded in
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier
