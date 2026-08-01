@@ -201,6 +201,13 @@ class VerifySubmissionTests(unittest.TestCase):
         )
         self.assertIn('placeholder: PALOMAR-2026-07-29-000123', form)
 
+    def test_submission_workflow_run_name_includes_issue_number(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml").read_text()
+        self.assertIn(
+            'run-name: "Verify submission #${{ github.event.issue.number }}"',
+            workflow,
+        )
+
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
         expected = re.compile(
             r"^\s*CGO_ENABLED=0 go install github\.com/zouuup/landrun/cmd/landrun@"
