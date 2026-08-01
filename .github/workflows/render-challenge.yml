@@ -63,6 +63,9 @@ jobs:
         with:
           python-version: "3.11.10"
 
+      - name: Install verifier dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
+
       - name: Fetch and bind accepted source
         id: prepare
         working-directory: pipeline
@@ -97,7 +100,7 @@ jobs:
           LEAN_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
         run: elan toolchain install "$LEAN_TOOLCHAIN"
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         if: steps.prepare.outputs.ready == 'true'
         with:
           go-version: "1.24.0"

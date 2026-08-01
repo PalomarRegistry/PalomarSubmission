@@ -231,6 +231,28 @@ class VerifySubmissionTests(unittest.TestCase):
             ["ci.yml", "compatibility.yml", "render-challenge.yml", "submission.yml"],
         )
 
+    def test_every_verifier_workflow_installs_hash_pinned_dependencies(self):
+        workflows = REPOSITORY_ROOT / ".github" / "workflows"
+        verifier_entrypoints = (
+            "scripts.render_challenge",
+            "scripts/smoke_trusted_challenge.py",
+            "scripts/verify_submission",
+        )
+        installers = []
+        for path in [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]:
+            text = path.read_text()
+            if any(entrypoint in text for entrypoint in verifier_entrypoints):
+                installers.append(path.name)
+                self.assertIn(
+                    "pip install --disable-pip-version-check --require-hashes --no-deps -r",
+                    text,
+                    path.name,
+                )
+        self.assertEqual(
+            sorted(installers),
+            ["compatibility.yml", "render-challenge.yml", "submission.yml"],
+        )
+
     def test_issue_form_sections(self):
         body = """### Repository URL
 
@@ -431,6 +453,17 @@ review:
             path = Path(directory) / "formalization.yaml"
             path.write_text("project:\n  name: first\n  name: second\n")
             with self.assertRaisesRegex(VerificationError, "duplicate key"):
+                load_formalization_metadata(path)
+
+    def test_formalization_metadata_rejects_yaml_merge_keys_before_expansion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                "base: &base {key: value}\n"
+                "nested: &nested {<<: [*base, *base]}\n"
+                "<<: [*nested, *nested]\n"
+            )
+            with self.assertRaisesRegex(VerificationError, "must not use YAML merge keys"):
                 load_formalization_metadata(path)
 
     def test_outer_landrun_policy(self):

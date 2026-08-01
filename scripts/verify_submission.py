@@ -112,9 +112,10 @@ def _construct_unique_mapping(
     node: yaml.nodes.MappingNode,
     deep: bool = False,
 ) -> dict[Any, Any]:
-    loader.flatten_mapping(node)
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            raise VerificationError("formalization.yaml must not use YAML merge keys")
         key = loader.construct_object(key_node, deep=deep)
         try:
             duplicate = key in mapping
@@ -596,8 +597,11 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
 
 
 def prepare(args: argparse.Namespace) -> int:
+    global _EXECUTION_DEADLINE
+
     output = Path(args.output).resolve()
     work = Path(args.work_dir).resolve()
+    previous_deadline = _EXECUTION_DEADLINE
     report: dict[str, Any] = {
         "schema_version": 1,
         "status": "error",
@@ -607,6 +611,7 @@ def prepare(args: argparse.Namespace) -> int:
         "warnings": [],
     }
     try:
+        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
         issue = event["issue"]
         values = parse_issue_body(issue.get("body") or "")
@@ -725,6 +730,8 @@ def prepare(args: argparse.Namespace) -> int:
         report["errors"].append(str(error))
         write_json(output, report)
         workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+    finally:
+        _EXECUTION_DEADLINE = previous_deadline
     return 0
 
 
