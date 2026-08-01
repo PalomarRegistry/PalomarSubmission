@@ -9,6 +9,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
@@ -206,6 +208,37 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertIn(
             'run-name: "Verify submission #${{ github.event.issue.number }}"',
             workflow,
+        )
+
+    def test_submission_workflow_accepts_only_guarded_author_reverification(self) -> None:
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["on"]["issues"]["types"], ["labeled"])
+        self.assertEqual(workflow["on"]["issue_comment"]["types"], ["created"])
+
+        condition = " ".join(workflow["jobs"]["mark"]["if"].split())
+        expected = (
+            "(github.event_name == 'issues' && github.event.label.name == 'submission') || "
+            "(github.event_name == 'issue_comment' && "
+            "github.event.issue.pull_request == null && github.event.issue.state == 'open' && "
+            "github.event.comment.body == '/reverify' && "
+            "github.event.comment.user.login == github.event.issue.user.login && "
+            "contains(github.event.issue.labels.*.name, 'submission') && "
+            "(contains(github.event.issue.labels.*.name, 'status:verification-error') || "
+            "contains(github.event.issue.labels.*.name, 'status:changes-requested')))"
+        )
+        self.assertEqual(condition, expected)
+
+    def test_submission_workflow_runs_downstream_only_after_mark_gate(self) -> None:
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "false")
+        self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
+        self.assertNotIn("if", workflow["jobs"]["verify"])
+        self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
+        self.assertEqual(
+            workflow["jobs"]["report"]["if"],
+            "always() && needs.mark.result != 'skipped'",
         )
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):

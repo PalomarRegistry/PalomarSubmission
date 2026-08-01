@@ -4,6 +4,8 @@ run-name: "Verify submission #${{ github.event.issue.number }}"
 on:
   issues:
     types: [labeled]
+  issue_comment:
+    types: [created]
 
 concurrency:
   group: palomar-submission-${{ github.event.issue.number }}
@@ -11,7 +13,17 @@ concurrency:
 
 jobs:
   mark:
-    if: github.event.label.name == 'submission'
+    if: >-
+      (github.event_name == 'issues' &&
+        github.event.label.name == 'submission') ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request == null &&
+        github.event.issue.state == 'open' &&
+        github.event.comment.body == '/reverify' &&
+        github.event.comment.user.login == github.event.issue.user.login &&
+        contains(github.event.issue.labels.*.name, 'submission') &&
+        (contains(github.event.issue.labels.*.name, 'status:verification-error') ||
+          contains(github.event.issue.labels.*.name, 'status:changes-requested')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -37,7 +49,6 @@ jobs:
             --repo "${{ github.repository }}" --add-label status:verifying
 
   verify:
-    if: github.event.label.name == 'submission'
     needs: mark
     runs-on: ubuntu-latest
     timeout-minutes: 350
@@ -155,8 +166,8 @@ jobs:
           retention-days: 90
 
   report:
-    needs: verify
-    if: always() && github.event.label.name == 'submission'
+    needs: [mark, verify]
+    if: always() && needs.mark.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
