@@ -25,6 +25,8 @@ If verification ends with `status:verification-error` or
 original issue and comment exactly `/reverify`. Palomar ignores this command
 from other users, on pull requests or closed issues, and while the submission
 is in any other state.
+Eligibility is rechecked against the issue's current state when the command is
+handled, so stale or duplicate requests do not start another verification.
 
 The proof project may use arbitrary pinned Git dependencies that build from
 source inside Palomar's fresh Lake build directories. The Challenge is compiled

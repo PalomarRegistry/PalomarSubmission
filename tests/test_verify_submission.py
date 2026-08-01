@@ -232,14 +232,48 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_submission_workflow_runs_downstream_only_after_mark_gate(self) -> None:
         path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
         workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "false")
-        self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
-        self.assertNotIn("if", workflow["jobs"]["verify"])
-        self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
+        self.assertNotIn("concurrency", workflow)
+        mark = workflow["jobs"]["mark"]
+        condition = "".join(mark["if"].split())
+        group = "".join(mark["concurrency"]["group"].split())
         self.assertEqual(
-            workflow["jobs"]["report"]["if"],
-            "always() && needs.mark.result != 'skipped'",
+            group,
+            "${{(" + condition + ")&&"
+            "format('palomar-submission-claim-{0}',github.event.issue.number)||"
+            "format('palomar-submission-ignore-{0}',github.run_id)}}",
         )
+        self.assertEqual(mark["concurrency"]["cancel-in-progress"], "false")
+        self.assertEqual(mark["outputs"]["claimed"], "${{ steps.claim.outputs.claimed }}")
+        claim_step = next(step for step in mark["steps"] if step.get("id") == "claim")
+        self.assertIn("scripts/claim_submission.py", claim_step["run"])
+        self.assertIn("$GITHUB_EVENT_PATH", claim_step["run"])
+        self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
+        self.assertEqual(
+            workflow["jobs"]["verify"]["if"],
+            "needs.mark.outputs.claimed == 'true'",
+        )
+        self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
+        report = workflow["jobs"]["report"]
+        self.assertEqual(
+            " ".join(report["if"].split()),
+            "always() && needs.mark.result != 'skipped' && "
+            "(needs.mark.result == 'failure' || needs.mark.outputs.claimed == 'true')",
+        )
+        self.assertEqual(
+            report["concurrency"]["group"],
+            "palomar-submission-claim-${{ github.event.issue.number }}",
+        )
+        self.assertEqual(report["concurrency"]["cancel-in-progress"], "false")
+        report_step = next(
+            step for step in report["steps"] if step["name"] == "Report result and transition issue"
+        )
+        download_step = next(
+            step for step in report["steps"] if step["name"] == "Download mechanical report"
+        )
+        self.assertEqual(download_step["if"], "needs.mark.outputs.claimed == 'true'")
+        self.assertEqual(report_step["env"]["MARK_RESULT"], "${{ needs.mark.result }}")
+        self.assertIn("scripts/claim_submission.py", report_step["run"])
+        self.assertIn("scripts/report_issue.py", report_step["run"])
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
         expected = re.compile(
