@@ -1,3 +1,4 @@
+import hashlib
 import html
 import json
 import tempfile
@@ -20,6 +21,16 @@ from scripts.render_challenge import (
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_runtime_script_digests_match_database_contract(self):
+        self.assertEqual(
+            hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
+            "d15fb1c3eca7a3eb32293cff66a913301c25fb03706004a0e27319b631c6ff60",
+        )
+        self.assertEqual(
+            hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
+            "a44bf5ebef846fc69009c02d5617e5af1a2d70d26298ea6db4a20600cead5201",
+        )
+
     def test_toolchain_mapping_is_exact(self):
         self.assertEqual(
             toolchain_verso_commit("leanprover/lean4:v4.31.0-rc2"),
