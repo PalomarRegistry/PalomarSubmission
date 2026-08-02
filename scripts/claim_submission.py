@@ -18,6 +18,7 @@ BLOCKING_LABELS = {
     "status:awaiting-review",
     "status:review-in-progress",
     "status:accepted",
+    "status:published",
     "status:rejected",
     "status:escalated",
 }
@@ -51,6 +52,8 @@ def eligible(event_name: str, event: dict, issue: dict) -> bool:
     if not isinstance(event_issue, dict):
         return False
     if issue.get("state") != "open" or "pull_request" in issue:
+        return False
+    if event_issue.get("body") != issue.get("body"):
         return False
     labels = label_names(issue)
     if "submission" not in labels or labels & BLOCKING_LABELS:

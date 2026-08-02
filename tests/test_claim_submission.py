@@ -11,18 +11,27 @@ from scripts import claim_submission
 
 
 class ClaimSubmissionTests(unittest.TestCase):
-    def issue(self, *labels: str, state: str = "open") -> dict:
+    def issue(
+        self, *labels: str, state: str = "open", body: str = "submission body"
+    ) -> dict:
         return {
             "number": 17,
             "state": state,
             "user": {"login": "author"},
+            "body": body,
             "labels": [{"name": label} for label in labels],
         }
 
-    def comment_event(self, *, commenter: str = "author", body: str = "/reverify") -> dict:
+    def comment_event(
+        self,
+        *,
+        commenter: str = "author",
+        body: str = "/reverify",
+        issue_body: str = "submission body",
+    ) -> dict:
         return {
             "action": "created",
-            "issue": {"number": 17, "user": {"login": "author"}},
+            "issue": {"number": 17, "user": {"login": "author"}, "body": issue_body},
             "comment": {"body": body, "user": {"login": commenter}},
         }
 
@@ -68,10 +77,15 @@ class ClaimSubmissionTests(unittest.TestCase):
             )
         )
 
+    def test_comment_claim_rejects_stale_issue_body_snapshot(self) -> None:
+        event = self.comment_event(issue_body="old commit metadata")
+        issue = self.issue("submission", "status:verification-error", body="new commit metadata")
+        self.assertFalse(claim_submission.eligible("issue_comment", event, issue))
+
     def test_submission_label_event_can_claim_only_current_open_submission(self) -> None:
         event = {
             "action": "labeled",
-            "issue": {"number": 17, "user": {"login": "author"}},
+            "issue": {"number": 17, "user": {"login": "author"}, "body": "submission body"},
             "label": {"name": "submission"},
         }
         self.assertTrue(claim_submission.eligible("issues", event, self.issue("submission")))
