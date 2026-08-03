@@ -10,6 +10,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
@@ -321,6 +323,71 @@ class VerifySubmissionTests(unittest.TestCase):
             'run-name: "Verify submission #${{ github.event.issue.number }}"',
             workflow,
         )
+
+    def test_submission_workflow_accepts_only_guarded_author_reverification(self) -> None:
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["on"]["issues"]["types"], ["labeled"])
+        self.assertEqual(workflow["on"]["issue_comment"]["types"], ["created"])
+
+        condition = " ".join(workflow["jobs"]["mark"]["if"].split())
+        expected = (
+            "(github.event_name == 'issues' && github.event.label.name == 'submission') || "
+            "(github.event_name == 'issue_comment' && "
+            "github.event.issue.pull_request == null && github.event.issue.state == 'open' && "
+            "github.event.comment.body == '/reverify' && "
+            "github.event.comment.user.login == github.event.issue.user.login && "
+            "contains(github.event.issue.labels.*.name, 'submission') && "
+            "(contains(github.event.issue.labels.*.name, 'status:verification-error') || "
+            "contains(github.event.issue.labels.*.name, 'status:changes-requested')))"
+        )
+        self.assertEqual(condition, expected)
+
+    def test_submission_workflow_runs_downstream_only_after_mark_gate(self) -> None:
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        self.assertNotIn("concurrency", workflow)
+        mark = workflow["jobs"]["mark"]
+        condition = "".join(mark["if"].split())
+        group = "".join(mark["concurrency"]["group"].split())
+        self.assertEqual(
+            group,
+            "${{(" + condition + ")&&"
+            "format('palomar-submission-claim-{0}',github.event.issue.number)||"
+            "format('palomar-submission-ignore-{0}',github.run_id)}}",
+        )
+        self.assertEqual(mark["concurrency"]["cancel-in-progress"], "false")
+        self.assertEqual(mark["outputs"]["claimed"], "${{ steps.claim.outputs.claimed }}")
+        claim_step = next(step for step in mark["steps"] if step.get("id") == "claim")
+        self.assertIn("scripts/claim_submission.py", claim_step["run"])
+        self.assertIn("$GITHUB_EVENT_PATH", claim_step["run"])
+        self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
+        self.assertEqual(
+            workflow["jobs"]["verify"]["if"],
+            "needs.mark.outputs.claimed == 'true'",
+        )
+        self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
+        report = workflow["jobs"]["report"]
+        self.assertEqual(
+            " ".join(report["if"].split()),
+            "always() && needs.mark.result != 'skipped' && "
+            "(needs.mark.result == 'failure' || needs.mark.outputs.claimed == 'true')",
+        )
+        self.assertEqual(
+            report["concurrency"]["group"],
+            "palomar-submission-claim-${{ github.event.issue.number }}",
+        )
+        self.assertEqual(report["concurrency"]["cancel-in-progress"], "false")
+        report_step = next(
+            step for step in report["steps"] if step["name"] == "Report result and transition issue"
+        )
+        download_step = next(
+            step for step in report["steps"] if step["name"] == "Download mechanical report"
+        )
+        self.assertEqual(download_step["if"], "needs.mark.outputs.claimed == 'true'")
+        self.assertEqual(report_step["env"]["MARK_RESULT"], "${{ needs.mark.result }}")
+        self.assertIn("scripts/claim_submission.py", report_step["run"])
+        self.assertIn("scripts/report_issue.py", report_step["run"])
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
         expected = re.compile(

@@ -21,6 +21,14 @@ repository itself carries the metadata and comparator configuration. CI then:
 6. posts a machine-readable report and marks a passing issue
    `status:awaiting-review`.
 
+If verification ends with `status:verification-error` or
+`status:changes-requested`, the issue author may update the commit SHA in the
+original issue and comment exactly `/reverify`. Palomar ignores this command
+from other users, on pull requests or closed issues, and while the submission
+is in any other state.
+Eligibility is rechecked against the issue's current state when the command is
+handled, so stale or duplicate requests do not start another verification.
+
 The proof project may use arbitrary pinned Git dependencies that build from
 source inside Palomar's fresh Lake build directories. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
