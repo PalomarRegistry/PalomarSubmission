@@ -16,6 +16,7 @@ from verify_submission import (
     audit_challenge_sources,
     build_allowlisted_roots,
     compile_canonical_challenge,
+    enforced_comparator_config,
     get_mathlib_cache,
     install_execution_deadline,
     lake_environment_value,
@@ -42,6 +43,7 @@ def main() -> int:
     parser.add_argument("--landrun", type=Path, required=True)
     parser.add_argument("--comparator", type=Path, required=True)
     parser.add_argument("--lean4export", type=Path, required=True)
+    parser.add_argument("--nanoda", type=Path, required=True)
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -55,6 +57,7 @@ def main() -> int:
     landrun = args.landrun.resolve(strict=True)
     comparator = args.comparator.resolve(strict=True)
     lean4export = args.lean4export.resolve(strict=True)
+    nanoda = args.nanoda.resolve(strict=True)
     adapter = args.adapter.resolve(strict=True)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -87,6 +90,7 @@ def main() -> int:
         {
             "COMPARATOR_LANDRUN": str(adapter),
             "COMPARATOR_LEAN4EXPORT": str(lean4export),
+            "COMPARATOR_NANODA": str(nanoda),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
@@ -108,6 +112,7 @@ def main() -> int:
         landrun,
         comparator,
         lean4export,
+        nanoda,
         adapter,
     ]
     for raw in ("/usr", "/bin", "/lib", "/lib64", "/run/current-system/sw", "/nix/store"):
@@ -115,7 +120,10 @@ def main() -> int:
         if path.exists():
             executable_paths.append(path.resolve())
     executable_paths = sorted(set(executable_paths))
-    readable_paths = sorted({source, *system_readable_paths()})
+    comparator_config = enforced_comparator_config(
+        source / "comparator.json", work / "enforced-comparator.json"
+    )
+    readable_paths = sorted({source, comparator_config, *system_readable_paths()})
     tools = tool_snapshot(
         [
             Path(__file__).resolve(),
@@ -127,6 +135,8 @@ def main() -> int:
             landrun,
             comparator,
             lean4export,
+            nanoda,
+            comparator_config,
             adapter,
         ]
     )
@@ -185,6 +195,8 @@ def main() -> int:
             landrun,
             comparator,
             lean4export,
+            nanoda,
+            comparator_config,
             adapter,
         ],
         candidate_writable,
@@ -284,7 +296,7 @@ def main() -> int:
         )
 
     comparison = sandboxed_run(
-        [str(comparator), "comparator.json"],
+        [str(comparator), str(comparator_config)],
         cwd=source,
         environment=environment,
         landrun=landrun,

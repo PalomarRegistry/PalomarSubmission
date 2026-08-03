@@ -118,6 +118,13 @@ jobs:
           cd "$RUNNER_TEMP/comparator"
           lake build comparator
 
+      - name: Build pinned NanoDa kernel
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git "$RUNNER_TEMP/nanoda"
+          git -C "$RUNNER_TEMP/nanoda" checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
+          cargo build --release --locked --manifest-path "$RUNNER_TEMP/nanoda/Cargo.toml"
+
       - name: Build toolchain-matched lean4export
         if: steps.prepare.outputs.ready == 'true'
         env:
@@ -140,8 +147,10 @@ jobs:
             --comparator "$RUNNER_TEMP/comparator/.lake/build/bin/comparator" \
             --lean4export "$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" \
             --landrun "$(go env GOPATH)/bin/landrun" \
+            --nanoda "$RUNNER_TEMP/nanoda/target/release/nanoda_bin" \
             --comparator-commit 68a064109f01c08f47c8edc9f51d6a2bbffaa188 \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --nanoda-commit 68d5ca9db226849b41a6fff59d796ff19d0a8840 \
             --execution-budget-seconds 19800 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 

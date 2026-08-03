@@ -30,9 +30,12 @@ artifact as hostile. Its security-relevant sequence is:
    `Challenge.olean` and audit Lean's source dependency list and source bytes
    before candidate Lake configuration executes.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
-   outer Landrun/systemd boundary. Resolve the protected Challenge module, Lean
-   core, and frozen trusted modules before candidate paths in Comparator's
-   `LEAN_PATH`; candidate output cannot replace any of them.
+   outer Landrun/systemd boundary with a verifier-owned configuration that
+   forces NanoDa on regardless of the submitted flag. Resolve the protected
+   Challenge module, Lean core, and frozen trusted modules before candidate
+   paths in Comparator's `LEAN_PATH`; candidate output cannot replace any of
+   them. Require both Lean's kernel and the pinned independent NanoDa kernel to
+   accept the exported proof.
 7. Write the bounded report after sandboxed execution. A separate reporting job
    binds it to the triggering issue and renders hostile diagnostics inertly.
 
@@ -57,7 +60,7 @@ The maintained test surfaces are:
   accepted `erdos-unit-distance-comparator` fixture at commit
   `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
   Lake-file-based, and ordinary proof dependencies, followed by the real pinned
-  Comparator and toolchain-matched `lean4export` under the nested sandbox. It
+  Comparator, toolchain-matched `lean4export`, and pinned NanoDa under the nested sandbox. It
   uses the hosted tier's 330-minute capacity measured from the start of its
   350-minute job, so setup time and candidate execution consume one allowance.
   The verifier's trusted default supports twelve hours on a suitably configured
@@ -77,7 +80,9 @@ The workflow pins Comparator commit
 `68a064109f01c08f47c8edc9f51d6a2bbffaa188`. The reviewed path separately
 exports Challenge and Solution environments, checks configured declarations and
 their dependency closures, enforces the permitted-axiom set, and replays the
-comparison through Lean's kernel. Comparator's own Landrun domains remain in
+comparison through both Lean's kernel and the pinned independent NanoDa kernel.
+The verifier forces NanoDa in a protected configuration copy; the submitted
+`enable_nanoda` value is non-authoritative. Comparator's own Landrun domains remain in
 place. They are nested inside Palomar's outer domain, so they can narrow but not
 widen Palomar's filesystem or network policy. Palomar independently protects
 the Challenge module because Comparator assumes the supplied Challenge build is
@@ -135,7 +140,7 @@ publication remains append-only for existing versioned record paths.
   independently, recursive unindexed imports remain forbidden, and their
   imported definitions are included in editorial review.
 - GitHub-hosted runners, Linux/Landlock/systemd, Git, Lean and its kernel,
-  Comparator, Landrun, `lean4export`, and the Palomar implementation remain in
+  Comparator, NanoDa, Landrun, `lean4export`, and the Palomar implementation remain in
   the trusted computing base. This hardening is defense in depth around those
   components, not a proof that they are bug-free.
 

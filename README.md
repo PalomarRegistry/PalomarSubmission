@@ -10,8 +10,9 @@ repository itself carries the metadata and comparator configuration. CI then:
 1. validates the required root files and pinned commit, including parsing
    `formalization.yaml` and enforcing Palomar's documented metadata minimum;
 2. installs a matching `lean4export`;
-3. runs [Comparator](https://github.com/leanprover/comparator) under its landrun
-   sandbox, using the three standard permitted axioms;
+3. runs [Comparator](https://github.com/leanprover/comparator) under its Landrun
+   sandbox, using the three standard permitted axioms, and forces every exported
+   proof through both Lean's kernel and the pinned independent NanoDa kernel;
 4. computes the transitive source closure of `Challenge.lean`;
 5. independently compiles exact tracked Palomar-indexed source closures, then
    compiles the Challenge against those verifier-owned modules and frozen,
@@ -30,6 +31,10 @@ dependency modules. Only this statement surface is restricted; arbitrary pinned
 dependencies remain available to the proof in `Solution.lean`. Indexed imports
 are recorded as a qualified trust surface with their exact Palomar record
 version, repository, commit, and imported source-file hashes.
+
+`enable_nanoda` in a submitted `comparator.json` is retained for upstream
+schema compatibility but is not authoritative. The trusted runner writes a
+separate configuration with NanoDa enabled and passes that copy to Comparator.
 
 AI review does not run in CI. An operator runs
 [`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer), which consumes

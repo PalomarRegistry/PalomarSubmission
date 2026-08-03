@@ -129,7 +129,11 @@ trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
-solution, and export operations. Linux Landlock domains compose by intersection:
+solution, export, and NanoDa replay operations. The runner, following the same
+pattern as Comparator Live and `lean-eval`, writes a protected copy of the
+submitted Comparator configuration with `enable_nanoda` forced to `true`.
+The submitted flag therefore cannot disable the independent-kernel check.
+Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
 The pinned Landrun binary is built without cgo so its pre-Landlock-v8
 all-thread enforcement does not enumerate `/proc/$PID/task`; nested confinement
@@ -144,9 +148,10 @@ process-environment, and outbound-network probes. It also runs a positive nested
 Landrun probe. If a positive operation is denied, a negative operation succeeds,
 or either confinement layer cannot be established, verification fails closed.
 
-Comparator, `lean4export`, Landrun, the Landrun adapter, Lake, and the verifier
-script are outside the writable allowlist. Their hashes are captured before any
-project configuration executes and checked before and after sandboxed phases.
+Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
+enforced Comparator configuration, and the verifier script are outside the
+writable allowlist. Their hashes are captured before any project configuration
+executes and checked before and after sandboxed phases.
 The mechanical report is outside every sandbox-writable directory and is
 written only by the trusted verifier after the sandboxed process exits.
 
@@ -168,15 +173,17 @@ Build diagnostics are rendered as inert code rather than Markdown structure.
 
 ## Pins and trusted computing base
 
-GitHub Actions, Comparator, Landrun, elan releases, and source-built verifier
-tools are pinned to immutable revisions or checksums. `lean4export` revisions
-are mapped to exact Lean toolchain releases in `toolchains.json`. Pin changes
-require security review and an end-to-end comparison probe.
+GitHub Actions, Comparator, Landrun, NanoDa, elan releases, and source-built
+verifier tools are pinned to immutable revisions or checksums. NanoDa uses the
+`robsimmons/nanoda_lib` fork deployed by Comparator Live at commit
+`68d5ca9db226849b41a6fff59d796ff19d0a8840`. `lean4export` revisions are mapped
+to exact Lean toolchain releases in `toolchains.json`. Pin changes require
+security review and an end-to-end comparison probe.
 
 This design still trusts the GitHub-hosted Linux runner, the Linux kernel and
 Landlock implementation, systemd, Git and its protocol parsers, the selected
 Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
-verifier/reporter, the governance of the canonical allowlisted repositories,
+verifier/reporter, NanoDa's independent kernel, the governance of the canonical allowlisted repositories,
 and the contents served by Mathlib's cache service. HTTPS authenticates the
 cache endpoint in transit, but the source-derived cache key is not a digest or
 signature of the downloaded archive. A cache publisher or storage service able
