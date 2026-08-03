@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,8 @@ from unittest import mock
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
+    LicenseValidationError,
+    LicenseDetectorError,
     PERMISSIVE_RESOURCE_PROPERTIES,
     ResourceExhausted,
     VerificationError,
@@ -22,6 +25,7 @@ from scripts.verify_submission import (
     canonical_repository,
     compile_canonical_challenge,
     direct_imports,
+    detect_spdx_identifier,
     enforced_comparator_config,
     execute,
     github_repository,
@@ -38,6 +42,7 @@ from scripts.verify_submission import (
     reject_committed_build_artifacts,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
+    repository_license_file,
     require_protected_paths,
     run,
     sandboxed_run,
@@ -50,6 +55,112 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_repository_license_file_is_one_nonempty_regular_root_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            license_path = root / "licence.MD"
+            license_path.write_text("standard terms\n")
+            self.assertEqual(repository_license_file(root), license_path)
+
+            (root / "COPYING").write_text("other terms\n")
+            with self.assertRaisesRegex(LicenseValidationError, "exactly one"):
+                repository_license_file(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "LICENSE").write_text("  \n")
+            with self.assertRaisesRegex(LicenseValidationError, "must not be empty"):
+                repository_license_file(root)
+
+    def test_repository_license_file_rejects_missing_and_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(LicenseValidationError, "no conventional"):
+                repository_license_file(root)
+            target = root / "terms"
+            target.write_text("terms\n")
+            (root / "LICENSE").symlink_to(target)
+            with self.assertRaisesRegex(LicenseValidationError, "not a regular"):
+                repository_license_file(root)
+
+    def test_detect_spdx_identifier_requires_one_consistent_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            bundle.touch()
+            license_path = root / "LICENSE"
+            license_path.write_text("terms\n")
+            result = {
+                "licenses": [{"spdx_id": "Apache-2.0"}],
+                "matched_files": [{"matched_license": "Apache-2.0"}],
+            }
+            completed = subprocess.CompletedProcess(
+                [str(bundle)], 0, json.dumps(result), ""
+            )
+            with mock.patch("scripts.verify_submission.run", return_value=completed):
+                self.assertEqual(
+                    detect_spdx_identifier(license_path, bundle), "Apache-2.0"
+                )
+
+            result["licenses"] = []
+            rejected = subprocess.CompletedProcess([str(bundle)], 0, json.dumps(result), "")
+            with (
+                mock.patch("scripts.verify_submission.run", return_value=rejected),
+                self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+            ):
+                detect_spdx_identifier(license_path, bundle)
+
+            for malformed in (
+                {
+                    "licenses": [{"spdx_id": "NOASSERTION"}],
+                    "matched_files": [{"matched_license": "NOASSERTION"}],
+                },
+                {
+                    "licenses": [{"spdx_id": "Apache-2.0"}],
+                    "matched_files": [{"matched_license": "MIT"}],
+                },
+                {
+                    "licenses": [{"spdx_id": "Apache-2.0"}],
+                    "matched_files": [
+                        {"matched_license": "Apache-2.0"},
+                        {"matched_license": "Apache-2.0"},
+                    ],
+                },
+            ):
+                rejected = subprocess.CompletedProcess(
+                    [str(bundle)], 0, json.dumps(malformed), ""
+                )
+                with (
+                    mock.patch("scripts.verify_submission.run", return_value=rejected),
+                    self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+                ):
+                    detect_spdx_identifier(license_path, bundle)
+
+            failed = subprocess.CompletedProcess(
+                [str(bundle)], 7, "", "bundler could not load licensee"
+            )
+            with (
+                mock.patch("scripts.verify_submission.run", return_value=failed),
+                self.assertRaisesRegex(
+                    LicenseDetectorError, "exit 7: bundler could not load licensee"
+                ),
+            ):
+                detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_repository_mit_license(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        self.assertEqual(detect_spdx_identifier(REPOSITORY_ROOT / "LICENSE", bundle), "MIT")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSE")
+            (root / "LICENSES").mkdir()
+            shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSES" / "LICENSE")
+            self.assertEqual(detect_spdx_identifier(root / "LICENSE", bundle), "MIT")
+
     def test_phase_timeout_is_capped_by_global_deadline(self):
         with (
             mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),

@@ -184,6 +184,7 @@ This design still trusts the GitHub-hosted Linux runner, the Linux kernel and
 Landlock implementation, systemd, Git and its protocol parsers, the selected
 Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
 verifier/reporter, NanoDa's independent kernel, the governance of the canonical allowlisted repositories,
+the pinned Licensee SPDX detector and its locked Ruby dependencies,
 and the contents served by Mathlib's cache service. HTTPS authenticates the
 cache endpoint in transit, but the source-derived cache key is not a digest or
 signature of the downloaded archive. A cache publisher or storage service able
@@ -199,7 +200,10 @@ these trusted components infallible.
 Current protocol limits include public GitHub repositories, `lakefile.toml` at
 the submission root, a 500 MiB checked-out-source cap, a 256 KiB cap on
 `formalization.yaml`, a 100 KiB / 1,000-line hard cap on `Challenge.lean`, and
-standard fresh Lake build locations. The
+a 1 MiB cap on the single regular UTF-8 root licence file. Licensee reads only
+that selected file, with package and README detection disabled and bounded
+subprocess output and runtime. Standard fresh Lake build locations are also
+required. The
 verifier itself supports a twelve-hour wall-clock allowance and applies no CPU
 quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
 descriptors, and files up to 1 TiB. These are emergency host-containment

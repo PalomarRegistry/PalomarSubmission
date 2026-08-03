@@ -15,6 +15,12 @@ class ReportIssueTests(unittest.TestCase):
             "stage": "comparator",
             "issue": {"number": issue},
             "source": {"repository": "example/project", "commit": "1" * 40},
+            "license": {
+                "path": "LICENSE",
+                "sha256": "2" * 64,
+                "declared_identifier": "MIT",
+                "detected_identifier": "MIT",
+            },
             "errors": [],
             "warnings": [],
         }
@@ -30,6 +36,10 @@ class ReportIssueTests(unittest.TestCase):
         self.assertIn("\n    > fake quote\n", body)
         self.assertNotIn("\n## ✅ fake success\n", body)
         self.assertNotIn("\n[click](javascript:alert(1))\n", body)
+        self.assertIn("Repository licence: `LICENSE` (declared `MIT`, detected `MIT`)", body)
+
+        data["license"]["detected_identifier"] = None
+        self.assertIn("detected `unknown`", report_issue.body_for(data))
 
     def test_large_source_evidence_and_diagnostics_fit_in_one_comment(self):
         data = self.report()
