@@ -53,7 +53,14 @@ formalization.yaml
 Challenge.lean
 Solution.lean
 comparator.json
+LICENSE
 ```
+
+The licence filename is case-insensitive and may instead use `LICENCE`,
+`COPYING`, `UNLICENSE`, or `OFL`, with an optional `.md`, `.markdown`, or
+`.txt` extension. Exactly one such regular root file is required. It must be
+nonempty UTF-8 text, match one standard SPDX licence mechanically, and agree
+exactly with the SPDX identifier in `project.license`.
 
 `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
 project identity, authorship, license, classification, source citation,
@@ -75,6 +82,8 @@ Lean toolchains listed in [`toolchains.json`](toolchains.json).
 
 PalomarSubmission's software is MIT-licensed. The vendored taxonomy data is a
 separate work under the terms recorded in [`taxonomies/LICENSE.md`](taxonomies/LICENSE.md).
+Submission licence validation covers the submitted repository snapshot only;
+cited papers, reused formalizations, and dependencies retain their own licences.
 
 ## Security
 

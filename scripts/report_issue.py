@@ -45,6 +45,7 @@ def body_for(report: dict) -> str:
     icon = {"pass": "✅", "fail": "❌", "error": "⚠️"}.get(status, "⚠️")
     source = report.get("source", {})
     challenge = report.get("challenge", {})
+    license_record = report.get("license", {})
     errors = bounded_diagnostics(report.get("errors", []))
     warnings = bounded_diagnostics(report.get("warnings", []))
     lines = [
@@ -56,6 +57,13 @@ def body_for(report: dict) -> str:
         f"- Lean: `{report.get('lean_toolchain', 'unknown')}`",
         f"- Challenge: {challenge.get('lines', '?')} lines / {challenge.get('bytes', '?')} bytes",
     ]
+    if isinstance(license_record, dict) and license_record.get("path"):
+        declared = license_record.get("declared_identifier", "unknown")
+        detected = license_record.get("detected_identifier") or "unknown"
+        lines.append(
+            f"- Repository licence: `{license_record['path']}` "
+            f"(declared `{declared}`, detected `{detected}`)"
+        )
     if challenge.get("trust_level"):
         lines.append(f"- Challenge trust surface: `{challenge['trust_level']}`")
     if report.get("error_kind"):

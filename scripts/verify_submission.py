@@ -37,6 +37,7 @@ REQUIRED = (
 )
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 MAX_FORMALIZATION_BYTES = 256 * 1024
+MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
@@ -104,6 +105,10 @@ RELATED_FORMALIZATION_RELATIONSHIPS = {
     "supersedes",
     "other",
 }
+LICENSE_FILE_RE = re.compile(
+    r"^(?:licen[cs]e|copying|unlicense|ofl)(?:\.(?:md|markdown|txt))?$",
+    re.IGNORECASE,
+)
 IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
@@ -130,6 +135,14 @@ SANDBOX_ENVIRONMENT = (
 
 class VerificationError(RuntimeError):
     pass
+
+
+class LicenseValidationError(VerificationError):
+    """The submitted repository does not satisfy the licence policy."""
+
+
+class LicenseDetectorError(VerificationError):
+    """The trusted SPDX detector failed rather than rejecting submitted terms."""
 
 
 class ResourceExhausted(VerificationError):
@@ -341,6 +354,94 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def repository_license_file(source: Path) -> Path:
+    candidates = sorted(
+        (path for path in source.iterdir() if LICENSE_FILE_RE.fullmatch(path.name)),
+        key=lambda path: (path.name.casefold(), path.name),
+    )
+    if not candidates:
+        raise LicenseValidationError(
+            "repository root has no conventional licence file "
+            "(LICENSE, LICENCE, COPYING, UNLICENSE, or OFL)"
+        )
+    if len(candidates) != 1:
+        names = ", ".join(path.name for path in candidates)
+        raise LicenseValidationError(
+            f"repository root must contain exactly one conventional licence file; found: {names}"
+        )
+    path = candidates[0]
+    if path.is_symlink() or not path.is_file():
+        raise LicenseValidationError(f"repository licence path is not a regular root file: {path.name}")
+    if path.stat().st_size > MAX_LICENSE_BYTES:
+        raise LicenseValidationError("repository licence file exceeds the 1 MiB hard cap")
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise LicenseValidationError("repository licence file must be UTF-8 text") from error
+    if not contents.strip():
+        raise LicenseValidationError("repository licence file must not be empty")
+    return path
+
+
+def detect_spdx_identifier(path: Path, bundle: Path) -> str:
+    if not bundle.is_file():
+        raise LicenseDetectorError(f"trusted Bundler executable is unavailable: {bundle}")
+    environment = os.environ.copy()
+    environment["BUNDLE_GEMFILE"] = str(ROOT / "Gemfile")
+    try:
+        completed = run(
+            [
+                str(bundle),
+                "exec",
+                "ruby",
+                str(ROOT / "scripts" / "detect_license.rb"),
+                str(path),
+            ],
+            cwd=ROOT,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise LicenseDetectorError("trusted SPDX licence detector could not run") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[-2_000:]
+        suffix = f": {detail}" if detail else ""
+        raise LicenseDetectorError(
+            f"trusted SPDX licence detector failed with exit {completed.returncode}{suffix}"
+        )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise LicenseDetectorError("trusted SPDX licence detector returned malformed JSON") from error
+    if not isinstance(result, dict):
+        raise LicenseDetectorError("trusted SPDX licence detector returned a non-object result")
+    licenses = result.get("licenses")
+    matched_files = result.get("matched_files")
+    if not isinstance(licenses, list) or not isinstance(matched_files, list):
+        raise LicenseDetectorError("trusted SPDX licence detector omitted required result fields")
+    identifiers = [
+        item.get("spdx_id")
+        for item in licenses
+        if isinstance(item, dict) and isinstance(item.get("spdx_id"), str)
+    ]
+    matches = [
+        item.get("matched_license")
+        for item in matched_files
+        if isinstance(item, dict) and isinstance(item.get("matched_license"), str)
+    ]
+    if len(identifiers) != 1 or len(matches) != 1:
+        raise LicenseValidationError(
+            "repository licence file does not have one unambiguous standard SPDX match"
+        )
+    identifier = identifiers[0]
+    if identifier in {"NONE", "NOASSERTION"} or matches[0] != identifier:
+        raise LicenseValidationError(
+            "repository licence file does not have one unambiguous standard SPDX match"
+        )
+    return identifier
 
 
 def _required_mapping(value: Any, path: str) -> dict[str, Any]:
@@ -854,7 +955,7 @@ def prepare(args: argparse.Namespace) -> int:
     work = Path(args.work_dir).resolve()
     previous_deadline = _EXECUTION_DEADLINE
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "error",
         "stage": "intake",
         "checked_at": now(),
@@ -933,6 +1034,25 @@ def prepare(args: argparse.Namespace) -> int:
         formalization = load_formalization_metadata(source / "formalization.yaml")
         provenance = normalized_provenance(formalization, warnings=report["warnings"])
 
+        report["stage"] = "license"
+        declared_license = formalization["project"]["license"].strip()
+        license_path = repository_license_file(source)
+        license_record: dict[str, Any] = {
+            "path": license_path.name,
+            "sha256": sha256(license_path),
+            "declared_identifier": declared_license,
+            "detected_identifier": None,
+        }
+        report["license"] = license_record
+        detected_license = detect_spdx_identifier(license_path, Path(args.licensee).resolve())
+        license_record["detected_identifier"] = detected_license
+        if declared_license != detected_license:
+            raise LicenseValidationError(
+                "formalization.yaml field project.license "
+                f"declares {declared_license!r}, but {license_path.name} matches {detected_license!r}"
+            )
+        report["stage"] = "intake"
+
         toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
         export_commit = mapping["lean4export"].get(toolchain)
@@ -1000,6 +1120,12 @@ def prepare(args: argparse.Namespace) -> int:
         report["stage"] = "prepared"
         write_json(output, report)
         workflow_output(ready="true", lean4export_commit=export_commit, lean_toolchain=toolchain)
+    except LicenseValidationError as error:
+        report["status"] = "fail"
+        report["stage"] = "license"
+        report["errors"].append(str(error))
+        write_json(output, report)
+        workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
     except Exception as error:  # noqa: BLE001 -- all intake failures become a bounded report
         report["errors"].append(str(error))
         write_json(output, report)
@@ -3280,6 +3406,7 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--event", required=True)
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
+    prepare_parser.add_argument("--licensee", required=True)
     prepare_parser.set_defaults(func=prepare)
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
