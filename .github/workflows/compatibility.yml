@@ -56,7 +56,7 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.33.0-rc1
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Build pinned Comparator and lean4export
+      - name: Build pinned Comparator, lean4export, and NanoDa
         run: |
           git clone --filter=blob:none https://github.com/leanprover/comparator.git comparator
           git -C comparator checkout 68a064109f01c08f47c8edc9f51d6a2bbffaa188
@@ -67,6 +67,9 @@ jobs:
           git -C lean4export checkout "$LEAN4EXPORT_COMMIT"
           test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
           (cd lean4export && lake build lean4export)
+          git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git nanoda
+          git -C nanoda checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
+          cargo build --release --locked --manifest-path nanoda/Cargo.toml
       - name: Clone the accepted compatibility fixture
         run: |
           git clone --filter=blob:none --no-checkout \
@@ -84,5 +87,6 @@ jobs:
             --landrun "$(go env GOPATH)/bin/landrun" \
             --comparator "$PWD/comparator/.lake/build/bin/comparator" \
             --lean4export "$PWD/lean4export/.lake/build/bin/lean4export" \
+            --nanoda "$PWD/nanoda/target/release/nanoda_bin" \
             --adapter "$PWD/pipeline/scripts/landrun_passthrough.py" \
             --work-dir "$RUNNER_TEMP/palomar-compatibility"

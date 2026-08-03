@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,8 @@ import yaml
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
+    LicenseValidationError,
+    LicenseDetectorError,
     PERMISSIVE_RESOURCE_PROPERTIES,
     ResourceExhausted,
     VerificationError,
@@ -24,6 +27,8 @@ from scripts.verify_submission import (
     canonical_repository,
     compile_canonical_challenge,
     direct_imports,
+    detect_spdx_identifier,
+    enforced_comparator_config,
     execute,
     github_repository,
     indexed_versions,
@@ -39,6 +44,7 @@ from scripts.verify_submission import (
     reject_committed_build_artifacts,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
+    repository_license_file,
     require_protected_paths,
     run,
     sandboxed_run,
@@ -51,6 +57,112 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_repository_license_file_is_one_nonempty_regular_root_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            license_path = root / "licence.MD"
+            license_path.write_text("standard terms\n")
+            self.assertEqual(repository_license_file(root), license_path)
+
+            (root / "COPYING").write_text("other terms\n")
+            with self.assertRaisesRegex(LicenseValidationError, "exactly one"):
+                repository_license_file(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "LICENSE").write_text("  \n")
+            with self.assertRaisesRegex(LicenseValidationError, "must not be empty"):
+                repository_license_file(root)
+
+    def test_repository_license_file_rejects_missing_and_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(LicenseValidationError, "no conventional"):
+                repository_license_file(root)
+            target = root / "terms"
+            target.write_text("terms\n")
+            (root / "LICENSE").symlink_to(target)
+            with self.assertRaisesRegex(LicenseValidationError, "not a regular"):
+                repository_license_file(root)
+
+    def test_detect_spdx_identifier_requires_one_consistent_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            bundle.touch()
+            license_path = root / "LICENSE"
+            license_path.write_text("terms\n")
+            result = {
+                "licenses": [{"spdx_id": "Apache-2.0"}],
+                "matched_files": [{"matched_license": "Apache-2.0"}],
+            }
+            completed = subprocess.CompletedProcess(
+                [str(bundle)], 0, json.dumps(result), ""
+            )
+            with mock.patch("scripts.verify_submission.run", return_value=completed):
+                self.assertEqual(
+                    detect_spdx_identifier(license_path, bundle), "Apache-2.0"
+                )
+
+            result["licenses"] = []
+            rejected = subprocess.CompletedProcess([str(bundle)], 0, json.dumps(result), "")
+            with (
+                mock.patch("scripts.verify_submission.run", return_value=rejected),
+                self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+            ):
+                detect_spdx_identifier(license_path, bundle)
+
+            for malformed in (
+                {
+                    "licenses": [{"spdx_id": "NOASSERTION"}],
+                    "matched_files": [{"matched_license": "NOASSERTION"}],
+                },
+                {
+                    "licenses": [{"spdx_id": "Apache-2.0"}],
+                    "matched_files": [{"matched_license": "MIT"}],
+                },
+                {
+                    "licenses": [{"spdx_id": "Apache-2.0"}],
+                    "matched_files": [
+                        {"matched_license": "Apache-2.0"},
+                        {"matched_license": "Apache-2.0"},
+                    ],
+                },
+            ):
+                rejected = subprocess.CompletedProcess(
+                    [str(bundle)], 0, json.dumps(malformed), ""
+                )
+                with (
+                    mock.patch("scripts.verify_submission.run", return_value=rejected),
+                    self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+                ):
+                    detect_spdx_identifier(license_path, bundle)
+
+            failed = subprocess.CompletedProcess(
+                [str(bundle)], 7, "", "bundler could not load licensee"
+            )
+            with (
+                mock.patch("scripts.verify_submission.run", return_value=failed),
+                self.assertRaisesRegex(
+                    LicenseDetectorError, "exit 7: bundler could not load licensee"
+                ),
+            ):
+                detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_repository_mit_license(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        self.assertEqual(detect_spdx_identifier(REPOSITORY_ROOT / "LICENSE", bundle), "MIT")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSE")
+            (root / "LICENSES").mkdir()
+            shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSES" / "LICENSE")
+            self.assertEqual(detect_spdx_identifier(root / "LICENSE", bundle), "MIT")
+
     def test_phase_timeout_is_capped_by_global_deadline(self):
         with (
             mock.patch("scripts.verify_submission._EXECUTION_DEADLINE", 100.0),
@@ -70,7 +182,7 @@ class VerifySubmissionTests(unittest.TestCase):
             report_path = root / "report.json"
             report_path.write_text(json.dumps({"status": "pending", "errors": []}))
             tools = []
-            for name in ("comparator", "lean4export", "landrun"):
+            for name in ("comparator", "lean4export", "landrun", "nanoda"):
                 tool = root / name
                 tool.touch()
                 tools.append(tool)
@@ -81,8 +193,10 @@ class VerifySubmissionTests(unittest.TestCase):
                 comparator=tools[0],
                 lean4export=tools[1],
                 landrun=tools[2],
+                nanoda=tools[3],
                 comparator_commit="a" * 40,
                 landrun_commit="b" * 40,
+                nanoda_commit="c" * 40,
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
             with (
@@ -332,6 +446,14 @@ https://github.com/example/result
 ### Existing Palomar ID (updates only)
 
 _No response_
+
+### Relationship to the substantive formalization
+
+I am a responsible author or maintainer
+
+### Authorization evidence (optional)
+
+_No response_
 """
         parsed = parse_issue_body(body)
         self.assertEqual(parsed["repository_url"], "https://github.com/example/result")
@@ -410,6 +532,17 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
+            enforced = Path(directory) / "enforced.json"
+            enforced_comparator_config(path, enforced)
+            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+            self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
+
+            config = json.loads(path.read_text())
+            config["enable_nanoda"] = True
+            path.write_text(json.dumps(config))
+            enforced_comparator_config(path, enforced)
+            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+
             config = json.loads(path.read_text())
             config["future_relaxation"] = True
             path.write_text(json.dumps(config))
@@ -426,6 +559,11 @@ project:
   name: Example result
   authors: [Ada Lovelace]
   license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+provenance:
+  result_origin: source-based
+repository:
+  role: substantive-development
 classification:
   arxiv: [math.LO, cs.LO]
   msc2020: [03B35, 68V15]
@@ -434,6 +572,7 @@ sources:
     authors:
       - name: Emmy Noether
     id: doi:10.1000/example
+    relationship: formalizes
 automation:
   methods:
     - method: manual
@@ -451,6 +590,11 @@ project:
   name: Example result
   authors: [Ada Lovelace]
   license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+provenance:
+  result_origin: source-based
+repository:
+  role: substantive-development
 classification:
   arxiv: [math.LO]
   msc2020: [03B35]
@@ -458,6 +602,7 @@ sources:
   - title: A source theorem
     authors: [Emmy Noether]
     id: doi:10.1000/example
+    relationship: formalizes
 automation:
   methods:
     - method: manual
@@ -479,6 +624,121 @@ review:
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
 
+    def test_provenance_accepts_a_source_free_original_result(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {"role": "substantive-development"},
+            }
+        )
+        self.assertEqual(provenance["mathematical_sources"], [])
+        self.assertEqual(provenance["result_origin"], "original")
+
+    def test_source_based_provenance_without_a_substantive_relationship_warns(self):
+        data = {
+            "project": {"responsible_maintainers": ["Ada Lovelace"]},
+            "provenance": {"result_origin": "source-based"},
+            "repository": {"role": "substantive-development"},
+            "sources": [
+                {
+                    "title": "Background textbook",
+                    "relationship": "background",
+                }
+            ],
+        }
+        warnings = []
+        provenance = verifier.normalized_provenance(data, warnings=warnings)
+        self.assertEqual(provenance["result_origin"], "source-based")
+        self.assertTrue(any("no source explicitly marked" in warning for warning in warnings))
+
+    def test_legacy_provenance_fields_are_inferred_instead_of_rejected(self):
+        warnings = []
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"authors": ["Ada Lovelace"]},
+                "sources": [
+                    {
+                        "title": "An older source record",
+                        "author": "Emmy Noether",
+                        "kind": "informal_proof",
+                    }
+                ],
+            },
+            warnings=warnings,
+        )
+        self.assertEqual(provenance["result_origin"], "unspecified")
+        self.assertEqual(provenance["repository_role"], "unspecified")
+        self.assertEqual(provenance["responsible_maintainers"], [])
+        self.assertEqual(provenance["mathematical_sources"][0]["relationship"], "other")
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"], [{"name": "Emmy Noether"}]
+        )
+        self.assertEqual(
+            provenance["declared"],
+            {
+                "result_origin": False,
+                "repository_role": False,
+                "responsible_maintainers": False,
+            },
+        )
+        self.assertTrue(any("result_origin" in warning for warning in warnings))
+        self.assertTrue(any("repository.role" in warning for warning in warnings))
+        self.assertTrue(any("responsible maintainer" in warning for warning in warnings))
+        self.assertTrue(any("relationship" in warning for warning in warnings))
+
+    def test_conflicting_or_unrecognized_provenance_is_not_published_as_a_claim(self):
+        warnings = []
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {"role": "thin_wrapper"},
+                "sources": [{"title": "Source", "relationship": "formalizes"}],
+            },
+            warnings=warnings,
+        )
+        self.assertEqual(provenance["result_origin"], "unspecified")
+        self.assertEqual(provenance["repository_role"], "unspecified")
+        self.assertFalse(provenance["declared"]["result_origin"])
+        self.assertFalse(provenance["declared"]["repository_role"])
+
+    def test_unquoted_yaml_boolean_author_contacted_is_normalized(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "source-based"},
+                "repository": {"role": "substantive-development"},
+                "sources": [
+                    {
+                        "title": "Source",
+                        "relationship": "formalizes",
+                        "author_contacted": False,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(provenance["mathematical_sources"][0]["author_contacted"], "no")
+
+    def test_thin_wrapper_records_the_substantive_repository_at_a_full_commit(self):
+        revision = "a" * 40
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {
+                    "role": "thin-wrapper",
+                    "substantive_formalization": {
+                        "id": "example/substantive",
+                        "revision": revision,
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            provenance["substantive_formalization"]["tree_url"],
+            f"https://github.com/example/substantive/tree/{revision}",
+        )
     def test_formalization_metadata_must_be_valid_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"
@@ -546,6 +806,7 @@ review:
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
+                "COMPARATOR_NANODA": "/tools/nanoda_bin",
                 "SECRET": "no",
             },
             readable_directories=(Path("/source"),),
@@ -569,6 +830,7 @@ review:
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)
         self.assertIn("GIT_TERMINAL_PROMPT", command)
+        self.assertIn("COMPARATOR_NANODA", command)
         self.assertNotIn("SECRET", command)
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)

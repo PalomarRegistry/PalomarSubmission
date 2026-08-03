@@ -21,6 +21,14 @@ body:
         classes and at least one MSC2020 code. Intake checks that the codes
         exist, and editorial review checks that they plausibly fit the result.
 
+        The repository root must also contain exactly one conventional licence
+        file whose standard SPDX licence matches `project.license`.
+
+        Submit the substantive formalization only if you are one of its
+        responsible authors or maintainers, or have their approval. If this
+        repository is only a thin Comparator wrapper, that means the people
+        responsible for the underlying formalization repository.
+
   - type: input
     id: repository_url
     attributes:
@@ -48,6 +56,25 @@ body:
     validations:
       required: false
 
+  - type: dropdown
+    id: authorization_relationship
+    attributes:
+      label: Relationship to the substantive formalization
+      description: For a thin wrapper, answer about the underlying formalization repository.
+      options:
+        - I am a responsible author or maintainer
+        - I have approval from a responsible author or maintainer
+    validations:
+      required: true
+
+  - type: textarea
+    id: authorization_evidence
+    attributes:
+      label: Authorization evidence (optional)
+      description: Optional link or short note recording the approval. Do not include private correspondence without permission.
+    validations:
+      required: false
+
   - type: textarea
     id: context
     attributes:
@@ -62,6 +89,8 @@ body:
       label: Acknowledgements
       options:
         - label: I have read the [Palomar submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required root file.
+          required: true
+        - label: I have checked that the root licence file covers this repository and that cited works, reused formalizations, and dependencies may have separate licences.
           required: true
         - label: I understand that Palomar acceptance records Comparator verification and an automated editorial review, not journal peer review or human endorsement.
           required: true
