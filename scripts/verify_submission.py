@@ -407,33 +407,53 @@ def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | Non
     return text
 
 
-def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
-    """Validate and canonicalize provenance fields for reports and publication."""
+def normalized_provenance(
+    data: dict[str, Any], *, warnings: list[str] | None = None
+) -> dict[str, Any]:
+    """Best-effort canonicalization of editorial provenance metadata.
+
+    Provenance is useful during review, but incomplete or legacy provenance must
+    not prevent the mechanical verifier from reaching Lean and NanoDa.
+    """
+
+    warning_set = set(warnings or [])
+
+    def warn(message: str) -> None:
+        if warnings is not None and message not in warning_set and len(warnings) < 100:
+            warnings.append(message)
+            warning_set.add(message)
+
     project = _required_mapping(data.get("project"), "project")
     maintainers_value = project.get("responsible_maintainers")
     if maintainers_value is None and project.get("responsible_maintainer") is not None:
-        maintainers_value = [project["responsible_maintainer"]]
-    maintainers = _person_records(
-        maintainers_value,
-        "project.responsible_maintainers",
-        required=True,
-    )
+        singular = project["responsible_maintainer"]
+        maintainers_value = singular if isinstance(singular, list) else [singular]
+    maintainers_declared = maintainers_value is not None
+    if maintainers_declared:
+        maintainers = _person_records(
+            maintainers_value,
+            "project.responsible_maintainers",
+            required=False,
+        )
+    else:
+        maintainers = []
+        warn("No responsible maintainer was declared; recorded as unspecified")
 
-    provenance = _required_mapping(data.get("provenance"), "provenance")
-    result_origin = _required_text(
-        provenance.get("result_origin"), "provenance.result_origin"
-    ).strip()
+    provenance_value = data.get("provenance")
+    provenance = provenance_value if isinstance(provenance_value, dict) else {}
+    result_origin = provenance.get("result_origin")
+    result_origin_declared = result_origin in RESULT_ORIGINS
     if result_origin not in RESULT_ORIGINS:
-        raise VerificationError(
-            "formalization.yaml field provenance.result_origin must be original or source-based"
-        )
+        result_origin = "unspecified"
+        warn("No recognized provenance.result_origin was declared; recorded as unspecified")
 
-    repository = _required_mapping(data.get("repository"), "repository")
-    repository_role = _required_text(repository.get("role"), "repository.role").strip()
+    repository_value = data.get("repository")
+    repository = repository_value if isinstance(repository_value, dict) else {}
+    repository_role = repository.get("role")
+    repository_role_declared = repository_role in REPOSITORY_ROLES
     if repository_role not in REPOSITORY_ROLES:
-        raise VerificationError(
-            "formalization.yaml field repository.role must be substantive-development or thin-wrapper"
-        )
+        repository_role = "unspecified"
+        warn("No recognized repository.role was declared; recorded as unspecified")
     substantive: dict[str, str] | None = None
     if repository_role == "thin-wrapper":
         item = _required_mapping(
@@ -463,19 +483,28 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
 
     raw_sources = data.get("sources", [])
     if not isinstance(raw_sources, list):
-        raise VerificationError("formalization.yaml field sources must be a list when present")
+        warn("Ignoring sources because the field is not a list")
+        raw_sources = []
     sources: list[dict[str, Any]] = []
     for index, source in enumerate(raw_sources):
         path = f"sources[{index}]"
-        item = _required_mapping(source, path)
-        relationship = _required_text(item.get("relationship"), f"{path}.relationship").strip()
+        if not isinstance(source, dict):
+            warn(f"Ignoring {path} because it is not a mapping")
+            continue
+        item = source
+        raw_relationship = item.get("relationship")
+        relationship = raw_relationship
         if relationship not in SOURCE_RELATIONSHIPS:
-            raise VerificationError(
-                f"formalization.yaml field {path}.relationship is not recognized"
-            )
+            relationship = "other"
+            rendered = repr(raw_relationship)[:100]
+            warn(f"Treating unrecognized {path}.relationship {rendered} as 'other'")
+        authors = item.get("authors")
+        if authors is None and item.get("author") is not None:
+            singular = item["author"]
+            authors = singular if isinstance(singular, list) else [singular]
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
-            "authors": _person_records(item.get("authors"), f"{path}.authors", required=False),
+            "authors": _person_records(authors, f"{path}.authors", required=False),
             "relationship": relationship,
         }
         for source_key, record_key, maximum in (
@@ -486,35 +515,38 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             ("author_contacted", "author_contacted", 100),
             ("author_endorsement", "author_endorsement", 100),
         ):
-            value = _optional_text(item.get(source_key), f"{path}.{source_key}", maximum=maximum)
+            raw_value = item.get(source_key)
+            if source_key == "author_contacted" and isinstance(raw_value, bool):
+                raw_value = "yes" if raw_value else "no"
+            value = _optional_text(raw_value, f"{path}.{source_key}", maximum=maximum)
             if value is not None:
                 record[record_key] = value
         endorsement = record.get("author_endorsement")
         if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
-            raise VerificationError(
-                f"formalization.yaml field {path}.author_endorsement is not recognized"
-            )
+            del record["author_endorsement"]
+            warn(f"Ignoring unrecognized {path}.author_endorsement")
         contacted = record.get("author_contacted")
         if contacted is not None and contacted not in {"yes", "no", "n/a"}:
-            raise VerificationError(
-                f"formalization.yaml field {path}.author_contacted is not recognized"
-            )
+            del record["author_contacted"]
+            warn(f"Ignoring unrecognized {path}.author_contacted")
         sources.append(record)
 
     substantive_relationships = {"formalizes", "adapts", "independently-proves"}
     if result_origin == "source-based" and not any(
         source["relationship"] in substantive_relationships for source in sources
     ):
-        raise VerificationError(
-            "source-based provenance requires a source related by formalizes, adapts, "
+        warn(
+            "Source-based provenance has no source explicitly marked formalizes, adapts, "
             "or independently-proves"
         )
     if result_origin == "original" and any(
         source["relationship"] in substantive_relationships for source in sources
     ):
-        raise VerificationError(
-            "original provenance may list background sources but not a source that it "
-            "formalizes, adapts, or independently proves"
+        result_origin = "unspecified"
+        result_origin_declared = False
+        warn(
+            "Declared original provenance conflicts with a substantive source relationship; "
+            "recorded as unspecified"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -546,6 +578,11 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         "responsible_maintainers": maintainers,
         "mathematical_sources": sources,
         "related_formalizations": related,
+        "declared": {
+            "result_origin": result_origin_declared,
+            "repository_role": repository_role_declared,
+            "responsible_maintainers": maintainers_declared,
+        },
     }
     if substantive is not None:
         result["substantive_formalization"] = substantive
@@ -894,7 +931,7 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("lakefile.toml exceeds the 1 MiB hard cap")
         tomllib.loads(lakefile.read_text(encoding="utf-8"))
         formalization = load_formalization_metadata(source / "formalization.yaml")
-        provenance = normalized_provenance(formalization)
+        provenance = normalized_provenance(formalization, warnings=report["warnings"])
 
         toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
