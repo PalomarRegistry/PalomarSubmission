@@ -22,6 +22,7 @@ from scripts.verify_submission import (
     canonical_repository,
     compile_canonical_challenge,
     direct_imports,
+    enforced_comparator_config,
     execute,
     github_repository,
     indexed_versions,
@@ -68,7 +69,7 @@ class VerifySubmissionTests(unittest.TestCase):
             report_path = root / "report.json"
             report_path.write_text(json.dumps({"status": "pending", "errors": []}))
             tools = []
-            for name in ("comparator", "lean4export", "landrun"):
+            for name in ("comparator", "lean4export", "landrun", "nanoda"):
                 tool = root / name
                 tool.touch()
                 tools.append(tool)
@@ -79,8 +80,10 @@ class VerifySubmissionTests(unittest.TestCase):
                 comparator=tools[0],
                 lean4export=tools[1],
                 landrun=tools[2],
+                nanoda=tools[3],
                 comparator_commit="a" * 40,
                 landrun_commit="b" * 40,
+                nanoda_commit="c" * 40,
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
             with (
@@ -351,6 +354,17 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             )
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
+            enforced = Path(directory) / "enforced.json"
+            enforced_comparator_config(path, enforced)
+            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+            self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
+
+            config = json.loads(path.read_text())
+            config["enable_nanoda"] = True
+            path.write_text(json.dumps(config))
+            enforced_comparator_config(path, enforced)
+            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+
             config = json.loads(path.read_text())
             config["future_relaxation"] = True
             path.write_text(json.dumps(config))
@@ -544,6 +558,7 @@ review:
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
+                "COMPARATOR_NANODA": "/tools/nanoda_bin",
                 "SECRET": "no",
             },
             readable_directories=(Path("/source"),),
@@ -567,6 +582,7 @@ review:
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)
         self.assertIn("GIT_TERMINAL_PROMPT", command)
+        self.assertIn("COMPARATOR_NANODA", command)
         self.assertNotIn("SECRET", command)
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)

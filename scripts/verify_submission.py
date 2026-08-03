@@ -123,6 +123,7 @@ SANDBOX_ENVIRONMENT = (
     "LAKE_PKG_URL_MAP",
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
+    "COMPARATOR_NANODA",
     "PALOMAR_LANDRUN_REAL",
 )
 
@@ -796,9 +797,17 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError("comparator permitted_axioms exceed Palomar's standard allowlist")
-    if config["enable_nanoda"] is not False:
-        raise VerificationError("enable_nanoda must be false in the v1 runner")
+    if not isinstance(config["enable_nanoda"], bool):
+        raise VerificationError("comparator enable_nanoda must be a boolean")
     return config
+
+
+def enforced_comparator_config(source: Path, destination: Path) -> Path:
+    """Write the trusted Comparator config, forcing the independent kernel on."""
+    config = load_comparator_config(source)
+    config["enable_nanoda"] = True
+    write_json(destination, config)
+    return destination.resolve(strict=True)
 
 
 def prepare(args: argparse.Namespace) -> int:
@@ -2836,6 +2845,7 @@ def execute(args: argparse.Namespace) -> int:
             "stage": "setup",
             "comparator_commit": args.comparator_commit,
             "landrun_commit": args.landrun_commit,
+            "nanoda_commit": args.nanoda_commit,
             "workflow_url": args.workflow_url,
         }
     )
@@ -2866,10 +2876,11 @@ def execute(args: argparse.Namespace) -> int:
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()
+        nanoda = Path(args.nanoda).resolve()
         adapter = (ROOT / "scripts" / "landrun_passthrough.py").resolve()
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         verifier = Path(__file__).resolve()
-        for tool in (comparator, lean4export, landrun, adapter, metrics_wrapper, verifier):
+        for tool in (comparator, lean4export, landrun, nanoda, adapter, metrics_wrapper, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
         env = os.environ.copy()
@@ -2878,6 +2889,7 @@ def execute(args: argparse.Namespace) -> int:
             {
                 "COMPARATOR_LANDRUN": str(adapter),
                 "COMPARATOR_LEAN4EXPORT": str(lean4export),
+                "COMPARATOR_NANODA": str(nanoda),
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
@@ -2924,6 +2936,7 @@ def execute(args: argparse.Namespace) -> int:
             comparator,
             lean4export,
             landrun,
+            nanoda,
             adapter,
             metrics_wrapper,
             lake,
@@ -2943,13 +2956,20 @@ def execute(args: argparse.Namespace) -> int:
             if system_path.exists():
                 executable_paths.append(system_path.resolve())
         executable_paths = sorted(set(executable_paths))
-        readable_paths = sorted({source.resolve(), *system_readable_paths()})
+        comparator_config = enforced_comparator_config(
+            source / "comparator.json", work / "enforced-comparator.json"
+        )
+        readable_paths = sorted(
+            {source.resolve(), comparator_config, *system_readable_paths()}
+        )
         require_protected_paths(
             [
                 output,
+                comparator_config,
                 comparator,
                 lean4export,
                 landrun,
+                nanoda,
                 adapter,
                 metrics_wrapper,
                 verifier,
@@ -2967,6 +2987,8 @@ def execute(args: argparse.Namespace) -> int:
                 comparator,
                 lean4export,
                 landrun,
+                nanoda,
+                comparator_config,
                 adapter,
                 metrics_wrapper,
                 verifier,
@@ -3161,7 +3183,7 @@ def execute(args: argparse.Namespace) -> int:
         )
         report["stage"] = "comparator"
         proc = sandboxed_run(
-            [str(comparator), "comparator.json"],
+            [str(comparator), str(comparator_config)],
             cwd=source,
             environment=env,
             landrun=landrun,
@@ -3229,8 +3251,10 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--comparator", required=True)
     execute_parser.add_argument("--lean4export", required=True)
     execute_parser.add_argument("--landrun", required=True)
+    execute_parser.add_argument("--nanoda", required=True)
     execute_parser.add_argument("--comparator-commit", required=True)
     execute_parser.add_argument("--landrun-commit", required=True)
+    execute_parser.add_argument("--nanoda-commit", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.add_argument(
         "--execution-budget-seconds",
