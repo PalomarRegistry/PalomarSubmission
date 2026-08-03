@@ -265,6 +265,14 @@ https://github.com/example/result
 ### Existing Palomar ID (updates only)
 
 _No response_
+
+### Relationship to the substantive formalization
+
+I am a responsible author or maintainer
+
+### Authorization evidence (optional)
+
+_No response_
 """
         parsed = parse_issue_body(body)
         self.assertEqual(parsed["repository_url"], "https://github.com/example/result")
@@ -359,6 +367,11 @@ project:
   name: Example result
   authors: [Ada Lovelace]
   license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+provenance:
+  result_origin: source-based
+repository:
+  role: substantive-development
 classification:
   arxiv: [math.LO, cs.LO]
   msc2020: [03B35, 68V15]
@@ -367,6 +380,7 @@ sources:
     authors:
       - name: Emmy Noether
     id: doi:10.1000/example
+    relationship: formalizes
 automation:
   methods:
     - method: manual
@@ -384,6 +398,11 @@ project:
   name: Example result
   authors: [Ada Lovelace]
   license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+provenance:
+  result_origin: source-based
+repository:
+  role: substantive-development
 classification:
   arxiv: [math.LO]
   msc2020: [03B35]
@@ -391,6 +410,7 @@ sources:
   - title: A source theorem
     authors: [Emmy Noether]
     id: doi:10.1000/example
+    relationship: formalizes
 automation:
   methods:
     - method: manual
@@ -412,6 +432,51 @@ review:
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
 
+    def test_provenance_accepts_a_source_free_original_result(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {"role": "substantive-development"},
+            }
+        )
+        self.assertEqual(provenance["mathematical_sources"], [])
+        self.assertEqual(provenance["result_origin"], "original")
+
+    def test_provenance_requires_a_substantive_source_for_source_based_work(self):
+        data = {
+            "project": {"responsible_maintainers": ["Ada Lovelace"]},
+            "provenance": {"result_origin": "source-based"},
+            "repository": {"role": "substantive-development"},
+            "sources": [
+                {
+                    "title": "Background textbook",
+                    "relationship": "background",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(VerificationError, "requires a source related"):
+            verifier.normalized_provenance(data)
+
+    def test_thin_wrapper_records_the_substantive_repository_at_a_full_commit(self):
+        revision = "a" * 40
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {
+                    "role": "thin-wrapper",
+                    "substantive_formalization": {
+                        "id": "example/substantive",
+                        "revision": revision,
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            provenance["substantive_formalization"]["tree_url"],
+            f"https://github.com/example/substantive/tree/{revision}",
+        )
     def test_formalization_metadata_must_be_valid_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"

@@ -65,6 +65,8 @@ SECTION_KEYS = {
     "Repository URL": "repository_url",
     "Commit SHA": "commit_sha",
     "Existing Palomar ID (updates only)": "existing_id",
+    "Relationship to the substantive formalization": "authorization_relationship",
+    "Authorization evidence (optional)": "authorization_evidence",
     "Additional context (optional)": "context",
 }
 GITHUB_RE = re.compile(
@@ -72,6 +74,36 @@ GITHUB_RE = re.compile(
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
+GITHUB_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
+AUTHORIZATION_RELATIONSHIPS = {
+    "I am a responsible author or maintainer": "maintainer",
+    "I have approval from a responsible author or maintainer": "approved",
+}
+RESULT_ORIGINS = {"original", "source-based"}
+REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
+SOURCE_RELATIONSHIPS = {
+    "formalizes",
+    "adapts",
+    "independently-proves",
+    "background",
+    "other",
+}
+SOURCE_ENDORSEMENTS = {
+    "participated",
+    "endorsed",
+    "no-response",
+    "not-contacted",
+    "declined",
+    "n/a",
+}
+RELATED_FORMALIZATION_RELATIONSHIPS = {
+    "builds-on",
+    "adapts",
+    "independent",
+    "supersedes",
+    "other",
+}
 IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
@@ -338,6 +370,187 @@ def _required_people(value: Any, path: str) -> list[Any]:
     return value
 
 
+def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, str]]:
+    if value in (None, []) and not required:
+        return []
+    people = _required_people(value, path)
+    records: list[dict[str, str]] = []
+    for index, person in enumerate(people):
+        item_path = f"{path}[{index}]"
+        if isinstance(person, str):
+            records.append({"name": person.strip()})
+            continue
+        record = {"name": _required_text(person.get("name"), f"{item_path}.name").strip()}
+        github = person.get("github")
+        if github is not None:
+            login = _required_text(github, f"{item_path}.github").strip().removeprefix("@")
+            if not GITHUB_LOGIN_RE.fullmatch(login):
+                raise VerificationError(f"formalization.yaml field {item_path}.github is invalid")
+            record["github"] = login
+        orcid = person.get("orcid")
+        if orcid is not None:
+            identifier = _required_text(orcid, f"{item_path}.orcid").strip()
+            if not ORCID_RE.fullmatch(identifier):
+                raise VerificationError(f"formalization.yaml field {item_path}.orcid is invalid")
+            record["orcid"] = identifier
+        records.append(record)
+    return records
+
+
+def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | None:
+    if value is None or value == "":
+        return None
+    text = _required_text(value, path).strip()
+    if len(text) > maximum:
+        raise VerificationError(f"formalization.yaml field {path} exceeds {maximum} characters")
+    return text
+
+
+def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and canonicalize provenance fields for reports and publication."""
+    project = _required_mapping(data.get("project"), "project")
+    maintainers_value = project.get("responsible_maintainers")
+    if maintainers_value is None and project.get("responsible_maintainer") is not None:
+        maintainers_value = [project["responsible_maintainer"]]
+    maintainers = _person_records(
+        maintainers_value,
+        "project.responsible_maintainers",
+        required=True,
+    )
+
+    provenance = _required_mapping(data.get("provenance"), "provenance")
+    result_origin = _required_text(
+        provenance.get("result_origin"), "provenance.result_origin"
+    ).strip()
+    if result_origin not in RESULT_ORIGINS:
+        raise VerificationError(
+            "formalization.yaml field provenance.result_origin must be original or source-based"
+        )
+
+    repository = _required_mapping(data.get("repository"), "repository")
+    repository_role = _required_text(repository.get("role"), "repository.role").strip()
+    if repository_role not in REPOSITORY_ROLES:
+        raise VerificationError(
+            "formalization.yaml field repository.role must be substantive-development or thin-wrapper"
+        )
+    substantive: dict[str, str] | None = None
+    if repository_role == "thin-wrapper":
+        item = _required_mapping(
+            repository.get("substantive_formalization"),
+            "repository.substantive_formalization",
+        )
+        repository_id = _required_text(
+            item.get("id"), "repository.substantive_formalization.id"
+        )
+        if not repository_id.startswith("https://"):
+            repository_id = f"https://github.com/{repository_id}"
+        repo, url = normalize_repository(repository_id)
+        revision = _required_text(
+            item.get("revision"), "repository.substantive_formalization.revision"
+        ).strip().lower()
+        if not SHA_RE.fullmatch(revision):
+            raise VerificationError(
+                "formalization.yaml field repository.substantive_formalization.revision "
+                "must be a full lowercase commit"
+            )
+        substantive = {
+            "repository": repo,
+            "repository_url": url,
+            "commit": revision,
+            "tree_url": f"{url}/tree/{revision}",
+        }
+
+    raw_sources = data.get("sources", [])
+    if not isinstance(raw_sources, list):
+        raise VerificationError("formalization.yaml field sources must be a list when present")
+    sources: list[dict[str, Any]] = []
+    for index, source in enumerate(raw_sources):
+        path = f"sources[{index}]"
+        item = _required_mapping(source, path)
+        relationship = _required_text(item.get("relationship"), f"{path}.relationship").strip()
+        if relationship not in SOURCE_RELATIONSHIPS:
+            raise VerificationError(
+                f"formalization.yaml field {path}.relationship is not recognized"
+            )
+        record: dict[str, Any] = {
+            "title": _required_text(item.get("title"), f"{path}.title").strip(),
+            "authors": _person_records(item.get("authors"), f"{path}.authors", required=False),
+            "relationship": relationship,
+        }
+        for source_key, record_key, maximum in (
+            ("id", "identifier", 2_048),
+            ("type", "type", 200),
+            ("location", "location", 1_000),
+            ("license", "license", 500),
+            ("author_contacted", "author_contacted", 100),
+            ("author_endorsement", "author_endorsement", 100),
+        ):
+            value = _optional_text(item.get(source_key), f"{path}.{source_key}", maximum=maximum)
+            if value is not None:
+                record[record_key] = value
+        endorsement = record.get("author_endorsement")
+        if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
+            raise VerificationError(
+                f"formalization.yaml field {path}.author_endorsement is not recognized"
+            )
+        contacted = record.get("author_contacted")
+        if contacted is not None and contacted not in {"yes", "no", "n/a"}:
+            raise VerificationError(
+                f"formalization.yaml field {path}.author_contacted is not recognized"
+            )
+        sources.append(record)
+
+    substantive_relationships = {"formalizes", "adapts", "independently-proves"}
+    if result_origin == "source-based" and not any(
+        source["relationship"] in substantive_relationships for source in sources
+    ):
+        raise VerificationError(
+            "source-based provenance requires a source related by formalizes, adapts, "
+            "or independently-proves"
+        )
+    if result_origin == "original" and any(
+        source["relationship"] in substantive_relationships for source in sources
+    ):
+        raise VerificationError(
+            "original provenance may list background sources but not a source that it "
+            "formalizes, adapts, or independently proves"
+        )
+
+    raw_related = data.get("related_formalizations", [])
+    if not isinstance(raw_related, list):
+        raise VerificationError(
+            "formalization.yaml field related_formalizations must be a list when present"
+        )
+    related: list[dict[str, str]] = []
+    for index, related_item in enumerate(raw_related):
+        path = f"related_formalizations[{index}]"
+        item = _required_mapping(related_item, path)
+        relationship = _required_text(item.get("relationship"), f"{path}.relationship").strip()
+        if relationship not in RELATED_FORMALIZATION_RELATIONSHIPS:
+            raise VerificationError(
+                f"formalization.yaml field {path}.relationship is not recognized"
+            )
+        record = {
+            "identifier": _required_text(item.get("id"), f"{path}.id").strip(),
+            "relationship": relationship,
+        }
+        note = _optional_text(item.get("note"), f"{path}.note")
+        if note is not None:
+            record["note"] = note
+        related.append(record)
+
+    result: dict[str, Any] = {
+        "result_origin": result_origin,
+        "repository_role": repository_role,
+        "responsible_maintainers": maintainers,
+        "mathematical_sources": sources,
+        "related_formalizations": related,
+    }
+    if substantive is not None:
+        result["substantive_formalization"] = substantive
+    return result
+
+
 def _required_classifications(
     value: Any,
     path: str,
@@ -394,15 +607,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
         maximum=8,
     )
 
-    sources = data.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise VerificationError("formalization.yaml field sources must be a nonempty list")
-    for index, source in enumerate(sources):
-        source_path = f"sources[{index}]"
-        item = _required_mapping(source, source_path)
-        _required_text(item.get("title"), f"{source_path}.title")
-        _required_people(item.get("authors"), f"{source_path}.authors")
-        _required_text(item.get("id"), f"{source_path}.id")
+    normalized_provenance(data)
 
     automation = _required_mapping(data.get("automation"), "automation")
     methods = automation.get("methods")
@@ -624,6 +829,26 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError(
                 "Existing Palomar ID must have the form PALOMAR-2026-07-29-000123"
             )
+        raw_relationship = values.get("authorization_relationship", "").strip()
+        if raw_relationship:
+            authorization_relationship = AUTHORIZATION_RELATIONSHIPS.get(raw_relationship)
+            if authorization_relationship is None:
+                raise VerificationError(
+                    "Relationship to the substantive formalization is not recognized"
+                )
+        else:
+            authorization_relationship = "legacy-unspecified"
+            report["warnings"].append(
+                "Legacy submission issue has no authorization relationship declaration"
+            )
+        authorization: dict[str, str] = {
+            "relationship": authorization_relationship,
+        }
+        authorization_evidence = values.get("authorization_evidence", "").strip()
+        if len(authorization_evidence) > 4_000:
+            raise VerificationError("Authorization evidence exceeds 4,000 characters")
+        if authorization_evidence:
+            authorization["evidence"] = authorization_evidence
 
         report.update(
             {
@@ -631,6 +856,7 @@ def prepare(args: argparse.Namespace) -> int:
                     "number": int(issue["number"]),
                     "url": issue["html_url"],
                     "submitter": issue["user"]["login"],
+                    "authorization": authorization,
                 },
                 "source": {
                     "repository": repository,
@@ -659,6 +885,7 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("lakefile.toml exceeds the 1 MiB hard cap")
         tomllib.loads(lakefile.read_text(encoding="utf-8"))
         formalization = load_formalization_metadata(source / "formalization.yaml")
+        provenance = normalized_provenance(formalization)
 
         toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
@@ -697,7 +924,7 @@ def prepare(args: argparse.Namespace) -> int:
                     "path": "formalization.yaml",
                     "sha256": sha256(source / "formalization.yaml"),
                     "project_name": formalization["project"]["name"].strip(),
-                    "source_count": len(formalization["sources"]),
+                    "source_count": len(provenance["mathematical_sources"]),
                     "automation_method_count": len(formalization["automation"]["methods"]),
                     "review_status": formalization["review"]["status"].strip(),
                 },
@@ -711,6 +938,7 @@ def prepare(args: argparse.Namespace) -> int:
                         for code in formalization["classification"]["msc2020"]
                     ],
                 },
+                "provenance": provenance,
                 # Retained for report-schema compatibility with already published tooling.
                 "formalization_sha256": sha256(source / "formalization.yaml"),
                 "comparator_config_sha256": sha256(source / "comparator.json"),

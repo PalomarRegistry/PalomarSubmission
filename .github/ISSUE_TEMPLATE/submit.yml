@@ -21,6 +21,11 @@ body:
         classes and at least one MSC2020 code. Intake checks that the codes
         exist, and editorial review checks that they plausibly fit the result.
 
+        Submit the substantive formalization only if you are one of its
+        responsible authors or maintainers, or have their approval. If this
+        repository is only a thin Comparator wrapper, that means the people
+        responsible for the underlying formalization repository.
+
   - type: input
     id: repository_url
     attributes:
@@ -45,6 +50,25 @@ body:
       label: Existing Palomar ID (updates only)
       description: Leave blank for a new result. To publish a new version, give the existing permanent identifier.
       placeholder: PALOMAR-2026-07-29-000123
+    validations:
+      required: false
+
+  - type: dropdown
+    id: authorization_relationship
+    attributes:
+      label: Relationship to the substantive formalization
+      description: For a thin wrapper, answer about the underlying formalization repository.
+      options:
+        - I am a responsible author or maintainer
+        - I have approval from a responsible author or maintainer
+    validations:
+      required: true
+
+  - type: textarea
+    id: authorization_evidence
+    attributes:
+      label: Authorization evidence (optional)
+      description: Optional link or short note recording the approval. Do not include private correspondence without permission.
     validations:
       required: false
 
