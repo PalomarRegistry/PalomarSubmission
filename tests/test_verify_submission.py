@@ -457,7 +457,7 @@ review:
         self.assertEqual(provenance["mathematical_sources"], [])
         self.assertEqual(provenance["result_origin"], "original")
 
-    def test_provenance_requires_a_substantive_source_for_source_based_work(self):
+    def test_source_based_provenance_without_a_substantive_relationship_warns(self):
         data = {
             "project": {"responsible_maintainers": ["Ada Lovelace"]},
             "provenance": {"result_origin": "source-based"},
@@ -469,8 +469,78 @@ review:
                 }
             ],
         }
-        with self.assertRaisesRegex(VerificationError, "requires a source related"):
-            verifier.normalized_provenance(data)
+        warnings = []
+        provenance = verifier.normalized_provenance(data, warnings=warnings)
+        self.assertEqual(provenance["result_origin"], "source-based")
+        self.assertTrue(any("no source explicitly marked" in warning for warning in warnings))
+
+    def test_legacy_provenance_fields_are_inferred_instead_of_rejected(self):
+        warnings = []
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"authors": ["Ada Lovelace"]},
+                "sources": [
+                    {
+                        "title": "An older source record",
+                        "author": "Emmy Noether",
+                        "kind": "informal_proof",
+                    }
+                ],
+            },
+            warnings=warnings,
+        )
+        self.assertEqual(provenance["result_origin"], "unspecified")
+        self.assertEqual(provenance["repository_role"], "unspecified")
+        self.assertEqual(provenance["responsible_maintainers"], [])
+        self.assertEqual(provenance["mathematical_sources"][0]["relationship"], "other")
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"], [{"name": "Emmy Noether"}]
+        )
+        self.assertEqual(
+            provenance["declared"],
+            {
+                "result_origin": False,
+                "repository_role": False,
+                "responsible_maintainers": False,
+            },
+        )
+        self.assertTrue(any("result_origin" in warning for warning in warnings))
+        self.assertTrue(any("repository.role" in warning for warning in warnings))
+        self.assertTrue(any("responsible maintainer" in warning for warning in warnings))
+        self.assertTrue(any("relationship" in warning for warning in warnings))
+
+    def test_conflicting_or_unrecognized_provenance_is_not_published_as_a_claim(self):
+        warnings = []
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {"role": "thin_wrapper"},
+                "sources": [{"title": "Source", "relationship": "formalizes"}],
+            },
+            warnings=warnings,
+        )
+        self.assertEqual(provenance["result_origin"], "unspecified")
+        self.assertEqual(provenance["repository_role"], "unspecified")
+        self.assertFalse(provenance["declared"]["result_origin"])
+        self.assertFalse(provenance["declared"]["repository_role"])
+
+    def test_unquoted_yaml_boolean_author_contacted_is_normalized(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "source-based"},
+                "repository": {"role": "substantive-development"},
+                "sources": [
+                    {
+                        "title": "Source",
+                        "relationship": "formalizes",
+                        "author_contacted": False,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(provenance["mathematical_sources"][0]["author_contacted"], "no")
 
     def test_thin_wrapper_records_the_substantive_repository_at_a_full_commit(self):
         revision = "a" * 40
