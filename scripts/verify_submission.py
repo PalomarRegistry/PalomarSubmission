@@ -22,19 +22,11 @@ import time
 import tomllib
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-REQUIRED = (
-    "lean-toolchain",
-    "lakefile.toml",
-    "formalization.yaml",
-    "Challenge.lean",
-    "Solution.lean",
-    "comparator.json",
-)
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 MAX_FORMALIZATION_BYTES = 256 * 1024
 MAX_LICENSE_BYTES = 1024 * 1024
@@ -69,6 +61,9 @@ SECTION_KEYS = {
     "Relationship to the substantive formalization": "authorization_relationship",
     "Authorization evidence (optional)": "authorization_evidence",
     "Additional context (optional)": "context",
+    "Project path (optional)": "project_path",
+    "Comparator configuration path (optional)": "comparator_config_path",
+    "Formalization metadata path (optional)": "formalization_metadata_path",
 }
 GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
@@ -110,6 +105,7 @@ LICENSE_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
+MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
     "PATH",
@@ -346,6 +342,84 @@ def normalize_repository(url: str) -> tuple[str, str]:
     if owner in {".", ".."} or repo in {".", ".."}:
         raise VerificationError("invalid GitHub repository path")
     return f"{owner}/{repo}", f"https://github.com/{owner}/{repo}"
+
+
+def normalized_repository_path(value: str, field: str) -> pathlib.PurePosixPath:
+    """Validate one user-supplied repository-relative POSIX path."""
+    raw = value.strip()
+    segments = raw.split("/")
+    if (
+        not raw
+        or raw.startswith("/")
+        or "\\" in raw
+        or "?" in raw
+        or "#" in raw
+        or any(not segment or segment in {".", ".."} for segment in segments)
+        or ":" in segments[0]
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        raise VerificationError(f"{field} must be a safe repository-relative POSIX path")
+    return pathlib.PurePosixPath(*segments)
+
+
+def joined_repository_path(
+    project_path: pathlib.PurePosixPath | None, filename: str
+) -> pathlib.PurePosixPath:
+    return (project_path / filename) if project_path is not None else pathlib.PurePosixPath(filename)
+
+
+def resolve_repository_path(
+    checkout: Path,
+    relative: pathlib.PurePosixPath,
+    field: str,
+    *,
+    kind: str,
+) -> Path:
+    """Resolve a validated repository path without following submitted symlinks."""
+    candidate = checkout
+    for segment in relative.parts:
+        candidate /= segment
+        if candidate.is_symlink():
+            raise VerificationError(f"{field} contains a symlinked path component")
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(checkout.resolve())
+    except ValueError as error:
+        raise VerificationError(f"{field} escapes the pinned repository checkout") from error
+    if kind == "file" and not resolved.is_file():
+        raise VerificationError(f"{field} is not a regular file: {relative.as_posix()}")
+    if kind == "directory" and not resolved.is_dir():
+        raise VerificationError(f"{field} is not a directory: {relative.as_posix()}")
+    return resolved
+
+
+def repository_relative_path(checkout: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(checkout.resolve()).as_posix()
+    except ValueError as error:
+        raise VerificationError("resolved project file escapes the pinned repository checkout") from error
+
+
+def repository_checkout_root(path: Path) -> Path:
+    resolved = path.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").is_dir() or (candidate / ".palomar-checkout-root").is_file():
+            return candidate
+    return resolved
+
+
+def project_tree_url(repository_url: str, commit: str, project_path: str | None) -> str:
+    base = f"{repository_url}/tree/{commit}"
+    if not project_path:
+        return base
+    encoded = "/".join(quote(segment, safe="") for segment in project_path.split("/"))
+    return f"{base}/{encoded}"
+
+
+def module_source_suffix(module: str) -> pathlib.PurePosixPath:
+    if not isinstance(module, str) or not MODULE_RE.fullmatch(module):
+        raise VerificationError(f"unsafe dotted Lean module name: {module!r}")
+    return pathlib.PurePosixPath(*module.split(".")).with_suffix(".lean")
 
 
 def sha256(path: Path) -> str:
@@ -909,23 +983,30 @@ def direct_imports(text: str) -> list[str]:
 
 
 def load_comparator_config(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise VerificationError("Comparator configuration is not a regular file")
+    if path.stat().st_size > MAX_CONFIGURATION_BYTES:
+        raise VerificationError("Comparator configuration exceeds the 1 MiB hard cap")
     config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise VerificationError("Comparator configuration must contain one JSON object")
     required = {
         "challenge_module",
         "solution_module",
         "theorem_names",
         "permitted_axioms",
-        "enable_nanoda",
     }
     missing = required - config.keys()
     if missing:
         raise VerificationError(f"comparator.json missing: {', '.join(sorted(missing))}")
-    allowed = required | {"definition_names"}
+    allowed = required | {"definition_names", "enable_nanoda"}
     unknown = config.keys() - allowed
     if unknown:
         raise VerificationError(f"comparator.json has unknown keys: {', '.join(sorted(unknown))}")
-    if config["challenge_module"] != "Challenge" or config["solution_module"] != "Solution":
-        raise VerificationError("comparator modules must be Challenge and Solution")
+    module_source_suffix(config["challenge_module"])
+    module_source_suffix(config["solution_module"])
+    if config["challenge_module"] == config["solution_module"]:
+        raise VerificationError("Comparator Challenge and Solution modules must be distinct")
     theorem_names = config["theorem_names"]
     definition_names = config.get("definition_names", [])
     if not isinstance(theorem_names, list) or not theorem_names:
@@ -935,8 +1016,6 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError("comparator permitted_axioms exceed Palomar's standard allowlist")
-    if not isinstance(config["enable_nanoda"], bool):
-        raise VerificationError("comparator enable_nanoda must be a boolean")
     return config
 
 
@@ -955,7 +1034,7 @@ def prepare(args: argparse.Namespace) -> int:
     work = Path(args.work_dir).resolve()
     previous_deadline = _EXECUTION_DEADLINE
     report: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "error",
         "stage": "intake",
         "checked_at": now(),
@@ -997,6 +1076,14 @@ def prepare(args: argparse.Namespace) -> int:
         if authorization_evidence:
             authorization["evidence"] = authorization_evidence
 
+        raw_project_path = values.get("project_path", "").strip()
+        project_relative = (
+            normalized_repository_path(raw_project_path, "Project path")
+            if raw_project_path
+            else None
+        )
+        project_path_value = project_relative.as_posix() if project_relative is not None else None
+
         report.update(
             {
                 "issue": {
@@ -1004,12 +1091,21 @@ def prepare(args: argparse.Namespace) -> int:
                     "url": issue["html_url"],
                     "submitter": issue["user"]["login"],
                     "authorization": authorization,
+                    "requested_paths": {
+                        "project_path": raw_project_path,
+                        "comparator_config_path": values.get(
+                            "comparator_config_path", ""
+                        ).strip(),
+                        "formalization_metadata_path": values.get(
+                            "formalization_metadata_path", ""
+                        ).strip(),
+                    },
                 },
                 "source": {
                     "repository": repository,
                     "repository_url": url,
                     "commit": commit,
-                    "tree_url": f"{url}/tree/{commit}",
+                    "tree_url": project_tree_url(url, commit, project_path_value),
                 },
                 "existing_id": existing_id or None,
             }
@@ -1021,17 +1117,43 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         report["source"]["bytes"] = size
 
-        for name in REQUIRED:
-            path = source / name
-            if path.is_symlink() or not path.is_file():
-                raise VerificationError(f"required regular root file is missing: {name}")
-        if (source / "lakefile.lean").exists():
-            raise VerificationError("lakefile.lean is not supported; provide lakefile.toml")
-        lakefile = source / "lakefile.toml"
+        project = (
+            resolve_repository_path(source, project_relative, "Project path", kind="directory")
+            if project_relative is not None
+            else source.resolve()
+        )
+        if project_path_value is not None:
+            report["source"]["project_path"] = project_path_value
+
+        lakefiles = [
+            path
+            for name in ("lakefile.toml", "lakefile.lean")
+            if (path := project / name).exists() or path.is_symlink()
+        ]
+        if len(lakefiles) != 1:
+            raise VerificationError(
+                "project directory must contain exactly one of lakefile.toml or lakefile.lean"
+            )
+        lakefile = lakefiles[0]
+        if lakefile.is_symlink() or not lakefile.is_file():
+            raise VerificationError("selected Lakefile is not a regular file")
         if lakefile.stat().st_size > MAX_CONFIGURATION_BYTES:
-            raise VerificationError("lakefile.toml exceeds the 1 MiB hard cap")
-        tomllib.loads(lakefile.read_text(encoding="utf-8"))
-        formalization = load_formalization_metadata(source / "formalization.yaml")
+            raise VerificationError("Lakefile exceeds the 1 MiB hard cap")
+        if lakefile.name == "lakefile.toml":
+            tomllib.loads(lakefile.read_text(encoding="utf-8"))
+
+        raw_metadata_path = values.get("formalization_metadata_path", "").strip()
+        metadata_relative = (
+            normalized_repository_path(raw_metadata_path, "Formalization metadata path")
+            if raw_metadata_path
+            else joined_repository_path(project_relative, "formalization.yaml")
+        )
+        if metadata_relative.name != "formalization.yaml":
+            raise VerificationError("Formalization metadata path must name formalization.yaml")
+        metadata_path = resolve_repository_path(
+            source, metadata_relative, "Formalization metadata path", kind="file"
+        )
+        formalization = load_formalization_metadata(metadata_path)
         provenance = normalized_provenance(formalization, warnings=report["warnings"])
 
         report["stage"] = "license"
@@ -1053,42 +1175,58 @@ def prepare(args: argparse.Namespace) -> int:
             )
         report["stage"] = "intake"
 
-        toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
+        project_toolchain = project / "lean-toolchain"
+        root_toolchain = source / "lean-toolchain"
+        toolchain_path = project_toolchain if project_toolchain.exists() else root_toolchain
+        if toolchain_path.is_symlink() or not toolchain_path.is_file():
+            raise VerificationError(
+                "lean-toolchain must be a regular file in the project or repository root"
+            )
+        toolchain = toolchain_path.read_text(encoding="utf-8").strip()
         mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
         export_commit = mapping["lean4export"].get(toolchain)
         if not export_commit:
             raise VerificationError(f"unsupported Lean toolchain: {toolchain}")
 
-        challenge = source / "Challenge.lean"
-        challenge_bytes = challenge.stat().st_size
-        if challenge_bytes > MAX_CHALLENGE_BYTES:
-            raise VerificationError("Challenge.lean exceeds the 100 KiB hard cap")
-        challenge_text = challenge.read_text(encoding="utf-8")
-        challenge_lines = len(challenge_text.splitlines())
-        if challenge_lines > MAX_CHALLENGE_LINES:
-            raise VerificationError("Challenge.lean exceeds the 1,000-line hard cap")
-        if challenge_bytes > 32 * 1024 or challenge_lines > 300:
-            report["warnings"].append("Challenge.lean exceeds the preferred 32 KiB / 300-line review surface")
-
-        config = load_comparator_config(source / "comparator.json")
+        raw_config_path = values.get("comparator_config_path", "").strip()
+        config_relative = (
+            normalized_repository_path(raw_config_path, "Comparator configuration path")
+            if raw_config_path
+            else joined_repository_path(project_relative, "comparator.json")
+        )
+        if config_relative.suffix.lower() != ".json":
+            raise VerificationError("Comparator configuration path must name a .json file")
+        config_path = resolve_repository_path(
+            source, config_relative, "Comparator configuration path", kind="file"
+        )
+        try:
+            config_path.relative_to(project)
+        except ValueError as error:
+            raise VerificationError(
+                "Comparator configuration path must be inside the selected project"
+            ) from error
+        config = load_comparator_config(config_path)
+        lakefile_relative = repository_relative_path(source, lakefile)
+        toolchain_relative = repository_relative_path(source, toolchain_path)
+        manifest_path = project / "lake-manifest.json"
+        if manifest_path.is_symlink():
+            raise VerificationError("project lake-manifest.json must not be a symlink")
+        if lakefile.name == "lakefile.lean" and not manifest_path.is_file():
+            raise VerificationError("lakefile.lean projects require a committed lake-manifest.json")
         report.update(
             {
                 "lean_toolchain": toolchain,
+                "lean_toolchain_path": toolchain_relative,
                 "lean4export_commit": export_commit,
                 "challenge": {
-                    "path": "Challenge.lean",
-                    "bytes": challenge_bytes,
-                    "lines": challenge_lines,
-                    "direct_imports": direct_imports(challenge_text),
-                    "sha256": sha256(challenge),
+                    "module": config["challenge_module"],
                 },
                 "solution": {
-                    "path": "Solution.lean",
-                    "sha256": sha256(source / "Solution.lean"),
+                    "module": config["solution_module"],
                 },
                 "formalization": {
-                    "path": "formalization.yaml",
-                    "sha256": sha256(source / "formalization.yaml"),
+                    "path": metadata_relative.as_posix(),
+                    "sha256": sha256(metadata_path),
                     "project_name": formalization["project"]["name"].strip(),
                     "source_count": len(provenance["mathematical_sources"]),
                     "automation_method_count": len(formalization["automation"]["methods"]),
@@ -1106,15 +1244,29 @@ def prepare(args: argparse.Namespace) -> int:
                 },
                 "provenance": provenance,
                 # Retained for report-schema compatibility with already published tooling.
-                "formalization_sha256": sha256(source / "formalization.yaml"),
-                "comparator_config_sha256": sha256(source / "comparator.json"),
+                "formalization_sha256": sha256(metadata_path),
+                "comparator_config_sha256": sha256(config_path),
+                "lakefile": {
+                    "path": lakefile_relative,
+                    "sha256": sha256(lakefile),
+                    "format": "lean" if lakefile.name == "lakefile.lean" else "toml",
+                },
                 "comparator": {
+                    "path": config_relative.as_posix(),
+                    "sha256": sha256(config_path),
+                    "challenge_module": config["challenge_module"],
+                    "solution_module": config["solution_module"],
                     "theorem_names": config["theorem_names"],
                     "definition_names": config.get("definition_names", []),
                     "permitted_axioms": config["permitted_axioms"],
                 },
             }
         )
+        if manifest_path.is_file():
+            report["lake_manifest"] = {
+                "path": repository_relative_path(source, manifest_path),
+                "sha256": sha256(manifest_path),
+            }
         write_json(work / "metadata.json", report)
         report["status"] = "pending"
         report["stage"] = "prepared"
@@ -1183,6 +1335,202 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
             }
         )
     return packages
+
+
+def contained_path_dependency(
+    project: Path, raw_value: str, checkout: Path, name: str
+) -> Path:
+    """Resolve a Lake path dependency without following submitted symlinks."""
+    relative = pathlib.PurePosixPath(raw_value)
+    if (
+        not raw_value
+        or raw_value != relative.as_posix()
+        or relative.is_absolute()
+        or "\\" in raw_value
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw_value)
+    ):
+        raise VerificationError(f"path package {name!r} has an unsafe directory")
+    boundary = checkout.resolve()
+    candidate = project.resolve()
+    for segment in relative.parts:
+        candidate /= segment
+        if candidate.is_symlink():
+            raise VerificationError(f"path package {name!r} contains a symlinked component")
+        try:
+            candidate.resolve().relative_to(boundary)
+        except ValueError as error:
+            raise VerificationError(
+                f"path package {name!r} escapes the repository checkout"
+            ) from error
+    resolved = candidate.resolve()
+    if any(part == ".lake" for part in resolved.relative_to(boundary).parts):
+        raise VerificationError(f"path package {name!r} may not live under .lake")
+    if resolved == project.resolve() or not resolved.is_dir():
+        raise VerificationError(f"path package {name!r} is not a distinct regular directory")
+    return resolved
+
+
+def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
+    """Create a trusted manifest for a simple TOML path-dependency workspace.
+
+    Nested Comparator workspaces often depend on the repository's main project
+    by path but omit their own generated manifest.  Reuse only already-pinned,
+    committed manifests from contained path targets; never run submitted Lake
+    configuration or resolve a moving Git reference to manufacture the lock.
+    Returns true when a manifest was generated.
+    """
+    manifest = project / "lake-manifest.json"
+    if manifest.is_symlink():
+        raise VerificationError("project lake-manifest.json must not be a symlink")
+    if manifest.is_file():
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("packages", []), list):
+            raise VerificationError("lake-manifest.json must contain one manifest object")
+        return False
+    if manifest.exists():
+        raise VerificationError("project lake-manifest.json must be a regular file")
+
+    lakefile = project / "lakefile.toml"
+    if lakefile.is_symlink() or not lakefile.is_file():
+        raise VerificationError("lakefile.lean projects require a committed lake-manifest.json")
+    try:
+        configuration = tomllib.loads(lakefile.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise VerificationError(f"invalid lakefile.toml: {error}") from error
+    requirements = configuration.get("require", [])
+    if not isinstance(requirements, list):
+        raise VerificationError("lakefile.toml require entries must be an array")
+
+    boundary = checkout.resolve()
+    packages: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    packages_directories: set[Path] = set()
+
+    def add(package: dict[str, Any], *, inherited: bool) -> None:
+        name = package.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            raise VerificationError(f"invalid Lake package name: {name!r}")
+        if name in seen_names:
+            raise VerificationError(f"duplicate Lake package name: {name!r}")
+        seen_names.add(name)
+        candidate = dict(package)
+        candidate["inherited"] = inherited
+        packages.append(candidate)
+
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            raise VerificationError("lakefile.toml require entries must be objects")
+        name = requirement.get("name")
+        raw_path = requirement.get("path")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            raise VerificationError(f"invalid direct Lake package name: {name!r}")
+        if not isinstance(raw_path, str):
+            raise VerificationError(
+                "a TOML project without lake-manifest.json may use only contained path "
+                "dependencies whose targets have committed manifests"
+            )
+        target = contained_path_dependency(project, raw_path, boundary, name)
+        target_lakefiles = [
+            target / filename
+            for filename in ("lakefile.toml", "lakefile.lean")
+            if (target / filename).exists() or (target / filename).is_symlink()
+        ]
+        if len(target_lakefiles) != 1 or target_lakefiles[0].is_symlink():
+            raise VerificationError(f"path package {name!r} has no unique regular Lakefile")
+        target_manifest = target / "lake-manifest.json"
+        if target_manifest.is_symlink() or not target_manifest.is_file():
+            raise VerificationError(
+                f"path package {name!r} must have a committed lake-manifest.json"
+            )
+        try:
+            target_data = json.loads(target_manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise VerificationError(f"path package {name!r} has an invalid manifest: {error}") from error
+        target_packages = target_data.get("packages") if isinstance(target_data, dict) else None
+        if not isinstance(target_packages, list):
+            raise VerificationError(f"path package {name!r} has an invalid manifest")
+        target_packages_dir = manifest_packages_directory(target, boundary)
+        packages_directories.add(target_packages_dir)
+        add(
+            {
+                "type": "path",
+                "scope": "",
+                "name": name,
+                "manifestFile": "lake-manifest.json",
+                "dir": raw_path,
+                "configFile": target_lakefiles[0].name,
+            },
+            inherited=False,
+        )
+        for package in target_packages:
+            if not isinstance(package, dict) or package.get("type") == "path":
+                raise VerificationError(
+                    f"path package {name!r} manifest has an unsupported nested path dependency"
+                )
+            add(package, inherited=True)
+
+    if len(packages_directories) > 1:
+        raise VerificationError(
+            "path dependencies use different packages directories; commit this project's manifest"
+        )
+    packages_dir = next(iter(packages_directories), project / ".lake" / "packages")
+    packages_dir_value = Path(os.path.relpath(packages_dir, project)).as_posix()
+    generated = {
+        "version": "1.2.0",
+        "packagesDir": packages_dir_value,
+        "packages": packages,
+        "name": str(configuration.get("name") or project.name),
+        "lakeDir": ".lake",
+        "fixedToolchain": False,
+    }
+    write_json(manifest, generated)
+    return True
+
+
+def manifest_packages_directory(source: Path, checkout: Path | None = None) -> Path:
+    """Resolve Lake's packages directory while containing it to the checkout."""
+    manifest = source / "lake-manifest.json"
+    directory = ".lake/packages"
+    if manifest.is_file() and not manifest.is_symlink():
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise VerificationError("lake-manifest.json must contain one JSON object")
+        directory = str(data.get("packagesDir") or directory)
+    raw = Path(directory)
+    if raw.is_absolute() or "\\" in directory or any(
+        ord(character) < 32 or ord(character) == 127 for character in directory
+    ):
+        raise VerificationError("Lake manifest packagesDir must be a safe relative path")
+    resolved = (source / raw).resolve()
+    boundary = checkout.resolve() if checkout is not None else repository_checkout_root(source)
+    try:
+        resolved.relative_to(boundary)
+    except ValueError as error:
+        raise VerificationError("Lake manifest packagesDir escapes the repository checkout") from error
+    if resolved.name != "packages" or resolved.parent.name != ".lake":
+        raise VerificationError("Lake manifest packagesDir must name a contained .lake/packages directory")
+    return resolved
+
+
+def recorded_project_dependencies(
+    source: Path, checkout: Path, packages: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for package in packages:
+        if package["url"].startswith("path:"):
+            target = (source / package["url"].removeprefix("path:")).resolve()
+            relative = target.relative_to(checkout.resolve()).as_posix()
+            records.append({"name": package["name"], "path": relative or "."})
+        else:
+            records.append(
+                {
+                    "name": package["name"],
+                    "repository": package["repository"],
+                    "url": package["url"],
+                    "revision": package["revision"],
+                }
+            )
+    return records
 
 
 def indexed_versions(database: Path) -> dict[tuple[str, str], dict[str, Any]]:
@@ -1416,7 +1764,7 @@ def package_allowlist(
             if canonical_repository(str(package["repository"]), aliases).lower() == display.lower()
         ]
         for root_package in matching:
-            package_dir = source / ".lake" / "packages" / root_package["name"]
+            package_dir = package_checkout(source, root_package)
             verify_official_revision(
                 package_dir,
                 repository=display,
@@ -1449,11 +1797,13 @@ def package_allowlist(
     return allowed
 
 
-def package_checkout(source: Path, package: dict[str, str]) -> Path:
+def package_checkout(
+    source: Path, package: dict[str, str], checkout: Path | None = None
+) -> Path:
     """Return the already-materialized checkout for one manifest package."""
     if package["url"].startswith("path:"):
         return (source / package["url"].removeprefix("path:")).resolve()
-    return (source / ".lake" / "packages" / package["name"]).resolve()
+    return (manifest_packages_directory(source, checkout) / package["name"]).resolve()
 
 
 def trusted_package_url_map(
@@ -1634,6 +1984,7 @@ def build_indexed_roots(
     work: Path,
     source: Path,
     *,
+    challenge_source: Path | None = None,
     packages: list[dict[str, str]],
     indexed: dict[str, dict[str, Any]],
     allowlist: dict[str, tuple[str, str]],
@@ -1797,7 +2148,8 @@ def build_indexed_roots(
         compiled[module] = target.resolve()
         source_roots.add(source_root)
 
-    for imported in direct_imports((source / "Challenge.lean").read_text(encoding="utf-8")):
+    challenge_source = challenge_source or (source / "Challenge.lean")
+    for imported in direct_imports(challenge_source.read_text(encoding="utf-8")):
         compile_module(imported)
     if not compiled:
         shutil.rmtree(output)
@@ -1807,7 +2159,7 @@ def build_indexed_roots(
 
 
 def source_package(path: Path, source: Path) -> str | None:
-    packages = (source / ".lake" / "packages").resolve()
+    packages = manifest_packages_directory(source)
     try:
         relative = path.resolve().relative_to(packages)
     except ValueError:
@@ -1832,18 +2184,34 @@ def remove_untrusted_lake_state(package_dir: Path) -> tuple[Path, Path]:
 def reject_committed_build_artifacts(package_dir: Path) -> None:
     """Reject prebuilt Lean/native output outside the fresh ``.lake`` tree."""
     root = package_dir.resolve()
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if not relative.parts or relative.parts[0] in {".git", ".lake"}:
-            continue
-        if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
-            raise VerificationError(
-                f"committed build artifact is not permitted outside fresh .lake state: {path}"
-            )
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        directories[:] = [name for name in directories if name not in {".git", ".lake"}]
+        for filename in filenames:
+            path = Path(current) / filename
+            if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
+                raise VerificationError(
+                    "committed build artifact is not permitted outside fresh .lake state: "
+                    f"{path}"
+                )
+
+
+def purge_untrusted_lake_state(checkout: Path) -> None:
+    """Remove every submitted ``.lake`` tree before the checkout becomes readable."""
+    root = checkout.resolve()
+    candidates = sorted(
+        (path for path in root.rglob(".lake") if ".git" not in path.relative_to(root).parts),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in candidates:
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
 
 
 def validate_writable_directories(source: Path, directories: list[Path]) -> list[Path]:
-    root = source.resolve()
+    root = repository_checkout_root(source)
     result: list[Path] = []
     for directory in directories:
         if directory.is_symlink() or not directory.is_dir():
@@ -2438,41 +2806,47 @@ def verify_filesystem_confinement(
         )
 
 
-def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path]:
+def materialize_packages(
+    source: Path, *, checkout: Path | None = None, base_env: dict[str, str]
+) -> list[Path]:
     """Materialize the exact Git revisions in the submitted Lake manifest.
 
     This deliberately does not use ``lake update``: Lake runs package
     post-update hooks, which are unnecessary for fetching and expand the
     pre-verification execution surface.
     """
-    root_build, root_config = remove_untrusted_lake_state(source)
-    dot_lake = source / ".lake"
-    packages_dir = dot_lake / "packages"
-    packages_dir.mkdir()
+    boundary = (checkout or source).resolve()
+    packages = manifest_packages(source)
+    path_directories: dict[str, Path] = {}
+    for package in packages:
+        if not package["url"].startswith("path:"):
+            continue
+        name = package["name"]
+        raw_value = package["url"].removeprefix("path:")
+        package_dir = contained_path_dependency(source, raw_value, boundary, name)
+        path_directories[name] = package_dir
+
+    purge_untrusted_lake_state(boundary)
+    reject_committed_build_artifacts(boundary)
+    packages_dir = manifest_packages_directory(source, boundary)
+    packages_owner = packages_dir.parent.parent
+    permitted_owners = {source.resolve(), *path_directories.values()}
+    if packages_owner not in permitted_owners:
+        raise VerificationError(
+            "Lake manifest packagesDir must belong to the project or a contained path dependency"
+        )
+    writable: list[Path] = []
+    for owner in sorted(permitted_owners):
+        writable.extend(remove_untrusted_lake_state(owner))
+    packages_dir.mkdir(exist_ok=True)
     git_env = git_environment(source, base_env)
     Path(git_env["HOME"]).mkdir(parents=True)
-    writable = [root_build, root_config]
-    for package in manifest_packages(source):
+    for package in packages:
         name = package["name"]
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             raise VerificationError(f"unsafe package name in Lake manifest: {name!r}")
         repository_url = package["url"]
         if repository_url.startswith("path:"):
-            relative = Path(repository_url.removeprefix("path:"))
-            if relative.is_absolute():
-                raise VerificationError(f"path package {name!r} must be relative to the source root")
-            package_dir = (source / relative).resolve()
-            lake_root = (source / ".lake").resolve()
-            try:
-                package_dir.relative_to(source.resolve())
-            except ValueError as error:
-                raise VerificationError(f"path package {name!r} escapes the source tree") from error
-            if package_dir == source.resolve() or not package_dir.is_dir():
-                raise VerificationError(f"path package {name!r} is not a distinct source directory")
-            if package_dir == lake_root or lake_root in package_dir.parents:
-                raise VerificationError(f"path package {name!r} may not live under .lake")
-            writable.extend(remove_untrusted_lake_state(package_dir))
-            reject_committed_build_artifacts(package_dir)
             continue
         revision = package["revision"]
         parsed = urlparse(repository_url)
@@ -2507,8 +2881,7 @@ def materialize_packages(source: Path, *, base_env: dict[str, str]) -> list[Path
         )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
         writable.extend(remove_untrusted_lake_state(package_dir))
-    reject_committed_build_artifacts(source)
-    return validate_writable_directories(source, writable)
+    return validate_writable_directories(boundary, writable)
 
 
 def reject_untrusted_package_artifacts(
@@ -2546,7 +2919,7 @@ def get_mathlib_cache(
     )
     if mathlib is None:
         return
-    package_dir = source / ".lake" / "packages" / mathlib["name"]
+    package_dir = package_checkout(source, mathlib)
     if not (package_dir / ".git").is_dir():
         raise VerificationError("official Mathlib dependency is not a Git checkout")
     git_env = git_environment(source, base_env)
@@ -2697,6 +3070,7 @@ def source_matches_checkout(path: Path, package_dir: Path) -> bool:
 def lean_source_dependencies(
     source: Path,
     *,
+    challenge_source: Path,
     lean: Path,
     environment: dict[str, str],
     landrun: Path,
@@ -2706,7 +3080,7 @@ def lean_source_dependencies(
     tools: dict[Path, str],
 ) -> list[Path]:
     proc = sandboxed_run(
-        [str(lean), "--src-deps", "Challenge.lean"],
+        [str(lean), "--src-deps", str(challenge_source)],
         cwd=source,
         environment=environment,
         landrun=landrun,
@@ -2767,7 +3141,7 @@ def audit_challenge_sources(
         if not package:
             untrusted.append(str(resolved))
             continue
-        package_dir = source / ".lake" / "packages" / package_name
+        package_dir = package_checkout(source, package)
         if not source_matches_checkout(resolved, package_dir):
             untrusted.append(str(resolved))
             continue
@@ -2867,14 +3241,43 @@ def lake_environment_value(
     return os.pathsep.join(str(path) for path in resolved)
 
 
+def resolve_module_source(
+    module: str,
+    *,
+    project: Path,
+    lean_source_path: str,
+) -> Path:
+    """Resolve a configured module using Lake's ordered source roots."""
+    suffix = module_source_suffix(module)
+    for root_value in lean_source_path.split(os.pathsep):
+        if not root_value:
+            continue
+        candidate = Path(root_value).joinpath(*suffix.parts)
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            raise VerificationError(f"configured module {module!r} is not a regular source file")
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(project.resolve())
+        except ValueError as error:
+            raise VerificationError(
+                f"configured module {module!r} resolves outside the selected project"
+            ) from error
+        return resolved
+    raise VerificationError(f"configured module {module!r} has no source file in Lake's source path")
+
+
 def protected_lean_path(
     canonical_olean: Path,
     trusted_lean_paths: list[Path],
     candidate_lean_path: str,
+    *,
+    protected_root: Path | None = None,
 ) -> str:
     """Resolve protected statement imports before any candidate build output."""
     candidate_paths = [Path(value) for value in candidate_lean_path.split(os.pathsep) if value]
-    ordered = [canonical_olean.parent, *trusted_lean_paths, *candidate_paths]
+    ordered = [protected_root or canonical_olean.parent, *trusted_lean_paths, *candidate_paths]
     return os.pathsep.join(str(path) for path in dict.fromkeys(ordered))
 
 
@@ -2882,6 +3285,8 @@ def compile_canonical_challenge(
     work: Path,
     source: Path,
     *,
+    challenge_source: Path | None = None,
+    challenge_module: str = "Challenge",
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
@@ -2909,6 +3314,7 @@ def compile_canonical_challenge(
     temporary = scratch / "tmp"
     home.mkdir()
     temporary.mkdir()
+    challenge_source = challenge_source or (source / "Challenge.lean")
 
     packages_by_name = {package["name"]: package for package in manifest_packages(source)}
     trusted_names = sorted(
@@ -2930,8 +3336,12 @@ def compile_canonical_challenge(
     canonical_readable_paths = list(readable_paths)
     if indexed_lean_path is not None:
         canonical_readable_paths.append(indexed_lean_path.resolve())
+    challenge_root = challenge_source.resolve()
+    for _segment in module_source_suffix(challenge_module).parts:
+        challenge_root = challenge_root.parent
     source_paths = [
         source.resolve(),
+        challenge_root,
         *trusted_packages.values(),
         *indexed_source_roots,
     ]
@@ -2948,9 +3358,11 @@ def compile_canonical_challenge(
             "LEAN_SRC_PATH": os.pathsep.join(str(path) for path in sorted(set(source_paths))),
         }
     )
-    compiled_olean = scratch / "Challenge.olean"
+    module_suffix = module_source_suffix(challenge_module).with_suffix(".olean")
+    compiled_olean = scratch.joinpath(*module_suffix.parts)
+    compiled_olean.parent.mkdir(parents=True, exist_ok=True)
     sandboxed_run(
-        [str(lean), "-o", str(compiled_olean), "Challenge.lean"],
+        [str(lean), "-o", str(compiled_olean), str(challenge_source)],
         cwd=source,
         environment=canonical_env,
         landrun=landrun,
@@ -2966,6 +3378,7 @@ def compile_canonical_challenge(
     tools[compiled_olean] = sha256(compiled_olean)
     dependencies = lean_source_dependencies(
         source,
+        challenge_source=challenge_source,
         lean=lean,
         environment=canonical_env,
         landrun=landrun,
@@ -2978,11 +3391,17 @@ def compile_canonical_challenge(
     # Only the single snapshotted module crosses into the protected search path,
     # which is created by the verifier after all hostile canonical-build passes.
     output_dir.mkdir()
-    canonical_olean = output_dir / "Challenge.olean"
+    canonical_olean = output_dir.joinpath(*module_suffix.parts)
+    canonical_olean.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(compiled_olean, canonical_olean)
     if canonical_olean.is_symlink() or not canonical_olean.is_file():
         raise VerificationError("protected Challenge module is not a regular file")
-    if [path.name for path in output_dir.iterdir()] != ["Challenge.olean"]:
+    protected_files = {
+        path.resolve()
+        for path in output_dir.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    if protected_files != {canonical_olean.resolve()}:
         raise VerificationError("protected Challenge directory contains unexpected files")
     canonical_olean = canonical_olean.resolve()
     tools[canonical_olean] = sha256(canonical_olean)
@@ -3000,7 +3419,20 @@ def execute(args: argparse.Namespace) -> int:
     previous_deadline = _EXECUTION_DEADLINE
     previous_metrics_path = _RESOURCE_METRICS_PATH
     previous_disk_path = _RESOURCE_DISK_PATH
-    source = work / "source"
+    checkout = work / "source"
+    raw_project_path = report.get("source", {}).get("project_path")
+    project_relative = (
+        normalized_repository_path(raw_project_path, "Mechanical project path")
+        if isinstance(raw_project_path, str) and raw_project_path
+        else None
+    )
+    source = (
+        resolve_repository_path(
+            checkout, project_relative, "Mechanical project path", kind="directory"
+        )
+        if project_relative is not None
+        else checkout.resolve()
+    )
     metrics_path = work / "resource-metrics.jsonl"
     report.update(
         {
@@ -3031,7 +3463,7 @@ def execute(args: argparse.Namespace) -> int:
             raise VerificationError("resource metrics path is not a regular file")
         metrics_path.unlink(missing_ok=True)
         _RESOURCE_METRICS_PATH = metrics_path
-        _RESOURCE_DISK_PATH = source
+        _RESOURCE_DISK_PATH = checkout
         install_execution_deadline(
             os.environ.get("PALOMAR_JOB_STARTED_AT"),
             getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
@@ -3084,7 +3516,11 @@ def execute(args: argparse.Namespace) -> int:
         except ValueError as error:
             raise VerificationError("Lake executable is outside the selected Lean toolchain") from error
 
-        writable_directories = materialize_packages(source, base_env=env)
+        if ensure_lake_manifest(source, checkout):
+            report["warnings"].append(
+                "Generated a trusted Lake manifest from contained path-dependency manifests"
+            )
+        writable_directories = materialize_packages(source, checkout=checkout, base_env=env)
         sandbox_home = source / ".lake" / "config" / "home"
         sandbox_tmp = source / ".lake" / "config" / "tmp"
         sandbox_home.mkdir()
@@ -3119,11 +3555,29 @@ def execute(args: argparse.Namespace) -> int:
             if system_path.exists():
                 executable_paths.append(system_path.resolve())
         executable_paths = sorted(set(executable_paths))
+        comparator_path = resolve_repository_path(
+            checkout,
+            normalized_repository_path(
+                str(report.get("comparator", {}).get("path") or ""),
+                "Mechanical Comparator configuration path",
+            ),
+            "Mechanical Comparator configuration path",
+            kind="file",
+        )
+        lakefile_path = resolve_repository_path(
+            checkout,
+            normalized_repository_path(
+                str(report.get("lakefile", {}).get("path") or ""),
+                "Mechanical Lakefile path",
+            ),
+            "Mechanical Lakefile path",
+            kind="file",
+        )
         comparator_config = enforced_comparator_config(
-            source / "comparator.json", work / "enforced-comparator.json"
+            comparator_path, work / "enforced-comparator.json"
         )
         readable_paths = sorted(
-            {source.resolve(), comparator_config, *system_readable_paths()}
+            {checkout.resolve(), comparator_config, *system_readable_paths()}
         )
         require_protected_paths(
             [
@@ -3169,7 +3623,7 @@ def execute(args: argparse.Namespace) -> int:
         verify_sandbox_confinement(
             work / "landrun-initial-write-denial-probe",
             work / "landrun-initial-read-denial-probe",
-            positive_read=source / "Challenge.lean",
+            positive_read=lakefile_path,
             python=python,
             touch=touch,
             cwd=source,
@@ -3179,6 +3633,56 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
+        )
+        report["stage"] = "module-resolution"
+        candidate_source_path = lake_environment_value(
+            "LEAN_SRC_PATH",
+            source=source,
+            lake=lake,
+            printenv=printenv,
+            environment=env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            allowed_roots=[checkout, lean_prefix],
+        )
+        challenge_source = resolve_module_source(
+            report["comparator"]["challenge_module"],
+            project=source,
+            lean_source_path=candidate_source_path,
+        )
+        solution_source = resolve_module_source(
+            report["comparator"]["solution_module"],
+            project=source,
+            lean_source_path=candidate_source_path,
+        )
+        challenge_bytes = challenge_source.stat().st_size
+        if challenge_bytes > MAX_CHALLENGE_BYTES:
+            raise VerificationError("configured Challenge source exceeds the 100 KiB hard cap")
+        challenge_text = challenge_source.read_text(encoding="utf-8")
+        challenge_lines = len(challenge_text.splitlines())
+        if challenge_lines > MAX_CHALLENGE_LINES:
+            raise VerificationError("configured Challenge source exceeds the 1,000-line hard cap")
+        if challenge_bytes > 32 * 1024 or challenge_lines > 300:
+            report["warnings"].append(
+                "configured Challenge source exceeds the preferred 32 KiB / 300-line review surface"
+            )
+        report["challenge"].update(
+            {
+                "path": repository_relative_path(checkout, challenge_source),
+                "bytes": challenge_bytes,
+                "lines": challenge_lines,
+                "direct_imports": direct_imports(challenge_text),
+                "sha256": sha256(challenge_source),
+            }
+        )
+        report["solution"].update(
+            {
+                "path": repository_relative_path(checkout, solution_source),
+                "sha256": sha256(solution_source),
+            }
         )
         report["stage"] = "dependency-provenance"
         packages = manifest_packages(source)
@@ -3218,6 +3722,7 @@ def execute(args: argparse.Namespace) -> int:
         indexed_lean_path, indexed_source_roots = build_indexed_roots(
             work,
             source,
+            challenge_source=challenge_source,
             packages=packages,
             indexed=indexed,
             allowlist=allowlist,
@@ -3251,6 +3756,8 @@ def execute(args: argparse.Namespace) -> int:
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
             source,
+            challenge_source=challenge_source,
+            challenge_module=report["comparator"]["challenge_module"],
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
@@ -3262,7 +3769,8 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
         )
-        readable_paths = sorted({*readable_paths, canonical_olean.parent})
+        canonical_root = (work / "canonical-challenge").resolve()
+        readable_paths = sorted({*readable_paths, canonical_root})
         require_protected_paths([canonical_olean], candidate_writable)
         report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
@@ -3274,7 +3782,9 @@ def execute(args: argparse.Namespace) -> int:
             indexed=indexed,
             writable_directories=candidate_writable,
         )
-        report["project_dependencies"] = packages
+        report["project_dependencies"] = recorded_project_dependencies(
+            source, checkout, packages
+        )
         report["challenge"].update(
             {
                 "transitive_source_count": audit["source_count"],
@@ -3289,7 +3799,7 @@ def execute(args: argparse.Namespace) -> int:
             report["status"] = "fail"
             report["stage"] = "challenge-provenance"
             report["errors"].append(
-                "Challenge.lean transitively imports sources outside the allowlist or Palomar"
+                "configured Challenge transitively imports sources outside the allowlist or Palomar"
             )
             report["checked_at"] = now()
             guarded_write()
@@ -3299,7 +3809,7 @@ def execute(args: argparse.Namespace) -> int:
         verify_sandbox_confinement(
             work / "landrun-write-denial-probe",
             work / "landrun-read-denial-probe",
-            positive_read=source / "Challenge.lean",
+            positive_read=challenge_source,
             python=python,
             touch=touch,
             cwd=source,
@@ -3324,7 +3834,7 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            allowed_roots=[source, lean_prefix],
+            allowed_roots=[checkout, lean_prefix],
         )
         env["LEAN_SRC_PATH"] = lake_environment_value(
             "LEAN_SRC_PATH",
@@ -3337,12 +3847,13 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            allowed_roots=[source, lean_prefix],
+            allowed_roots=[checkout, lean_prefix],
         )
         env["LEAN_PATH"] = protected_lean_path(
             canonical_olean,
             trusted_lean_paths,
             env["LEAN_PATH"],
+            protected_root=canonical_root,
         )
         report["stage"] = "comparator"
         proc = sandboxed_run(

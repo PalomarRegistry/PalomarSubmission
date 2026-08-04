@@ -1,9 +1,12 @@
+import argparse
 import hashlib
 import html
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.render_challenge import (
     RUNTIME_SANITIZER,
@@ -13,6 +16,7 @@ from scripts.render_challenge import (
     extract_module_doc,
     merge_renderer_manifest,
     parsed_challenge_metadata,
+    prepare,
     sanitize_bundle,
     static_html_sanitize,
     toolchain_verso_commit,
@@ -21,6 +25,68 @@ from scripts.render_challenge import (
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_prepare_binds_a_nested_project_and_configured_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template"
+            project = template / "examples" / "headline"
+            sources = project / "Audit"
+            sources.mkdir(parents=True)
+            challenge = sources / "Task.lean"
+            challenge.write_text("theorem headline : True := by trivial\n", encoding="utf-8")
+            (sources / "Answer.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (project / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Audit.Task",
+                        "solution_module": "Audit.Answer",
+                        "theorem_names": ["headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (project / "lakefile.toml").write_text(
+                'name = "headline"\n[[lean_lib]]\nname = "Audit"\n', encoding="utf-8"
+            )
+            (template / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.31.0-rc2\n", encoding="utf-8"
+            )
+            output = root / "report.json"
+            args = argparse.Namespace(
+                repository="example/project",
+                commit="1" * 40,
+                challenge_sha256=hashlib.sha256(challenge.read_bytes()).hexdigest(),
+                project_path="examples/headline",
+                challenge_path="examples/headline/Audit/Task.lean",
+                solution_path="examples/headline/Audit/Answer.lean",
+                comparator_config_path="examples/headline/settings.json",
+                lakefile_path="examples/headline/lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+                work_dir=str(root / "work"),
+                output=str(output),
+            )
+
+            with mock.patch(
+                "scripts.render_challenge.clone_commit",
+                side_effect=lambda _url, _commit, destination: shutil.copytree(
+                    template, destination
+                ),
+            ):
+                self.assertEqual(prepare(args), 0)
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["status"], "pending")
+            self.assertEqual(report["source"]["project_path"], "examples/headline")
+            self.assertEqual(
+                report["source"]["challenge_path"], "examples/headline/Audit/Task.lean"
+            )
+            self.assertEqual(report["source"]["comparator_config_path"], "examples/headline/settings.json")
+
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),

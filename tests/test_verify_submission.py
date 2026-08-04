@@ -15,9 +15,9 @@ import yaml
 import scripts.verify_submission as verifier
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
-    LicenseValidationError,
-    LicenseDetectorError,
     PERMISSIVE_RESOURCE_PROPERTIES,
+    LicenseDetectorError,
+    LicenseValidationError,
     ResourceExhausted,
     VerificationError,
     _deadline_timeout,
@@ -26,9 +26,10 @@ from scripts.verify_submission import (
     build_indexed_roots,
     canonical_repository,
     compile_canonical_challenge,
-    direct_imports,
     detect_spdx_identifier,
+    direct_imports,
     enforced_comparator_config,
+    ensure_lake_manifest,
     execute,
     github_repository,
     indexed_versions,
@@ -38,14 +39,17 @@ from scripts.verify_submission import (
     load_formalization_metadata,
     materialize_packages,
     normalize_repository,
+    normalized_repository_path,
     package_allowlist,
     parse_issue_body,
+    project_tree_url,
     protected_lean_path,
     reject_committed_build_artifacts,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
     repository_license_file,
     require_protected_paths,
+    resolve_module_source,
     run,
     sandboxed_run,
     systemd_command,
@@ -454,10 +458,44 @@ I am a responsible author or maintainer
 ### Authorization evidence (optional)
 
 _No response_
+
+### Project path (optional)
+
+examples/comparator
+
+### Comparator configuration path (optional)
+
+examples/comparator/settings.json
+
+### Formalization metadata path (optional)
+
+formalization.yaml
 """
         parsed = parse_issue_body(body)
         self.assertEqual(parsed["repository_url"], "https://github.com/example/result")
         self.assertEqual(parsed["existing_id"], "")
+        self.assertEqual(parsed["project_path"], "examples/comparator")
+        self.assertEqual(
+            parsed["comparator_config_path"], "examples/comparator/settings.json"
+        )
+        self.assertEqual(parsed["formalization_metadata_path"], "formalization.yaml")
+
+    def test_repository_paths_and_nested_tree_urls_are_canonical(self):
+        self.assertEqual(
+            normalized_repository_path("examples/Sharp Smoothing", "project").as_posix(),
+            "examples/Sharp Smoothing",
+        )
+        self.assertEqual(
+            project_tree_url(
+                "https://github.com/example/project",
+                "1" * 40,
+                "examples/Sharp Smoothing",
+            ),
+            f"https://github.com/example/project/tree/{'1' * 40}/examples/Sharp%20Smoothing",
+        )
+        for unsafe in ("../project", "./project", "project//nested", "/project", "a\\b"):
+            with self.subTest(unsafe=unsafe), self.assertRaises(VerificationError):
+                normalized_repository_path(unsafe, "project")
 
     def test_duplicate_recognized_issue_section_is_rejected(self):
         body = """### Repository URL
@@ -548,6 +586,111 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             path.write_text(json.dumps(config))
             with self.assertRaisesRegex(VerificationError, "unknown keys"):
                 load_comparator_config(path)
+
+            config.pop("future_relaxation")
+            config.pop("enable_nanoda")
+            config["challenge_module"] = "Audit.PeriodicGeneral.Challenge"
+            config["solution_module"] = "Audit.PeriodicGeneral.Solution"
+            path.write_text(json.dumps(config))
+            loaded = load_comparator_config(path)
+            self.assertEqual(loaded["challenge_module"], config["challenge_module"])
+            enforced_comparator_config(path, enforced)
+            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+
+            config["solution_module"] = config["challenge_module"]
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(VerificationError, "must be distinct"):
+                load_comparator_config(path)
+
+    def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            source_root = project / "src"
+            challenge = source_root / "Audit" / "Challenge.lean"
+            challenge.parent.mkdir(parents=True)
+            challenge.write_text("theorem example : True := by trivial\n")
+            self.assertEqual(
+                resolve_module_source(
+                    "Audit.Challenge",
+                    project=project,
+                    lean_source_path=str(source_root),
+                ),
+                challenge.resolve(),
+            )
+
+            outside = root / "outside"
+            (outside / "Audit").mkdir(parents=True)
+            (outside / "Audit" / "Challenge.lean").write_text("theorem bad : True := by trivial\n")
+            with self.assertRaisesRegex(VerificationError, "outside the selected project"):
+                resolve_module_source(
+                    "Audit.Challenge", project=project, lean_source_path=str(outside)
+                )
+
+    def test_trusted_manifest_fallback_reuses_contained_path_dependency_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "lakefile.lean").write_text("import Lake\n")
+            (checkout / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packagesDir": ".lake/packages",
+                        "packages": [
+                            {
+                                "name": "mathlib",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/mathlib4",
+                                "rev": "1" * 40,
+                                "inherited": False,
+                                "configFile": "lakefile.lean",
+                                "manifestFile": "lake-manifest.json",
+                            }
+                        ],
+                    }
+                )
+            )
+            project = checkout / "scripts" / "comparator"
+            project.mkdir(parents=True)
+            (project / "lakefile.toml").write_text(
+                'name = "Comparator"\n[[require]]\nname = "main"\npath = "../.."\n'
+            )
+            self.assertTrue(ensure_lake_manifest(project, checkout))
+            manifest = json.loads((project / "lake-manifest.json").read_text())
+            self.assertEqual(manifest["packagesDir"], "../../.lake/packages")
+            self.assertEqual(manifest["packages"][0]["dir"], "../..")
+            self.assertFalse(manifest["packages"][0]["inherited"])
+            self.assertEqual(manifest["packages"][1]["name"], "mathlib")
+            self.assertTrue(manifest["packages"][1]["inherited"])
+            self.assertFalse(ensure_lake_manifest(project, checkout))
+
+    def test_manifest_fallback_rejects_unlocked_git_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "lakefile.toml").write_text(
+                'name = "Example"\n[[require]]\nname = "mathlib"\n'
+                'git = "https://github.com/leanprover-community/mathlib4"\nrev = "main"\n'
+            )
+            with self.assertRaisesRegex(VerificationError, "committed manifests"):
+                ensure_lake_manifest(project, project)
+
+    def test_manifest_fallback_rejects_symlinked_path_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            target = checkout / "target"
+            target.mkdir()
+            (target / "lakefile.toml").write_text('name = "Target"\n')
+            (target / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+            project = checkout / "project"
+            project.mkdir()
+            (project / "linked").symlink_to(target, target_is_directory=True)
+            (project / "lakefile.toml").write_text(
+                'name = "Example"\n[[require]]\nname = "target"\npath = "linked"\n'
+            )
+            with self.assertRaisesRegex(VerificationError, "symlinked component"):
+                ensure_lake_manifest(project, checkout)
 
     def test_formalization_metadata_mechanical_minimum(self):
         with tempfile.TemporaryDirectory() as directory:
