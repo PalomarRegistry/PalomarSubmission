@@ -22,6 +22,5 @@ all need to be listed individually in `comparator.json`: Comparator follows the
 relevant declaration closure mechanically. The rendered page may still show
 only the declarations named in `theorem_names` and `definition_names`. Palomar
 therefore labels that rendering as a partial “named compared declarations”
-view, links to the full pinned `Challenge.lean`, and exposes imported indexed
-source files to editorial definition review. The UI must not call the partial
+view and links to the full pinned `Challenge.lean`. The UI must not call the partial
 render the complete statement without this disclosure.

@@ -39,7 +39,6 @@ from verify_submission import (
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--landrun", type=Path, required=True)
     parser.add_argument("--comparator", type=Path, required=True)
     parser.add_argument("--lean4export", type=Path, required=True)
@@ -53,7 +52,6 @@ def main() -> int:
     )
 
     source = args.source.resolve(strict=True)
-    database = args.database.resolve(strict=True)
     landrun = args.landrun.resolve(strict=True)
     comparator = args.comparator.resolve(strict=True)
     lean4export = args.lean4export.resolve(strict=True)
@@ -208,8 +206,6 @@ def main() -> int:
         lean=lean,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
-        indexed_lean_path=None,
-        indexed_source_roots=[],
         environment=environment,
         landrun=landrun,
         readable_paths=readable_paths,
@@ -220,11 +216,9 @@ def main() -> int:
     require_protected_paths([canonical], candidate_writable)
     audit = audit_challenge_sources(
         source,
-        database=database,
         dependency_sources=dependency_sources,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
-        indexed={},
         writable_directories=candidate_writable,
     )
     if audit["untrusted_sources"]:

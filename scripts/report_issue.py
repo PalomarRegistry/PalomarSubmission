@@ -147,16 +147,6 @@ def report_for_comment(report: dict) -> dict:
     bounded.pop("comparator_log_tail", None)
     bounded["errors"] = bounded_diagnostics(bounded.get("errors", []))
     bounded["warnings"] = bounded_diagnostics(bounded.get("warnings", []))
-    challenge = bounded.get("challenge")
-    if isinstance(challenge, dict):
-        challenge = dict(challenge)
-        bounded["challenge"] = challenge
-        records = challenge.pop("review_source_files", None)
-        if isinstance(records, list):
-            challenge["review_source_file_count"] = len(records)
-            challenge["review_source_files"] = records[:MAX_EMBEDDED_ITEMS]
-            if len(records) > MAX_EMBEDDED_ITEMS:
-                challenge["review_source_files_omitted"] = len(records) - MAX_EMBEDDED_ITEMS
     for key in ("project_dependencies", "resource_usage"):
         records = bounded.get(key)
         if isinstance(records, list) and len(records) > MAX_EMBEDDED_ITEMS:

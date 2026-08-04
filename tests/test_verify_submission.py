@@ -23,7 +23,6 @@ from scripts.verify_submission import (
     _deadline_timeout,
     allowed_roots,
     audit_challenge_sources,
-    build_indexed_roots,
     canonical_repository,
     compile_canonical_challenge,
     detect_spdx_identifier,
@@ -32,7 +31,6 @@ from scripts.verify_submission import (
     ensure_lake_manifest,
     execute,
     github_repository,
-    indexed_versions,
     lake_environment_value,
     landrun_command,
     load_comparator_config,
@@ -193,7 +191,6 @@ class VerifySubmissionTests(unittest.TestCase):
             args = Namespace(
                 output=report_path,
                 work_dir=root / "work",
-                database=root / "database",
                 comparator=tools[0],
                 lean4export=tools[1],
                 landrun=tools[2],
@@ -1022,75 +1019,12 @@ review:
             ],
         )
 
-    def test_indexed_source_cannot_shadow_a_trusted_module(self):
-        with tempfile.TemporaryDirectory() as directory:
-            work = Path(directory)
-            source = work / "source"
-            package = source / ".lake" / "packages" / "indexed"
-            package.mkdir(parents=True)
-            (package / "Indexed.lean").write_text("import Init\ndef indexed := true\n")
-            (package / "Init.lean").write_text("axiom forged : False\n")
-            (package / "lake-manifest.json").write_text(
-                '{"version":"1.2.0","packages":[]}\n'
-            )
-            subprocess.run(["git", "init", "-q"], cwd=package, check=True)
-            subprocess.run(["git", "add", "."], cwd=package, check=True)
-            subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "user.name=Palomar test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "-qm",
-                    "indexed shadow fixture",
-                ],
-                cwd=package,
-                check=True,
-            )
-            revision = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=package,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            source.mkdir(exist_ok=True)
-            (source / "Challenge.lean").write_text("import Indexed\n")
-            lean_prefix = work / "toolchain"
-            trusted_init = lean_prefix / "lib" / "lean" / "Init.olean"
-            trusted_init.parent.mkdir(parents=True)
-            trusted_init.write_bytes(b"trusted core module")
-            package_record = {
-                "name": "indexed",
-                "repository": "example/indexed",
-                "url": "https://github.com/example/indexed",
-                "revision": revision,
-            }
-            with self.assertRaisesRegex(VerificationError, "shadows a Lean core"):
-                build_indexed_roots(
-                    work,
-                    source,
-                    packages=[package_record],
-                    indexed={"indexed": {}},
-                    allowlist={},
-                    base_env={},
-                    lean=Path("/tools/lean"),
-                    lean_prefix=lean_prefix,
-                    landrun=Path("/tools/landrun"),
-                    readable_paths=[source],
-                    executable_paths=[],
-                    tools={},
-                )
     def test_hostile_canonical_build_cannot_publish_sibling_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             source = work / "source"
             source.mkdir()
             (source / "Challenge.lean").write_text("theorem result : True := by trivial\n")
-            indexed_lean = work / "indexed-olean"
-            indexed_lean.mkdir()
             lean_prefix = work / "toolchain"
             (lean_prefix / "lib" / "lean").mkdir(parents=True)
 
@@ -1108,8 +1042,6 @@ review:
                     lean=Path("/tools/lean"),
                     lean_prefix=lean_prefix,
                     allowlist={},
-                    indexed_lean_path=indexed_lean,
-                    indexed_source_roots=[],
                     environment={},
                     landrun=Path("/tools/landrun"),
                     readable_paths=[source],
@@ -1119,7 +1051,7 @@ review:
             self.assertEqual(canonical.read_bytes(), b"canonical")
             self.assertEqual([path.name for path in canonical.parent.iterdir()], ["Challenge.olean"])
             self.assertEqual(dependencies, [])
-            self.assertLess(trusted_paths.index(indexed_lean.resolve()), len(trusted_paths))
+            self.assertEqual(trusted_paths, [(lean_prefix / "lib" / "lean").resolve()])
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1282,55 +1214,24 @@ review:
                     }
                 )
             )
-            database = Path(directory) / "database"
-            (database / "entries").mkdir(parents=True)
             audit = audit_challenge_sources(
                 source,
-                database=database,
                 dependency_sources=[injected],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={"mathlib": ("leanprover-community/mathlib4", "high")},
-                indexed={},
                 writable_directories=[writable],
             )
             self.assertEqual(audit["untrusted_sources"], [str(injected)])
 
-    def test_indexed_snapshot_resolution_is_versioned_and_stable(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory)
-            entries = database / "entries"
-            entries.mkdir()
-            repository = "example/indexed"
-            revision = "1" * 40
-            records = [
-                ("PALOMAR-2026-07-30-000003", 1, "2026-07-30"),
-                ("PALOMAR-2026-07-29-000002", 2, "2026-07-29"),
-                ("PALOMAR-2026-07-29-000002", 1, "2026-07-29"),
-            ]
-            for identifier, version, accepted_at in records:
-                (entries / f"{identifier}-v{version}.json").write_text(
-                    json.dumps(
-                        {
-                            "id": identifier,
-                            "version": version,
-                            "accepted_at": accepted_at,
-                            "source": {"repository": repository, "commit": revision},
-                        }
-                    )
-                )
-            resolved = indexed_versions(database)[(repository, revision)]
-            self.assertEqual(resolved["palomar_id"], "PALOMAR-2026-07-29-000002")
-            self.assertEqual(resolved["palomar_version"], 1)
-            self.assertEqual(resolved["revision"], revision)
-
-    def test_indexed_challenge_source_has_versioned_review_evidence(self):
+    def test_previously_accepted_palomar_source_is_untrusted(self):
+        """A package Palomar already indexed confers no Challenge import privilege."""
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
-            package = source / ".lake" / "packages" / "indexed"
+            package = source / ".lake" / "packages" / "accepted"
             package.mkdir(parents=True)
-            dependency = package / "Indexed" / "Definitions.lean"
+            dependency = package / "Accepted" / "Definitions.lean"
             dependency.parent.mkdir()
-            dependency.write_text("def Indexed.answer : Nat := 42\n")
+            dependency.write_text("def Accepted.answer : Nat := 42\n")
             subprocess.run(["git", "init", "-q"], cwd=package, check=True)
             subprocess.run(["git", "add", "."], cwd=package, check=True)
             subprocess.run(
@@ -1359,110 +1260,26 @@ review:
                     {
                         "packages": [
                             {
-                                "name": "indexed",
+                                "name": "accepted",
                                 "type": "git",
-                                "url": "https://github.com/example/indexed",
+                                "url": "https://github.com/example/accepted",
                                 "rev": revision,
                             }
                         ]
                     }
                 )
             )
-            record = {
-                "repository": "example/indexed",
-                "revision": revision,
-                "palomar_id": "PALOMAR-2026-07-29-000001",
-                "palomar_version": 2,
-            }
             audit = audit_challenge_sources(
                 source,
-                database=Path(directory) / "database",
                 dependency_sources=[dependency],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={},
-                indexed={"indexed": record},
                 writable_directories=[],
             )
-            self.assertEqual(audit["untrusted_sources"], [])
-            self.assertEqual(audit["trust_level"], "qualified")
-            self.assertEqual(
-                audit["dependencies"],
-                [
-                    {
-                        "repository": "example/indexed",
-                        "provenance": "palomar-indexed",
-                        "palomar_id": "PALOMAR-2026-07-29-000001",
-                        "palomar_version": 2,
-                        "revision": revision,
-                    }
-                ],
-            )
-            evidence = audit["review_source_files"][0]
-            self.assertEqual(evidence["path"], "Indexed/Definitions.lean")
-            self.assertEqual(evidence["sha256"], verifier.sha256(dependency))
-
-            substituted = dict(record, revision="2" * 40)
-            bad = audit_challenge_sources(
-                source,
-                database=Path(directory) / "database",
-                dependency_sources=[dependency],
-                lean_prefix=Path(directory) / "toolchain",
-                allowlist={},
-                indexed={"indexed": substituted},
-                writable_directories=[],
-            )
-            self.assertEqual(bad["untrusted_sources"], [str(dependency.resolve())])
-
-            unindexed_package = source / ".lake" / "packages" / "unindexed"
-            unindexed_package.mkdir()
-            recursive = unindexed_package / "Unindexed.lean"
-            recursive.write_text("def hiddenMeaning : Nat := 0\n")
-            subprocess.run(["git", "init", "-q"], cwd=unindexed_package, check=True)
-            subprocess.run(["git", "add", "."], cwd=unindexed_package, check=True)
-            subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "user.name=Palomar test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "-qm",
-                    "fixture",
-                ],
-                cwd=unindexed_package,
-                check=True,
-            )
-            unindexed_revision = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=unindexed_package,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            manifest = json.loads((source / "lake-manifest.json").read_text())
-            manifest["packages"].append(
-                {
-                    "name": "unindexed",
-                    "type": "git",
-                    "url": "https://github.com/example/unindexed",
-                    "rev": unindexed_revision,
-                }
-            )
-            (source / "lake-manifest.json").write_text(json.dumps(manifest))
-            recursive_audit = audit_challenge_sources(
-                source,
-                database=Path(directory) / "database",
-                dependency_sources=[dependency, recursive],
-                lean_prefix=Path(directory) / "toolchain",
-                allowlist={},
-                indexed={"indexed": record},
-                writable_directories=[],
-            )
-            self.assertEqual(
-                recursive_audit["untrusted_sources"],
-                [str(recursive.resolve())],
-            )
+            self.assertEqual(audit["untrusted_sources"], [str(dependency.resolve())])
+            self.assertEqual(audit["dependencies"], [])
+            self.assertEqual(audit["trust_level"], "high")
+            self.assertNotIn("review_source_files", audit)
 
     def test_solution_only_package_is_outside_challenge_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1484,11 +1301,9 @@ review:
             )
             audit = audit_challenge_sources(
                 source,
-                database=Path(directory) / "database",
                 dependency_sources=[],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={},
-                indexed={},
                 writable_directories=[],
             )
             self.assertEqual(audit["untrusted_sources"], [])

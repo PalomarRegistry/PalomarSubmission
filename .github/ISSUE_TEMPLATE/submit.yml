@@ -14,8 +14,8 @@ body:
         first.
 
         The proof project may depend on arbitrary pinned repositories. Only the
-        transitive imports of the configured Challenge source must come from Lean core,
-        Mathlib/Tau Ceti, or projects already indexed in Palomar.
+        transitive imports of the configured Challenge source must come from Lean core
+        or Mathlib/Tau Ceti.
 
         The Lean project and Comparator files may live in subdirectories. Leave
         the path fields blank for the conventional repository-root layout.
