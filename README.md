@@ -42,10 +42,11 @@ accepted, including one from a project Palomar has already indexed.
 schema compatibility but is not authoritative. The trusted runner writes a
 separate configuration with NanoDa enabled and passes that copy to Comparator.
 
-AI review does not run in CI. An operator runs
-[`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer), which consumes
-passing open issues using the prompts in
-[`PalomarPolicy`](https://github.com/kim-em/PalomarPolicy).
+AI review is not part of this repository's CI.
+[`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer) runs it
+automatically against passing open issues, using the prompts in
+[`PalomarPolicy`](https://github.com/kim-em/PalomarPolicy). No person starts a
+review or approves its result.
 
 ## Required source layout
 
