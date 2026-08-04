@@ -14,7 +14,17 @@ class ReportIssueTests(unittest.TestCase):
             "status": "error",
             "stage": "comparator",
             "issue": {"number": issue},
-            "source": {"repository": "example/project", "commit": "1" * 40},
+            "source": {
+                "repository": "example/project",
+                "commit": "1" * 40,
+                "project_path": "examples/headline",
+            },
+            "challenge": {
+                "path": "examples/headline/Audit/Task.lean",
+                "lines": 12,
+                "bytes": 345,
+            },
+            "comparator": {"path": "examples/headline/settings.json"},
             "license": {
                 "path": "LICENSE",
                 "sha256": "2" * 64,
@@ -37,6 +47,9 @@ class ReportIssueTests(unittest.TestCase):
         self.assertNotIn("\n## ✅ fake success\n", body)
         self.assertNotIn("\n[click](javascript:alert(1))\n", body)
         self.assertIn("Repository licence: `LICENSE` (declared `MIT`, detected `MIT`)", body)
+        self.assertIn("Project directory: `examples/headline`", body)
+        self.assertIn("Challenge source: `examples/headline/Audit/Task.lean`", body)
+        self.assertIn("Comparator configuration: `examples/headline/settings.json`", body)
 
         data["license"]["detected_identifier"] = None
         self.assertIn("detected `unknown`", report_issue.body_for(data))

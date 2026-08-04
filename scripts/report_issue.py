@@ -45,6 +45,7 @@ def body_for(report: dict) -> str:
     icon = {"pass": "✅", "fail": "❌", "error": "⚠️"}.get(status, "⚠️")
     source = report.get("source", {})
     challenge = report.get("challenge", {})
+    comparator = report.get("comparator", {})
     license_record = report.get("license", {})
     errors = bounded_diagnostics(report.get("errors", []))
     warnings = bounded_diagnostics(report.get("warnings", []))
@@ -55,6 +56,9 @@ def body_for(report: dict) -> str:
         f"- Source: `{source.get('repository', 'unknown')}@{source.get('commit', 'unknown')}`",
         f"- Stage: `{report.get('stage', 'unknown')}`",
         f"- Lean: `{report.get('lean_toolchain', 'unknown')}`",
+        f"- Project directory: `{source.get('project_path') or 'repository root'}`",
+        f"- Challenge source: `{challenge.get('path', 'unknown')}`",
+        f"- Comparator configuration: `{comparator.get('path', 'unknown')}`",
         f"- Challenge: {challenge.get('lines', '?')} lines / {challenge.get('bytes', '?')} bytes",
     ]
     if isinstance(license_record, dict) and license_record.get("path"):
@@ -100,7 +104,7 @@ def body_for(report: dict) -> str:
         # The compact fallback retains the authoritative binding/outcome while
         # directing operators to the workflow artifact for the complete JSON.
         workflow = report.get("workflow_url")
-        compact = lines[:7]
+        compact = lines[:10]
         if workflow:
             compact.extend([f"- [Complete report artifact]({workflow})"])
         if errors:
@@ -108,9 +112,15 @@ def body_for(report: dict) -> str:
         compact.extend(
             [
                 "",
-                "The detailed diagnostics exceed GitHub's comment limit and are available in the workflow artifact.",
+                (
+                    "The detailed diagnostics exceed GitHub's comment limit and are available "
+                    "in the workflow artifact."
+                ),
                 "",
-                "This checks the pinned Lean snapshot and trusted challenge surface. It is not an editorial acceptance.",
+                (
+                    "This checks the pinned Lean snapshot and trusted challenge surface. "
+                    "It is not an editorial acceptance."
+                ),
             ]
         )
         body = "\n".join(compact) + "\n"

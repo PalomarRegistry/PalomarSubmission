@@ -597,6 +597,11 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             enforced_comparator_config(path, enforced)
             self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
 
+            config["solution_module"] = config["challenge_module"]
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(VerificationError, "must be distinct"):
+                load_comparator_config(path)
+
     def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

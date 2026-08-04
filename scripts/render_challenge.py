@@ -1188,6 +1188,7 @@ def discover_mathlib_cache_hashes(
     lake: Path,
     landrun: Path,
     writable_directories: list[Path],
+    readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> tuple[set[str], Path]:
@@ -1210,6 +1211,7 @@ def discover_mathlib_cache_hashes(
         environment=cache_env,
         landrun=landrun,
         writable_directories=writable_directories,
+        readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
         timeout=1800,
@@ -1339,6 +1341,7 @@ def hydrate_mathlib_cache(
     curl: Path,
     env_tool: Path,
     writable_directories: list[Path],
+    readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> dict[str, int]:
@@ -1348,6 +1351,7 @@ def hydrate_mathlib_cache(
         lake=lake,
         landrun=landrun,
         writable_directories=writable_directories,
+        readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
     )
@@ -1367,6 +1371,7 @@ def hydrate_mathlib_cache(
         environment=cache_env,
         landrun=landrun,
         writable_directories=writable_directories,
+        readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
         timeout=1800,
@@ -1485,6 +1490,7 @@ def execute(args: argparse.Namespace) -> int:
         writable_directories = materialize_packages(
             workspace, checkout=workspace_checkout, base_env=env
         )
+        readable_paths = [workspace_checkout.resolve()]
         sandbox_home = workspace / ".lake" / "config" / "home"
         sandbox_tmp = workspace / ".lake" / "config" / "tmp"
         sandbox_home.mkdir()
@@ -1522,6 +1528,7 @@ def execute(args: argparse.Namespace) -> int:
             environment=env,
             landrun=landrun,
             writable_directories=writable_directories,
+            readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
         )
@@ -1534,6 +1541,7 @@ def execute(args: argparse.Namespace) -> int:
             curl=curl,
             env_tool=env_tool,
             writable_directories=writable_directories,
+            readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
         )
@@ -1548,6 +1556,7 @@ def execute(args: argparse.Namespace) -> int:
             landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
+            readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
             timeout=BUILD_TIMEOUT_SECONDS,
@@ -1576,6 +1585,7 @@ def execute(args: argparse.Namespace) -> int:
             landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
+            readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
             timeout=HTML_TIMEOUT_SECONDS,
@@ -1605,6 +1615,7 @@ def execute(args: argparse.Namespace) -> int:
             landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
+            readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
             timeout=SANITIZE_TIMEOUT_SECONDS,

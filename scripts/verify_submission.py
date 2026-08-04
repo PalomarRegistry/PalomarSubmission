@@ -1005,6 +1005,8 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         raise VerificationError(f"comparator.json has unknown keys: {', '.join(sorted(unknown))}")
     module_source_suffix(config["challenge_module"])
     module_source_suffix(config["solution_module"])
+    if config["challenge_module"] == config["solution_module"]:
+        raise VerificationError("Comparator Challenge and Solution modules must be distinct")
     theorem_names = config["theorem_names"]
     definition_names = config.get("definition_names", [])
     if not isinstance(theorem_names, list) or not theorem_names:
@@ -1197,6 +1199,12 @@ def prepare(args: argparse.Namespace) -> int:
         config_path = resolve_repository_path(
             source, config_relative, "Comparator configuration path", kind="file"
         )
+        try:
+            config_path.relative_to(project)
+        except ValueError as error:
+            raise VerificationError(
+                "Comparator configuration path must be inside the selected project"
+            ) from error
         config = load_comparator_config(config_path)
         lakefile_relative = repository_relative_path(source, lakefile)
         toolchain_relative = repository_relative_path(source, toolchain_path)
@@ -2176,14 +2184,30 @@ def remove_untrusted_lake_state(package_dir: Path) -> tuple[Path, Path]:
 def reject_committed_build_artifacts(package_dir: Path) -> None:
     """Reject prebuilt Lean/native output outside the fresh ``.lake`` tree."""
     root = package_dir.resolve()
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if not relative.parts or relative.parts[0] in {".git", ".lake"}:
-            continue
-        if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
-            raise VerificationError(
-                f"committed build artifact is not permitted outside fresh .lake state: {path}"
-            )
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        directories[:] = [name for name in directories if name not in {".git", ".lake"}]
+        for filename in filenames:
+            path = Path(current) / filename
+            if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
+                raise VerificationError(
+                    "committed build artifact is not permitted outside fresh .lake state: "
+                    f"{path}"
+                )
+
+
+def purge_untrusted_lake_state(checkout: Path) -> None:
+    """Remove every submitted ``.lake`` tree before the checkout becomes readable."""
+    root = checkout.resolve()
+    candidates = sorted(
+        (path for path in root.rglob(".lake") if ".git" not in path.relative_to(root).parts),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in candidates:
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
 
 
 def validate_writable_directories(source: Path, directories: list[Path]) -> list[Path]:
@@ -2802,6 +2826,8 @@ def materialize_packages(
         package_dir = contained_path_dependency(source, raw_value, boundary, name)
         path_directories[name] = package_dir
 
+    purge_untrusted_lake_state(boundary)
+    reject_committed_build_artifacts(boundary)
     packages_dir = manifest_packages_directory(source, boundary)
     packages_owner = packages_dir.parent.parent
     permitted_owners = {source.resolve(), *path_directories.values()}
@@ -2855,8 +2881,6 @@ def materialize_packages(
         )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
         writable.extend(remove_untrusted_lake_state(package_dir))
-    for owner in sorted(permitted_owners):
-        reject_committed_build_artifacts(owner)
     return validate_writable_directories(boundary, writable)
 
 
@@ -3810,7 +3834,7 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            allowed_roots=[source, lean_prefix],
+            allowed_roots=[checkout, lean_prefix],
         )
         env["LEAN_SRC_PATH"] = lake_environment_value(
             "LEAN_SRC_PATH",
@@ -3823,7 +3847,7 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            allowed_roots=[source, lean_prefix],
+            allowed_roots=[checkout, lean_prefix],
         )
         env["LEAN_PATH"] = protected_lean_path(
             canonical_olean,
