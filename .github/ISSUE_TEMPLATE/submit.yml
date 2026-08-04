@@ -10,7 +10,7 @@ body:
         Point Palomar at a **public GitHub repository** and an immutable
         40-character commit. CI reads the metadata and Comparator files from
         that snapshot. Please read the
-        [submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md)
+        [submission policy](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md)
         first.
 
         The proof project may depend on arbitrary pinned repositories. Only the
@@ -118,7 +118,7 @@ body:
     attributes:
       label: Acknowledgements
       options:
-        - label: I have read the [Palomar submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required project file at the paths given above.
+        - label: I have read the [Palomar submission policy](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required project file at the paths given above.
           required: true
         - label: I have checked that the root licence file covers this repository and that cited works, reused formalizations, and dependencies may have separate licences.
           required: true

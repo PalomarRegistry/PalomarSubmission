@@ -2,7 +2,7 @@
 
 Issue-based intake and mechanical verification for the Palomar registry.
 
-[**Submit a Lean-verified result →**](https://github.com/kim-em/PalomarSubmission/issues/new?template=submit.yml)
+[**Submit a Lean-verified result →**](https://github.com/PalomarRegistry/PalomarSubmission/issues/new?template=submit.yml)
 
 The form asks only for a public GitHub repository and an immutable commit. The
 repository itself carries the metadata and comparator configuration. CI then:
@@ -43,14 +43,14 @@ schema compatibility but is not authoritative. The trusted runner writes a
 separate configuration with NanoDa enabled and passes that copy to Comparator.
 
 AI review is not part of this repository's CI.
-[`PalomarReviewer`](https://github.com/kim-em/PalomarReviewer) runs it
+[`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
 automatically against passing open issues, using the prompts in
-[`PalomarPolicy`](https://github.com/kim-em/PalomarPolicy). No person starts a
+[`PalomarPolicy`](https://github.com/PalomarRegistry/PalomarPolicy). No person starts a
 review or approves its result.
 
 ## Required source layout
 
-See [`kim-em/PalomarPolicy`](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md).
+See [`PalomarRegistry/PalomarPolicy`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md).
 The root contract is:
 
 ```text
@@ -74,7 +74,7 @@ project identity, authorship, license, classification, source citation,
 automation-method, and review-status fields. Classification requires one or two
 official arXiv subject classes and at least one MSC2020 code. The exact
 mechanical minimum is documented in
-[`PalomarPolicy/CONTRIBUTING.md`](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md#1-required-repository-shape).
+[`PalomarPolicy/CONTRIBUTING.md`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md#1-required-repository-shape).
 
 The checked-in identifier lists under [`taxonomies/`](taxonomies/) are snapshots
 of the official [arXiv taxonomy](https://arxiv.org/category_taxonomy) and

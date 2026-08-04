@@ -3,7 +3,7 @@
 Date: 2026-07-31
 
 This record covers the launch hardening tracked by
-[`PalomarSubmission#5`](https://github.com/kim-em/PalomarSubmission/issues/5).
+[`PalomarSubmission#5`](https://github.com/PalomarRegistry/PalomarSubmission/issues/5).
 It records the implemented boundary, the checks used to exercise it, and the
 risks intentionally left for separate design work. The pull requests linked
 from the tracker are the authoritative diffs.
