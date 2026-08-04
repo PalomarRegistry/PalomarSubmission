@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one immutable, browser-confined Verso rendering of Challenge.lean."""
+"""Build one immutable, browser-confined Verso rendering of an accepted Challenge source."""
 
 from __future__ import annotations
 
@@ -28,12 +28,15 @@ from scripts.verify_submission import (  # noqa: E402
     VerificationError,
     clone_commit,
     direct_imports,
+    ensure_lake_manifest,
     github_repository,
     load_comparator_config,
     manifest_packages,
     materialize_packages,
+    normalized_repository_path,
     now,
     require_protected_paths,
+    resolve_repository_path,
     run,
     sandboxed_run,
     sha256,
@@ -442,27 +445,117 @@ def prepare(args: argparse.Namespace) -> int:
         clone_commit(repository_url, commit, source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
-        challenge = source / "Challenge.lean"
-        toolchain_file = source / "lean-toolchain"
-        manifest_file = source / "lake-manifest.json"
-        for path in (challenge, toolchain_file, manifest_file):
-            if path.is_symlink() or not path.is_file():
-                raise VerificationError(f"required regular source file is missing: {path.name}")
+        supplied_paths = {
+            "project_path": getattr(args, "project_path", "").strip(),
+            "challenge_path": getattr(args, "challenge_path", "").strip(),
+            "solution_path": getattr(args, "solution_path", "").strip(),
+            "comparator_config_path": getattr(args, "comparator_config_path", "").strip(),
+            "lakefile_path": getattr(args, "lakefile_path", "").strip(),
+            "lean_toolchain_path": getattr(args, "lean_toolchain_path", "").strip(),
+        }
+        path_aware = any(supplied_paths.values())
+        if path_aware and not all(
+            supplied_paths[name]
+            for name in (
+                "challenge_path",
+                "solution_path",
+                "comparator_config_path",
+                "lakefile_path",
+                "lean_toolchain_path",
+            )
+        ):
+            raise VerificationError("path-aware render requests must bind every accepted file path")
+        project_relative = (
+            normalized_repository_path(supplied_paths["project_path"], "project_path")
+            if supplied_paths["project_path"]
+            else None
+        )
+        project = (
+            resolve_repository_path(source, project_relative, "project_path", kind="directory")
+            if project_relative is not None
+            else source.resolve()
+        )
+        if path_aware:
+            challenge_relative = normalized_repository_path(
+                supplied_paths["challenge_path"], "challenge_path"
+            )
+            solution_relative = normalized_repository_path(
+                supplied_paths["solution_path"], "solution_path"
+            )
+            comparator_relative = normalized_repository_path(
+                supplied_paths["comparator_config_path"], "comparator_config_path"
+            )
+            lakefile_relative = normalized_repository_path(
+                supplied_paths["lakefile_path"], "lakefile_path"
+            )
+            toolchain_relative = normalized_repository_path(
+                supplied_paths["lean_toolchain_path"], "lean_toolchain_path"
+            )
+        else:
+            challenge_relative = normalized_repository_path("Challenge.lean", "challenge_path")
+            solution_relative = normalized_repository_path("Solution.lean", "solution_path")
+            comparator_relative = normalized_repository_path("comparator.json", "comparator_config_path")
+            lakefile_relative = normalized_repository_path("lakefile.toml", "lakefile_path")
+            toolchain_relative = normalized_repository_path("lean-toolchain", "lean_toolchain_path")
+        challenge = resolve_repository_path(source, challenge_relative, "challenge_path", kind="file")
+        solution = resolve_repository_path(source, solution_relative, "solution_path", kind="file")
+        comparator = resolve_repository_path(
+            source, comparator_relative, "comparator_config_path", kind="file"
+        )
+        lakefile = resolve_repository_path(source, lakefile_relative, "lakefile_path", kind="file")
+        toolchain_file = resolve_repository_path(
+            source, toolchain_relative, "lean_toolchain_path", kind="file"
+        )
+        if lakefile.parent != project or lakefile.name not in {"lakefile.toml", "lakefile.lean"}:
+            raise VerificationError("accepted Lakefile is not the selected project's Lakefile")
+        for path, field in (
+            (challenge, "Challenge source"),
+            (solution, "Solution source"),
+            (comparator, "Comparator configuration"),
+        ):
+            try:
+                path.relative_to(project)
+            except ValueError as error:
+                raise VerificationError(f"accepted {field} is outside the selected project") from error
+        if toolchain_file.name != "lean-toolchain" or toolchain_file.parent not in {
+            project,
+            source,
+        }:
+            raise VerificationError("accepted lean-toolchain is outside its supported locations")
+        manifest_file = project / "lake-manifest.json"
+        if manifest_file.is_symlink() or (
+            lakefile.name == "lakefile.lean" and not manifest_file.is_file()
+        ):
+            raise VerificationError("lakefile.lean projects require a committed lake-manifest.json")
+        load_comparator_config(comparator)
         actual_challenge_sha256 = sha256(challenge)
         if actual_challenge_sha256 != challenge_sha256:
-            raise VerificationError("Challenge.lean does not match the accepted mechanical report")
+            raise VerificationError("Challenge source does not match the accepted mechanical report")
         toolchain = toolchain_file.read_text(encoding="utf-8").strip()
         verso_commit = toolchain_verso_commit(toolchain)
+        source_record = {
+            "repository": repository,
+            "repository_url": repository_url,
+            "commit": commit,
+            "challenge_sha256": challenge_sha256,
+        }
+        if path_aware:
+            source_record.update(
+                {
+                    "project_path": supplied_paths["project_path"],
+                    "challenge_path": challenge_relative.as_posix(),
+                    "solution_path": solution_relative.as_posix(),
+                    "comparator_config_path": comparator_relative.as_posix(),
+                    "lakefile_path": lakefile_relative.as_posix(),
+                    "lean_toolchain_path": toolchain_relative.as_posix(),
+                }
+            )
         report.update(
             {
+                "schema_version": 2 if path_aware else 1,
                 "status": "pending",
                 "stage": "prepared",
-                "source": {
-                    "repository": repository,
-                    "repository_url": repository_url,
-                    "commit": commit,
-                    "challenge_sha256": challenge_sha256,
-                },
+                "source": source_record,
                 "lean_toolchain": toolchain,
                 "verso_commit": verso_commit,
             }
@@ -597,7 +690,7 @@ def trusted_lakefile(source_manifest: dict[str, Any], verso_commit: str) -> str:
             )
         elif package.get("type") == "path":
             directory = str(package.get("dir") or "")
-            if not directory or Path(directory).is_absolute() or ".." in Path(directory).parts:
+            if not directory or Path(directory).is_absolute() or "\\" in directory:
                 raise VerificationError(f"invalid direct path package: {name!r}")
             lines.extend([f"path = {toml_string(directory)}", ""])
         else:
@@ -606,15 +699,55 @@ def trusted_lakefile(source_manifest: dict[str, Any], verso_commit: str) -> str:
     return "\n".join(lines)
 
 
-def prepare_workspace(source: Path, workspace: Path, verso_commit: str, work: Path) -> None:
+def prepare_workspace(
+    source: Path,
+    workspace: Path,
+    verso_commit: str,
+    work: Path,
+    source_record: dict[str, Any],
+) -> Path:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
-    source_manifest = load_json_object(source / "lake-manifest.json")
+    project_value = str(source_record.get("project_path") or "")
+    project_relative = (
+        normalized_repository_path(project_value, "render project_path")
+        if project_value
+        else None
+    )
+    source_project = source.joinpath(*project_relative.parts) if project_relative else source
+    ensure_lake_manifest(source_project, source)
+    source_manifest = load_json_object(source_project / "lake-manifest.json")
+    challenge_relative = normalized_repository_path(
+        str(source_record.get("challenge_path") or "Challenge.lean"), "render challenge_path"
+    )
+    solution_relative = normalized_repository_path(
+        str(source_record.get("solution_path") or "Solution.lean"), "render solution_path"
+    )
+    comparator_relative = normalized_repository_path(
+        str(source_record.get("comparator_config_path") or "comparator.json"),
+        "render comparator_config_path",
+    )
+    toolchain_relative = normalized_repository_path(
+        str(source_record.get("lean_toolchain_path") or "lean-toolchain"),
+        "render lean_toolchain_path",
+    )
+    accepted_challenge = resolve_repository_path(
+        source, challenge_relative, "render challenge_path", kind="file"
+    ).read_bytes()
+    accepted_solution = resolve_repository_path(
+        source, solution_relative, "render solution_path", kind="file"
+    ).read_bytes()
+    accepted_comparator = resolve_repository_path(
+        source, comparator_relative, "render comparator_config_path", kind="file"
+    ).read_bytes()
+    source_toolchain_path = resolve_repository_path(
+        source, toolchain_relative, "render lean_toolchain_path", kind="file"
+    )
     verso_probe = work / "verso-manifest"
     clone_commit(f"https://github.com/{VERSO_REPOSITORY}", verso_commit, verso_probe)
     try:
         verso_toolchain = (verso_probe / "lean-toolchain").read_text(encoding="utf-8").strip()
-        source_toolchain = (source / "lean-toolchain").read_text(encoding="utf-8").strip()
+        source_toolchain = source_toolchain_path.read_text(encoding="utf-8").strip()
         if verso_toolchain != source_toolchain:
             raise VerificationError("pinned Verso commit does not match the submission Lean toolchain")
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
@@ -629,16 +762,23 @@ def prepare_workspace(source: Path, workspace: Path, verso_commit: str, work: Pa
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", ".lake"),
     )
-    lakefile_lean = workspace / "lakefile.lean"
-    if lakefile_lean.exists() or lakefile_lean.is_symlink():
-        if lakefile_lean.is_dir() and not lakefile_lean.is_symlink():
-            shutil.rmtree(lakefile_lean)
-        else:
-            lakefile_lean.unlink()
-    (workspace / "lakefile.toml").write_text(
+    (workspace / ".palomar-checkout-root").write_bytes(b"")
+    workspace_project = workspace.joinpath(*project_relative.parts) if project_relative else workspace
+    for lakefile_name in ("lakefile.lean", "lakefile.toml"):
+        submitted_lakefile = workspace_project / lakefile_name
+        if submitted_lakefile.exists() or submitted_lakefile.is_symlink():
+            if submitted_lakefile.is_dir() and not submitted_lakefile.is_symlink():
+                shutil.rmtree(submitted_lakefile)
+            else:
+                submitted_lakefile.unlink()
+    (workspace_project / "lakefile.toml").write_text(
         trusted_lakefile(source_manifest, verso_commit), encoding="utf-8"
     )
-    write_json(workspace / "lake-manifest.json", merged_manifest)
+    write_json(workspace_project / "lake-manifest.json", merged_manifest)
+    (workspace_project / "Challenge.lean").write_bytes(accepted_challenge)
+    (workspace_project / "Solution.lean").write_bytes(accepted_solution)
+    (workspace_project / "comparator.json").write_bytes(accepted_comparator)
+    return workspace_project.resolve()
 
 
 def tree_bytes(root: Path, *, stop_after: int | None = None) -> int:
@@ -1289,10 +1429,23 @@ def execute(args: argparse.Namespace) -> int:
         if not SHA_RE.fullmatch(args.renderer_commit) or not SHA_RE.fullmatch(args.landrun_commit):
             raise VerificationError("renderer and Landrun commits must be immutable SHAs")
         source = work / "source"
-        if sha256(source / "Challenge.lean") != report["source"]["challenge_sha256"]:
-            raise VerificationError("Challenge.lean changed after render intake")
-        workspace = work / "workspace"
-        prepare_workspace(source, workspace, str(report["verso_commit"]), work)
+        challenge_relative = normalized_repository_path(
+            str(report["source"].get("challenge_path") or "Challenge.lean"),
+            "render challenge_path",
+        )
+        accepted_challenge = resolve_repository_path(
+            source, challenge_relative, "render challenge_path", kind="file"
+        )
+        if sha256(accepted_challenge) != report["source"]["challenge_sha256"]:
+            raise VerificationError("accepted Challenge source changed after render intake")
+        workspace_checkout = work / "workspace"
+        workspace = prepare_workspace(
+            source,
+            workspace_checkout,
+            str(report["verso_commit"]),
+            work,
+            report["source"],
+        )
 
         landrun = Path(args.landrun).resolve(strict=True)
         renderer = Path(__file__).resolve(strict=True)
@@ -1329,7 +1482,9 @@ def execute(args: argparse.Namespace) -> int:
         env_tool = required_executable("env", env)
         env["PATH"] = f"{lean_prefix / 'bin'}:{env['PATH']}"
 
-        writable_directories = materialize_packages(workspace, base_env=env)
+        writable_directories = materialize_packages(
+            workspace, checkout=workspace_checkout, base_env=env
+        )
         sandbox_home = workspace / ".lake" / "config" / "home"
         sandbox_tmp = workspace / ".lake" / "config" / "tmp"
         sandbox_home.mkdir()
@@ -1510,6 +1665,12 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--repository", required=True)
     prepare_parser.add_argument("--commit", required=True)
     prepare_parser.add_argument("--challenge-sha256", required=True)
+    prepare_parser.add_argument("--project-path", default="")
+    prepare_parser.add_argument("--challenge-path", default="")
+    prepare_parser.add_argument("--solution-path", default="")
+    prepare_parser.add_argument("--comparator-config-path", default="")
+    prepare_parser.add_argument("--lakefile-path", default="")
+    prepare_parser.add_argument("--lean-toolchain-path", default="")
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
     prepare_parser.set_defaults(func=prepare)

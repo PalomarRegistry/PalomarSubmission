@@ -14,8 +14,11 @@ body:
         first.
 
         The proof project may depend on arbitrary pinned repositories. Only the
-        transitive imports of `Challenge.lean` must come from Lean core,
+        transitive imports of the configured Challenge source must come from Lean core,
         Mathlib/Tau Ceti, or projects already indexed in Palomar.
+
+        The Lean project and Comparator files may live in subdirectories. Leave
+        the path fields blank for the conventional repository-root layout.
 
         `formalization.yaml` must include one or two official arXiv subject
         classes and at least one MSC2020 code. Intake checks that the codes
@@ -33,7 +36,7 @@ body:
     id: repository_url
     attributes:
       label: Repository URL
-      description: Public GitHub repository containing the required files at its root.
+      description: Public GitHub repository containing the Lean project and required Palomar files.
       placeholder: https://github.com/owner/formalization
     validations:
       required: true
@@ -46,6 +49,33 @@ body:
       placeholder: "0000000000000000000000000000000000000000"
     validations:
       required: true
+
+  - type: input
+    id: project_path
+    attributes:
+      label: Project path (optional)
+      description: Repository-relative Lean project directory. Leave blank when the Lakefile is at the repository root.
+      placeholder: comparator
+    validations:
+      required: false
+
+  - type: input
+    id: comparator_config_path
+    attributes:
+      label: Comparator configuration path (optional)
+      description: Repository-relative JSON path. Blank means comparator.json inside the selected project.
+      placeholder: Audit/Headline/config.json
+    validations:
+      required: false
+
+  - type: input
+    id: formalization_metadata_path
+    attributes:
+      label: Formalization metadata path (optional)
+      description: Repository-relative formalization.yaml path. Blank means formalization.yaml inside the selected project.
+      placeholder: formalization.yaml
+    validations:
+      required: false
 
   - type: input
     id: existing_id
@@ -88,7 +118,7 @@ body:
     attributes:
       label: Acknowledgements
       options:
-        - label: I have read the [Palomar submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required root file.
+        - label: I have read the [Palomar submission policy](https://github.com/kim-em/PalomarPolicy/blob/main/CONTRIBUTING.md) and the pinned commit contains every required project file at the paths given above.
           required: true
         - label: I have checked that the root licence file covers this repository and that cited works, reused formalizations, and dependencies may have separate licences.
           required: true
