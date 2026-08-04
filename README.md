@@ -14,9 +14,7 @@ repository itself carries the metadata and comparator configuration. CI then:
    sandbox, using the three standard permitted axioms, and forces every exported
    proof through both Lean's kernel and the pinned independent NanoDa kernel;
 4. computes the transitive source closure of `Challenge.lean`;
-5. independently compiles exact tracked Palomar-indexed source closures, then
-   compiles the Challenge against those verifier-owned modules and frozen,
-   canonical Mathlib/Tau Ceti output, and
+5. compiles the Challenge against frozen, canonical Mathlib/Tau Ceti output and
    verifies every transitive source byte;
 6. posts a machine-readable report and marks a passing issue
    `status:awaiting-review`.
@@ -32,13 +30,13 @@ handled, so stale or duplicate requests do not start another verification.
 The proof project may use arbitrary pinned Git dependencies that build from
 source inside Palomar's fresh Lake build directories. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
-allowlisted or Palomar-indexed dependencies; its protected module is the statement Comparator
+allowlisted dependencies; its protected module is the statement Comparator
 exports. Common submitted prebuilt artifacts are rejected early, and no
 candidate build output can replace the protected statement or frozen trusted
 dependency modules. Only this statement surface is restricted; arbitrary pinned
-dependencies remain available to the proof in `Solution.lean`. Indexed imports
-are recorded as a qualified trust surface with their exact Palomar record
-version, repository, commit, and imported source-file hashes.
+dependencies remain available to the proof in `Solution.lean`. A Tau Ceti import
+is recorded as a qualified trust surface; no other statement dependency is
+accepted, including one from a project Palomar has already indexed.
 
 `enable_nanoda` in a submitted `comparator.json` is retained for upstream
 schema compatibility but is not authoritative. The trusted runner writes a

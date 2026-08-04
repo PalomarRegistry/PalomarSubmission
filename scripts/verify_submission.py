@@ -1533,103 +1533,6 @@ def recorded_project_dependencies(
     return records
 
 
-def indexed_versions(database: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    """Return one stable, versioned certificate for every accepted source snapshot.
-
-    Multiple Palomar records can legitimately cite the same repository commit.
-    Selecting the earliest accepted record is deterministic and remains stable as
-    later records are appended to the database.
-    """
-    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for path in (database / "entries").glob("*.json"):
-        entry = json.loads(path.read_text(encoding="utf-8"))
-        source = entry.get("source", {})
-        repository = source.get("repository")
-        commit = source.get("commit")
-        identifier = entry.get("id")
-        version = entry.get("version")
-        accepted_at = entry.get("accepted_at")
-        if (
-            isinstance(repository, str)
-            and isinstance(commit, str)
-            and SHA_RE.fullmatch(commit)
-            and isinstance(identifier, str)
-            and PALOMAR_ID_RE.fullmatch(identifier)
-            and isinstance(version, int)
-            and not isinstance(version, bool)
-            and version >= 1
-            and isinstance(accepted_at, str)
-        ):
-            candidates.setdefault((repository.lower(), commit), []).append(
-                {
-                    "repository": repository,
-                    "revision": commit,
-                    "palomar_id": identifier,
-                    "palomar_version": version,
-                    "accepted_at": accepted_at,
-                }
-            )
-    return {
-        key: min(
-            records,
-            key=lambda item: (
-                item["accepted_at"],
-                item["palomar_id"],
-                item["palomar_version"],
-            ),
-        )
-        for key, records in candidates.items()
-    }
-
-
-def indexed_packages(
-    source: Path,
-    database: Path,
-    packages: list[dict[str, str]],
-) -> dict[str, dict[str, Any]]:
-    """Bind materialized Git packages to exact versioned Palomar records."""
-    indexed = indexed_versions(database)
-    result: dict[str, dict[str, Any]] = {}
-    for package in packages:
-        repository = package["repository"]
-        revision = package["revision"]
-        record = indexed.get((repository.lower(), revision))
-        if record is None:
-            continue
-        if package["url"].startswith("path:"):
-            raise VerificationError(
-                f"Palomar-indexed package {package['name']!r} may not use a path dependency"
-            )
-        checkout = package_checkout(source, package)
-        git_env = os.environ.copy()
-        git_env.update(
-            {
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_TERMINAL_PROMPT": "0",
-            }
-        )
-        head = run(
-            [
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                "-C",
-                str(checkout),
-                "rev-parse",
-                "HEAD",
-            ],
-            env=git_env,
-        ).stdout.strip()
-        if head != revision:
-            raise VerificationError(
-                f"Palomar-indexed package {package['name']!r} checkout does not match its commit"
-            )
-        result[package["name"]] = record
-    return result
-
 
 def allowed_roots() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Load canonical allowlisted roots and a case-insensitive alias index."""
@@ -1979,183 +1882,6 @@ def build_allowlisted_roots(
             if nested.is_dir():
                 shutil.rmtree(nested)
 
-
-def build_indexed_roots(
-    work: Path,
-    source: Path,
-    *,
-    challenge_source: Path | None = None,
-    packages: list[dict[str, str]],
-    indexed: dict[str, dict[str, Any]],
-    allowlist: dict[str, tuple[str, str]],
-    base_env: dict[str, str],
-    lean: Path,
-    lean_prefix: Path,
-    landrun: Path,
-    readable_paths: list[Path],
-    executable_paths: list[Path],
-    tools: dict[Path, str],
-) -> tuple[Path | None, list[Path]]:
-    """Compile the imported indexed source closure into verifier-owned output.
-
-    Indexed Lake configuration is not a source-to-object authority: a qualified
-    project may select another source directory, run elaborator code, or write a
-    deceptive build artifact. Resolve imported modules to unique tracked source
-    files, follow their imports, and invoke trusted Lean directly. Only the
-    verifier-owned output returned here enters the canonical Challenge path.
-    """
-    by_name = {package["name"]: package for package in packages}
-    indexed_directories = {
-        name: package_checkout(source, by_name[name]) for name in sorted(indexed)
-    }
-    for name, directory in indexed_directories.items():
-        if not directory.is_dir() or not source_matches_checkout(
-            directory / "lake-manifest.json", directory
-        ):
-            raise VerificationError(
-                f"Palomar-indexed package {name!r} lacks its tracked pinned manifest"
-            )
-
-    output = work / "indexed-olean"
-    scratch = work / "indexed-compile-scratch"
-    for directory in (output, scratch):
-        if directory.exists() or directory.is_symlink():
-            raise VerificationError(f"indexed compilation path is not fresh: {directory}")
-        directory.mkdir()
-    home = scratch / "home"
-    temporary = scratch / "tmp"
-    home.mkdir()
-    temporary.mkdir()
-
-    allowlisted_paths: list[Path] = []
-    for name in sorted(allowlist):
-        path = package_lake_directories(source, name)[0] / "lib" / "lean"
-        if path.is_dir():
-            allowlisted_paths.append(path.resolve())
-    core_path = (lean_prefix / "lib" / "lean").resolve()
-    trusted_lean_paths = [
-        *([core_path] if core_path.is_dir() else []),
-        *allowlisted_paths,
-    ]
-    compile_env = base_env.copy()
-    compile_env.update(
-        {
-            "HOME": str(home.resolve()),
-            "TMPDIR": str(temporary.resolve()),
-            "LEAN_ABORT_ON_PANIC": "1",
-            "LEAN_PATH": os.pathsep.join(
-                str(path) for path in [*trusted_lean_paths, output.resolve()]
-            ),
-        }
-    )
-
-    def module_suffix(module: str) -> pathlib.PurePosixPath:
-        parts = module.split(".")
-        if (
-            not parts
-            or any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts)
-        ):
-            raise VerificationError(f"unsafe imported Lean module name: {module!r}")
-        return pathlib.PurePosixPath(*parts).with_suffix(".lean")
-
-    resolved_sources: dict[str, tuple[Path, Path] | None] = {}
-
-    def source_for(module: str) -> tuple[Path, Path] | None:
-        if module in resolved_sources:
-            return resolved_sources[module]
-        suffix = module_suffix(module)
-        matches: list[tuple[Path, Path]] = []
-        for package_dir in indexed_directories.values():
-            for candidate in package_dir.rglob(suffix.name):
-                relative = candidate.relative_to(package_dir)
-                if relative.parts and relative.parts[0] in {".git", ".lake"}:
-                    continue
-                if tuple(relative.parts[-len(suffix.parts) :]) != suffix.parts:
-                    continue
-                if (
-                    candidate.is_symlink()
-                    or not candidate.is_file()
-                    or not source_matches_checkout(candidate, package_dir)
-                ):
-                    raise VerificationError(
-                        f"indexed module {module!r} is not a tracked source file"
-                    )
-                root = candidate.resolve()
-                for _part in suffix.parts:
-                    root = root.parent
-                matches.append((candidate.resolve(), root))
-        if len(matches) > 1:
-            raise VerificationError(f"indexed module {module!r} resolves ambiguously")
-        if matches and any(
-            (root / suffix).with_suffix(".olean").is_file()
-            for root in trusted_lean_paths
-        ):
-            raise VerificationError(
-                f"indexed module {module!r} shadows a Lean core or allowlisted module"
-            )
-        resolved_sources[module] = matches[0] if matches else None
-        return resolved_sources[module]
-
-    compiled: dict[str, Path] = {}
-    visiting: set[str] = set()
-    source_roots: set[Path] = set()
-
-    def compile_module(module: str) -> None:
-        if module in compiled:
-            return
-        resolved = source_for(module)
-        if resolved is None:
-            return  # Lean core or an independently built allowlisted module.
-        if module in visiting:
-            raise VerificationError(f"indexed module import cycle reaches {module!r}")
-        visiting.add(module)
-        source_file, source_root = resolved
-        for imported in direct_imports(source_file.read_text(encoding="utf-8")):
-            compile_module(imported)
-        visiting.remove(module)
-        target = output.joinpath(*module.split(".")).with_suffix(".olean")
-        if target.exists() or target.is_symlink():
-            raise VerificationError(f"indexed compiler output was pre-created: {target}")
-        module_work = scratch / "modules" / hashlib.sha256(module.encode()).hexdigest()
-        if module_work.exists() or module_work.is_symlink():
-            raise VerificationError(f"indexed module work path was pre-created: {module_work}")
-        untrusted_target = module_work.joinpath(*module.split(".")).with_suffix(".olean")
-        untrusted_target.parent.mkdir(parents=True)
-        sandboxed_run(
-            [str(lean), "-o", str(untrusted_target), str(source_file)],
-            cwd=source_file.parent,
-            environment=compile_env,
-            landrun=landrun,
-            writable_directories=[home.resolve(), temporary.resolve(), module_work.resolve()],
-            readable_paths=[*readable_paths, output.resolve()],
-            executable_paths=[*executable_paths, *trusted_lean_paths],
-            tools=tools,
-            timeout=EXECUTION_BUDGET_SECONDS,
-        )
-        if untrusted_target.is_symlink() or not untrusted_target.is_file():
-            raise VerificationError(f"trusted indexed compilation produced no module: {module}")
-        actual = {
-            path.resolve()
-            for path in module_work.rglob("*")
-            if path.is_file() or path.is_symlink()
-        }
-        if actual != {untrusted_target.resolve()}:
-            raise VerificationError("indexed elaboration wrote unexpected protected output")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(untrusted_target, target)
-        if target.is_symlink() or not target.is_file():
-            raise VerificationError(f"protected indexed module is not regular: {module}")
-        compiled[module] = target.resolve()
-        source_roots.add(source_root)
-
-    challenge_source = challenge_source or (source / "Challenge.lean")
-    for imported in direct_imports(challenge_source.read_text(encoding="utf-8")):
-        compile_module(imported)
-    if not compiled:
-        shutil.rmtree(output)
-        return None, []
-    tools.update({path: sha256(path) for path in compiled.values()})
-    return output.resolve(), sorted(source_roots)
 
 
 def source_package(path: Path, source: Path) -> str | None:
@@ -3107,18 +2833,15 @@ def lean_source_dependencies(
 def audit_challenge_sources(
     source: Path,
     *,
-    database: Path,
     dependency_sources: list[Path],
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
-    indexed: dict[str, dict[str, Any]],
     writable_directories: list[Path],
 ) -> dict[str, Any]:
     packages = manifest_packages(source)
     by_name = {package["name"]: package for package in packages}
     untrusted: list[str] = []
-    dependencies: dict[tuple[str, str, str | None, int | None, str | None], None] = {}
-    review_source_files: list[dict[str, Any]] = []
+    dependencies: dict[tuple[str, str], None] = {}
     qualified_allowlisted = False
     toolchain_prefix = lean_prefix.resolve()
 
@@ -3147,60 +2870,22 @@ def audit_challenge_sources(
             continue
         if package_name in allowlist:
             repository, level = allowlist[package_name]
-            dependencies[(repository, "allowlisted", None, None, None)] = None
+            dependencies[(repository, "allowlisted")] = None
             qualified_allowlisted = qualified_allowlisted or level == "qualified"
             continue
-        record = indexed.get(package_name)
-        if record:
-            repository = str(record["repository"])
-            revision = str(record["revision"])
-            palomar_id = str(record["palomar_id"])
-            palomar_version = int(record["palomar_version"])
-            if (
-                package["repository"].lower() != repository.lower()
-                or package["revision"] != revision
-            ):
-                untrusted.append(str(resolved))
-                continue
-            dependencies[
-                (repository, "palomar-indexed", palomar_id, palomar_version, revision)
-            ] = None
-            relative = resolved.relative_to(package_dir.resolve()).as_posix()
-            review_source_files.append(
-                {
-                    "repository": repository,
-                    "revision": revision,
-                    "palomar_id": palomar_id,
-                    "palomar_version": palomar_version,
-                    "path": relative,
-                    "sha256": sha256(resolved),
-                }
-            )
-            continue
+        # A repository is not importable merely because Palomar has already
+        # accepted a record from it.
         untrusted.append(str(resolved))
 
     serialized_dependencies = [
-        {
-            "repository": repository,
-            "provenance": provenance,
-            **({"palomar_id": palomar_id} if palomar_id else {}),
-            **({"palomar_version": palomar_version} if palomar_version else {}),
-            **({"revision": revision} if revision else {}),
-        }
-        for repository, provenance, palomar_id, palomar_version, revision in sorted(dependencies)
+        {"repository": repository, "provenance": provenance}
+        for repository, provenance in sorted(dependencies)
     ]
-    qualified = qualified_allowlisted or any(
-        item["provenance"] == "palomar-indexed" for item in serialized_dependencies
-    )
     return {
         "source_count": len(dependency_sources),
         "dependencies": serialized_dependencies,
         "untrusted_sources": untrusted[:100],
-        "trust_level": "qualified" if qualified else "high",
-        "review_source_files": sorted(
-            review_source_files,
-            key=lambda item: (item["repository"].lower(), item["revision"], item["path"]),
-        ),
+        "trust_level": "qualified" if qualified_allowlisted else "high",
     }
 
 
@@ -3290,8 +2975,6 @@ def compile_canonical_challenge(
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
-    indexed_lean_path: Path | None,
-    indexed_source_roots: list[Path],
     environment: dict[str, str],
     landrun: Path,
     readable_paths: list[Path],
@@ -3330,12 +3013,8 @@ def compile_canonical_challenge(
         path = package_dir / ".lake" / "build" / "lib" / "lean"
         if path.is_dir():
             lean_paths.append(path.resolve())
-    if indexed_lean_path is not None:
-        lean_paths.append(indexed_lean_path.resolve())
     lean_paths = list(dict.fromkeys(lean_paths))
     canonical_readable_paths = list(readable_paths)
-    if indexed_lean_path is not None:
-        canonical_readable_paths.append(indexed_lean_path.resolve())
     challenge_root = challenge_source.resolve()
     for _segment in module_source_suffix(challenge_module).parts:
         challenge_root = challenge_root.parent
@@ -3343,7 +3022,6 @@ def compile_canonical_challenge(
         source.resolve(),
         challenge_root,
         *trusted_packages.values(),
-        *indexed_source_roots,
     ]
     lake_source = lean_prefix / "src" / "lean" / "lake"
     if lake_source.is_dir():
@@ -3712,29 +3390,6 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
 
-        database = Path(args.database).resolve()
-        indexed = {
-            name: record
-            for name, record in indexed_packages(source, database, packages).items()
-            if name not in allowlist
-        }
-        report["stage"] = "indexed-roots"
-        indexed_lean_path, indexed_source_roots = build_indexed_roots(
-            work,
-            source,
-            challenge_source=challenge_source,
-            packages=packages,
-            indexed=indexed,
-            allowlist=allowlist,
-            base_env=env,
-            lean=lean,
-            lean_prefix=lean_prefix,
-            landrun=landrun,
-            readable_paths=readable_paths,
-            executable_paths=executable_paths,
-            tools=tools,
-        )
-
         trusted_names = set(allowlist)
         trusted_directories = set(trusted_lake_directories(source, trusted_names))
         trusted_build_directories = {
@@ -3743,15 +3398,7 @@ def execute(args: argparse.Namespace) -> int:
         candidate_writable = [
             directory for directory in writable_directories if directory not in trusted_directories
         ]
-        if indexed_lean_path is not None:
-            require_protected_paths([indexed_lean_path], candidate_writable)
-        executable_paths = sorted(
-            {
-                *executable_paths,
-                *trusted_build_directories,
-                *([indexed_lean_path] if indexed_lean_path is not None else []),
-            }
-        )
+        executable_paths = sorted({*executable_paths, *trusted_build_directories})
         report["stage"] = "canonical-challenge"
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
@@ -3761,8 +3408,6 @@ def execute(args: argparse.Namespace) -> int:
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
-            indexed_lean_path=indexed_lean_path,
-            indexed_source_roots=indexed_source_roots,
             environment=env,
             landrun=landrun,
             readable_paths=readable_paths,
@@ -3775,11 +3420,9 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
             source,
-            database=database,
             dependency_sources=dependency_sources,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
-            indexed=indexed,
             writable_directories=candidate_writable,
         )
         report["project_dependencies"] = recorded_project_dependencies(
@@ -3792,14 +3435,13 @@ def execute(args: argparse.Namespace) -> int:
                 "trust_level": audit["trust_level"],
                 "untrusted_sources": audit["untrusted_sources"],
                 "canonical_olean_sha256": sha256(canonical_olean),
-                "review_source_files": audit["review_source_files"],
             }
         )
         if audit["untrusted_sources"]:
             report["status"] = "fail"
             report["stage"] = "challenge-provenance"
             report["errors"].append(
-                "configured Challenge transitively imports sources outside the allowlist or Palomar"
+                "configured Challenge transitively imports sources outside the allowlist"
             )
             report["checked_at"] = now()
             guarded_write()
@@ -3922,7 +3564,6 @@ def parser() -> argparse.ArgumentParser:
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
     execute_parser.add_argument("--output", required=True)
-    execute_parser.add_argument("--database", required=True)
     execute_parser.add_argument("--comparator", required=True)
     execute_parser.add_argument("--lean4export", required=True)
     execute_parser.add_argument("--landrun", required=True)

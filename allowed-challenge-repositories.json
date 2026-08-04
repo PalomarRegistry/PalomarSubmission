@@ -20,6 +20,5 @@
       "include_pinned_manifest_closure": true,
       "trust_level": "qualified"
     }
-  ],
-  "palomar_database": "kim-em/PalomarDatabase"
+  ]
 }

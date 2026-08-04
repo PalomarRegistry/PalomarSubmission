@@ -28,11 +28,6 @@ jobs:
         with:
           path: pipeline
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: kim-em/PalomarDatabase
-          path: database
-          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11.10"
@@ -83,7 +78,6 @@ jobs:
         run: |
           python pipeline/scripts/smoke_trusted_challenge.py \
             --source fixture \
-            --database database \
             --landrun "$(go env GOPATH)/bin/landrun" \
             --comparator "$PWD/comparator/.lake/build/bin/comparator" \
             --lean4export "$PWD/lean4export/.lake/build/bin/lean4export" \

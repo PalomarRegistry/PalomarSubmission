@@ -23,12 +23,10 @@ artifact as hostile. Its security-relevant sequence is:
 4. Fetch and replay Mathlib's trusted cache from the official Mathlib
    workspace, then freeze the high-trust closure. Build qualified roots without
    granting them write access to that closure, then freeze their output.
-5. Resolve the reached modules in exact Palomar-indexed snapshots to unique
-   tracked source files, compile that closure directly with trusted Lean into
-   verifier-owned output, then compile `Challenge.lean` directly with trusted Lean
-   against frozen allowlisted and indexed output. Snapshot its
-   `Challenge.olean` and audit Lean's source dependency list and source bytes
-   before candidate Lake configuration executes.
+5. Compile `Challenge.lean` directly with trusted Lean against frozen
+   allowlisted output. Snapshot its `Challenge.olean` and audit Lean's source
+   dependency list and source bytes before candidate Lake configuration
+   executes.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
    outer Landrun/systemd boundary with a verifier-owned configuration that
    forces NanoDa on regardless of the submitted flag. Resolve the protected
@@ -135,10 +133,9 @@ publication remains append-only for existing versioned record paths.
 - Canonical allowlisted repository governance and the exact legacy Tau Ceti pin
   are part of the trusted computing base. Adding a root, alias, official ref, or
   legacy commit requires review and a cold compatibility run.
-- Palomar-indexed dependencies are executable Challenge inputs only at an exact
-  recorded ID/version, repository, and commit. Their source is reconstructed
-  independently, recursive unindexed imports remain forbidden, and their
-  imported definitions are included in editorial review.
+- A project Palomar has already accepted is not thereby an allowed Challenge
+  input. The allowlisted roots are the only statement dependencies, and a
+  recursively reached source outside them remains forbidden.
 - GitHub-hosted runners, Linux/Landlock/systemd, Git, Lean and its kernel,
   Comparator, NanoDa, Landrun, `lean4export`, and the Palomar implementation remain in
   the trusted computing base. This hardening is defense in depth around those

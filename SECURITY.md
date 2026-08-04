@@ -55,15 +55,11 @@ environment.
   pinned dependency closure. Every package name, canonical repository, and
   revision in that closure must match the submission's flattened manifest.
   Reusing a trusted package name while substituting a fork or commit is rejected.
-- The transitive source closure of `Challenge.lean` may contain only Lean core,
-  the verified pinned closure of an allowlisted root, or exact source snapshots
-  bound to a versioned Palomar record. Candidate-local helper imports remain
-  rejected. An indexed package is independently checked out at its recorded
-  repository commit and must carry its tracked nested manifest. Palomar resolves
-  each reached module to a unique tracked source file and invokes trusted Lean
-  directly, with no indexed Lake configuration or network; only verifier-owned
-  output is exposed to the canonical Challenge build. The closure comes
-  from Lean's own `--src-deps` result, and
+- The transitive source closure of `Challenge.lean` may contain only Lean core
+  or the verified pinned closure of an allowlisted root. Candidate-local helper
+  imports remain rejected, and so does every source from a project Palomar has
+  already accepted: an earlier record confers no import privilege. The closure
+  comes from Lean's own `--src-deps` result, and
   every dependency source attributed to a Git package must be a byte-for-byte
   match for a file tracked at that package's pinned commit. Sources below a
   sandbox-writable directory are never trusted.
@@ -82,9 +78,7 @@ fresh build directory.
 Statement integrity instead comes from a separate build path. Mathlib's
 trusted cache is run with official Mathlib as the workspace root and
 with symlinks to the exact independently verified official closure. Other
-allowlisted roots are built from their own pinned configuration. Indexed source
-closures are instead compiled directly by trusted Lean into verifier-owned
-output, so an indexed Lake plan cannot select a decoy source or object. Candidate
+allowlisted roots are built from their own pinned configuration. Candidate
 Lake configuration never runs during these operations. Trusted-root Lake URL
 resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
@@ -92,10 +86,8 @@ repository. The official
 Mathlib plan also replays the downloaded cache and receives write access to the
 one exact ProofWidgets replay-marker file it generates; qualified roots receive
 no write access to Mathlib source or build output. Trusted build directories are
-then frozen read/execute-only. Indexed output is qualified rather than
-Mathlib-level trust, and every indexed file actually reached by the Challenge
-is hashed and supplied to editorial definition review. The verifier compiles `Challenge.lean`
-directly with trusted Lean against only the frozen allowlisted and indexed dependencies, outside the
+then frozen read/execute-only. The verifier compiles `Challenge.lean`
+directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
 copies only that one module into a fresh protected directory. Comparator's
 `LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
