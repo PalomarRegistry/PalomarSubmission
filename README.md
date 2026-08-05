@@ -1,6 +1,6 @@
 # Palomar Submission
 
-Issue-based intake and mechanical verification for the Palomar registry.
+Mechanical verification for the Palomar registry.
 
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
@@ -16,12 +16,8 @@ repository itself carries the metadata and comparator configuration. CI then:
 4. computes the transitive source closure of `Challenge.lean`;
 5. compiles the Challenge against frozen, canonical Mathlib/Tau Ceti output and
    verifies every transitive source byte;
-6. posts a machine-readable report and marks a passing issue
-   `status:awaiting-review`.
+6. publishes a machine-readable report as a run artifact
 
-If verification ends with `status:verification-error` or
-`status:changes-requested`, the issue author may update the commit SHA in the
-original issue and comment exactly `/reverify`. Palomar ignores this command
 from other users, on pull requests or closed issues, and while the submission
 is in any other state.
 Eligibility is rechecked against the issue's current state when the command is
