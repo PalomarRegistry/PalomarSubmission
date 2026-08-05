@@ -54,17 +54,19 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
-SECTION_KEYS = {
-    "Repository URL": "repository_url",
-    "Commit SHA": "commit_sha",
-    "Existing Palomar ID (updates only)": "existing_id",
-    "Relationship to the substantive formalization": "authorization_relationship",
-    "Authorization evidence (optional)": "authorization_evidence",
-    "Additional context (optional)": "context",
-    "Project path (optional)": "project_path",
-    "Comparator configuration path (optional)": "comparator_config_path",
-    "Formalization metadata path (optional)": "formalization_metadata_path",
-}
+OPTIONAL_FIELDS = frozenset(
+    {
+        "existing_id",
+        "authorization_relationship",
+        "authorization_evidence",
+        "context",
+        "project_path",
+        "comparator_config_path",
+        "formalization_metadata_path",
+    }
+)
+SUBMISSION_ID_RE = re.compile(r"^[0-9a-z]{12}$")
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
@@ -317,20 +319,51 @@ def run(
     return completed
 
 
-def parse_issue_body(body: str) -> dict[str, str]:
-    sections: dict[str, str] = {}
-    matches = list(re.finditer(r"^###\s+(.+?)\s*$", body, re.MULTILINE))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        value = body[match.end() : end].strip()
-        if value == "_No response_":
-            value = ""
-        key = SECTION_KEYS.get(match.group(1).strip())
-        if key:
-            if key in sections:
-                raise VerificationError(f"duplicate recognized issue section: {match.group(1).strip()}")
-            sections[key] = value
-    return sections
+def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
+    """Read the submission out of the dispatch that started this run.
+
+    Submissions arrive through the submission server, which keeps the
+    submitter's identity private, so a submission is identified by an opaque
+    id and nothing else. Inputs are validated as strictly as a form would be:
+    an intake that trusts whoever can dispatch is the wrong place to relax.
+    """
+    inputs = event.get("inputs")
+    if not isinstance(inputs, dict):
+        raise VerificationError("workflow dispatch carried no submission inputs")
+
+    submission_id = str(inputs.get("request_id", "")).strip()
+    if not SUBMISSION_ID_RE.fullmatch(submission_id):
+        raise VerificationError("Submission id must be twelve lowercase alphanumeric characters")
+
+    repository = str(inputs.get("repository", "")).strip()
+    if not REPOSITORY_RE.fullmatch(repository):
+        raise VerificationError("Repository must be given as owner/name")
+
+    values = {
+        "repository_url": f"https://github.com/{repository}",
+        "commit_sha": str(inputs.get("commit", "")).strip(),
+    }
+    # The optional fields arrive as one JSON object: workflow_dispatch allows
+    # only ten inputs, and there are more optional fields than that leaves room
+    # for. A field missing from the allowlist would be dropped rather than
+    # refused, so unknown keys are an error.
+    raw_options = str(inputs.get("options", "")).strip()
+    if raw_options:
+        try:
+            options = json.loads(raw_options)
+        except json.JSONDecodeError as error:
+            raise VerificationError(f"Submission options are not valid JSON: {error}") from error
+        if not isinstance(options, dict):
+            raise VerificationError("Submission options must be a JSON object")
+        unknown = sorted(set(options) - OPTIONAL_FIELDS)
+        if unknown:
+            raise VerificationError(f"Unrecognized submission options: {', '.join(unknown)}")
+        for key, value in options.items():
+            if not isinstance(value, str):
+                raise VerificationError(f"Submission option {key} must be a string")
+            values[key] = value
+
+    return values, submission_id
 
 
 def normalize_repository(url: str) -> tuple[str, str]:
@@ -1034,7 +1067,7 @@ def prepare(args: argparse.Namespace) -> int:
     work = Path(args.work_dir).resolve()
     previous_deadline = _EXECUTION_DEADLINE
     report: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 1,
         "status": "error",
         "stage": "intake",
         "checked_at": now(),
@@ -1044,8 +1077,7 @@ def prepare(args: argparse.Namespace) -> int:
     try:
         install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
-        issue = event["issue"]
-        values = parse_issue_body(issue.get("body") or "")
+        values, submission_id = submission_request(event)
         repository, url = normalize_repository(values.get("repository_url", ""))
         commit = values.get("commit_sha", "").strip().lower()
         if not SHA_RE.fullmatch(commit):
@@ -1063,9 +1095,8 @@ def prepare(args: argparse.Namespace) -> int:
                     "Relationship to the substantive formalization is not recognized"
                 )
         else:
-            authorization_relationship = "legacy-unspecified"
-            report["warnings"].append(
-                "Legacy submission issue has no authorization relationship declaration"
+            raise VerificationError(
+                "Relationship to the substantive formalization must be declared"
             )
         authorization: dict[str, str] = {
             "relationship": authorization_relationship,
@@ -1086,10 +1117,8 @@ def prepare(args: argparse.Namespace) -> int:
 
         report.update(
             {
-                "issue": {
-                    "number": int(issue["number"]),
-                    "url": issue["html_url"],
-                    "submitter": issue["user"]["login"],
+                "submission": {
+                    "submission_id": submission_id,
                     "authorization": authorization,
                     "requested_paths": {
                         "project_path": raw_project_path,

@@ -39,7 +39,7 @@ from scripts.verify_submission import (
     normalize_repository,
     normalized_repository_path,
     package_allowlist,
-    parse_issue_body,
+
     project_tree_url,
     protected_lean_path,
     reject_committed_build_artifacts,
@@ -310,85 +310,9 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertLess(len(proc.stdout.encode()), 1200)
         self.assertLess(len(proc.stderr.encode()), 1200)
 
-    def test_issue_form_scalar_values(self) -> None:
-        form = (REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "submit.yml").read_text()
-        self.assertIn(
-            'placeholder: "0000000000000000000000000000000000000000"',
-            form,
-        )
-        self.assertIn('placeholder: PALOMAR-2026-07-29-000123', form)
 
-    def test_submission_workflow_run_name_includes_issue_number(self) -> None:
-        workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml").read_text()
-        self.assertIn(
-            'run-name: "Verify submission #${{ github.event.issue.number }}"',
-            workflow,
-        )
 
-    def test_submission_workflow_accepts_only_guarded_author_reverification(self) -> None:
-        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
-        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(workflow["on"]["issues"]["types"], ["labeled"])
-        self.assertEqual(workflow["on"]["issue_comment"]["types"], ["created"])
 
-        condition = " ".join(workflow["jobs"]["mark"]["if"].split())
-        expected = (
-            "(github.event_name == 'issues' && github.event.label.name == 'submission') || "
-            "(github.event_name == 'issue_comment' && "
-            "github.event.issue.pull_request == null && github.event.issue.state == 'open' && "
-            "github.event.comment.body == '/reverify' && "
-            "github.event.comment.user.login == github.event.issue.user.login && "
-            "contains(github.event.issue.labels.*.name, 'submission') && "
-            "(contains(github.event.issue.labels.*.name, 'status:verification-error') || "
-            "contains(github.event.issue.labels.*.name, 'status:changes-requested')))"
-        )
-        self.assertEqual(condition, expected)
-
-    def test_submission_workflow_runs_downstream_only_after_mark_gate(self) -> None:
-        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
-        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertNotIn("concurrency", workflow)
-        mark = workflow["jobs"]["mark"]
-        condition = "".join(mark["if"].split())
-        group = "".join(mark["concurrency"]["group"].split())
-        self.assertEqual(
-            group,
-            "${{(" + condition + ")&&"
-            "format('palomar-submission-claim-{0}',github.event.issue.number)||"
-            "format('palomar-submission-ignore-{0}',github.run_id)}}",
-        )
-        self.assertEqual(mark["concurrency"]["cancel-in-progress"], "false")
-        self.assertEqual(mark["outputs"]["claimed"], "${{ steps.claim.outputs.claimed }}")
-        claim_step = next(step for step in mark["steps"] if step.get("id") == "claim")
-        self.assertIn("scripts/claim_submission.py", claim_step["run"])
-        self.assertIn("$GITHUB_EVENT_PATH", claim_step["run"])
-        self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
-        self.assertEqual(
-            workflow["jobs"]["verify"]["if"],
-            "needs.mark.outputs.claimed == 'true'",
-        )
-        self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
-        report = workflow["jobs"]["report"]
-        self.assertEqual(
-            " ".join(report["if"].split()),
-            "always() && needs.mark.result != 'skipped' && "
-            "(needs.mark.result == 'failure' || needs.mark.outputs.claimed == 'true')",
-        )
-        self.assertEqual(
-            report["concurrency"]["group"],
-            "palomar-submission-claim-${{ github.event.issue.number }}",
-        )
-        self.assertEqual(report["concurrency"]["cancel-in-progress"], "false")
-        report_step = next(
-            step for step in report["steps"] if step["name"] == "Report result and transition issue"
-        )
-        download_step = next(
-            step for step in report["steps"] if step["name"] == "Download mechanical report"
-        )
-        self.assertEqual(download_step["if"], "needs.mark.outputs.claimed == 'true'")
-        self.assertEqual(report_step["env"]["MARK_RESULT"], "${{ needs.mark.result }}")
-        self.assertIn("scripts/claim_submission.py", report_step["run"])
-        self.assertIn("scripts/report_issue.py", report_step["run"])
 
     def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
         expected = re.compile(
@@ -435,47 +359,6 @@ class VerifySubmissionTests(unittest.TestCase):
             ["compatibility.yml", "render-challenge.yml", "submission.yml"],
         )
 
-    def test_issue_form_sections(self):
-        body = """### Repository URL
-
-https://github.com/example/result
-
-### Commit SHA
-
-0123456789012345678901234567890123456789
-
-### Existing Palomar ID (updates only)
-
-_No response_
-
-### Relationship to the substantive formalization
-
-I am a responsible author or maintainer
-
-### Authorization evidence (optional)
-
-_No response_
-
-### Project path (optional)
-
-examples/comparator
-
-### Comparator configuration path (optional)
-
-examples/comparator/settings.json
-
-### Formalization metadata path (optional)
-
-formalization.yaml
-"""
-        parsed = parse_issue_body(body)
-        self.assertEqual(parsed["repository_url"], "https://github.com/example/result")
-        self.assertEqual(parsed["existing_id"], "")
-        self.assertEqual(parsed["project_path"], "examples/comparator")
-        self.assertEqual(
-            parsed["comparator_config_path"], "examples/comparator/settings.json"
-        )
-        self.assertEqual(parsed["formalization_metadata_path"], "formalization.yaml")
 
     def test_repository_paths_and_nested_tree_urls_are_canonical(self):
         self.assertEqual(
@@ -494,25 +377,6 @@ formalization.yaml
             with self.subTest(unsafe=unsafe), self.assertRaises(VerificationError):
                 normalized_repository_path(unsafe, "project")
 
-    def test_duplicate_recognized_issue_section_is_rejected(self):
-        body = """### Repository URL
-
-https://github.com/example/result
-
-### Commit SHA
-
-0123456789012345678901234567890123456789
-
-### Additional context (optional)
-
-Context before a misleading duplicate.
-
-### Commit SHA
-
-1111111111111111111111111111111111111111
-"""
-        with self.assertRaisesRegex(VerificationError, "duplicate recognized issue section"):
-            parse_issue_body(body)
 
     def test_repository_normalization(self):
         self.assertEqual(
@@ -1529,3 +1393,75 @@ review:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubmissionRequestTests(unittest.TestCase):
+    """Submissions arrive as a dispatch, and carry no submitter."""
+
+    def dispatch(self, **inputs):
+        base = {"repository": "owner/repo", "commit": "b" * 40, "request_id": "abc123def456"}
+        return {"inputs": {**base, **inputs}}
+
+    def test_a_dispatch_supplies_the_submission(self):
+        values, submission_id = verifier.submission_request(
+            self.dispatch(options=json.dumps({"project_path": "sub", "context": "notes"}))
+        )
+        self.assertEqual(values["repository_url"], "https://github.com/owner/repo")
+        self.assertEqual(values["commit_sha"], "b" * 40)
+        self.assertEqual(values["project_path"], "sub")
+        self.assertEqual(values["context"], "notes")
+        self.assertEqual(submission_id, "abc123def456")
+
+    def test_every_optional_field_can_be_supplied(self):
+        """A field missing from the allowlist is dropped, not refused.
+
+        That is the worse failure: the submitter believes they told us
+        something and nobody ever sees it.
+        """
+        supplied = {name: "x" for name in verifier.OPTIONAL_FIELDS}
+        values, _ = verifier.submission_request(
+            self.dispatch(options=json.dumps(supplied))
+        )
+        for name in verifier.OPTIONAL_FIELDS:
+            self.assertIn(name, values, f"{name} cannot be submitted")
+
+    def test_dispatch_inputs_are_validated_strictly(self):
+        for label, event in [
+            ("uppercase id", self.dispatch(request_id="SHOUTING1234")),
+            ("short id", self.dispatch(request_id="short")),
+            ("malformed repository", self.dispatch(repository="not-a-repo")),
+            ("options that are not JSON", self.dispatch(options="{")),
+            ("options that are not an object", self.dispatch(options="[]")),
+            ("an unrecognized option", self.dispatch(options='{"evil": "x"}')),
+            ("a non-string option", self.dispatch(options='{"project_path": 1}')),
+            ("no inputs at all", {}),
+        ]:
+            with self.subTest(label):
+                with self.assertRaises(VerificationError):
+                    verifier.submission_request(event)
+
+
+class DispatchWorkflowTests(unittest.TestCase):
+    def workflow(self):
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+
+    def test_verification_is_reachable_only_by_dispatch(self):
+        self.assertEqual(list(self.workflow()["on"]), ["workflow_dispatch"])
+        self.assertEqual(list(self.workflow()["jobs"]), ["verify"])
+
+    def test_dispatched_runs_are_serialised(self):
+        """Anyone who can prove push access can cause a six-hour run."""
+        concurrency = self.workflow()["jobs"]["verify"]["concurrency"]
+        self.assertEqual(concurrency["group"], "palomar-verify")
+        self.assertEqual(concurrency["cancel-in-progress"], "false")
+
+    def test_the_run_and_artifact_carry_the_submission_id(self):
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        text = path.read_text()
+        self.assertIn("inputs.request_id", text.split("on:")[0])
+        upload = next(
+            step for step in self.workflow()["jobs"]["verify"]["steps"]
+            if "upload-artifact" in str(step.get("uses", ""))
+        )
+        self.assertIn("inputs.request_id", str(upload["with"]["name"]))

@@ -1,99 +1,41 @@
 name: Verify submission
-run-name: "Verify submission #${{ github.event.issue.number }}"
+run-name: "Verify submission ${{ inputs.request_id }}"
 
+# Submissions arrive through the submission server, which dispatches this
+# workflow. The run name carries the submission id because dispatching does
+# not return a run id, and the server has to find the run it started.
 on:
-  issues:
-    types: [labeled]
-  issue_comment:
-    types: [created]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Public GitHub repository in owner/name form
+        required: true
+        type: string
+      commit:
+        description: Full 40-character commit to verify
+        required: true
+        type: string
+      request_id:
+        description: Opaque submission id from the submission server
+        required: true
+        type: string
+      options:
+        description: JSON object of optional submission fields
+        required: false
+        type: string
 
 jobs:
-  mark:
-    if: >-
-      (github.event_name == 'issues' &&
-        github.event.label.name == 'submission') ||
-      (github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request == null &&
-        github.event.issue.state == 'open' &&
-        github.event.comment.body == '/reverify' &&
-        github.event.comment.user.login == github.event.issue.user.login &&
-        contains(github.event.issue.labels.*.name, 'submission') &&
-        (contains(github.event.issue.labels.*.name, 'status:verification-error') ||
-          contains(github.event.issue.labels.*.name, 'status:changes-requested')))
-    concurrency:
-      group: >-
-        ${{ (
-          (github.event_name == 'issues' &&
-            github.event.label.name == 'submission') ||
-          (github.event_name == 'issue_comment' &&
-            github.event.issue.pull_request == null &&
-            github.event.issue.state == 'open' &&
-            github.event.comment.body == '/reverify' &&
-            github.event.comment.user.login == github.event.issue.user.login &&
-            contains(github.event.issue.labels.*.name, 'submission') &&
-            (contains(github.event.issue.labels.*.name, 'status:verification-error') ||
-              contains(github.event.issue.labels.*.name, 'status:changes-requested')))
-          ) && format('palomar-submission-claim-{0}', github.event.issue.number) ||
-          format('palomar-submission-ignore-{0}', github.run_id) }}
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      claimed: ${{ steps.claim.outputs.claimed }}
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - name: Checkout trusted claim helper
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Recheck current issue eligibility
-        id: claim
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          claimed="$(
-            python3 scripts/claim_submission.py \
-              --event "$GITHUB_EVENT_PATH" \
-              --event-name "$EVENT_NAME" \
-              --issue-number "$ISSUE_NUMBER" \
-              --repo "${{ github.repository }}"
-          )"
-          case "$claimed" in
-            true|false) ;;
-            *) echo "claim helper returned an invalid result" >&2; exit 1 ;;
-          esac
-          echo "claimed=$claimed" >> "$GITHUB_OUTPUT"
-      - name: Mark verification in progress
-        if: steps.claim.outputs.claimed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for label in \
-            status:awaiting-review \
-            status:changes-requested \
-            status:verification-error \
-            status:review-in-progress \
-            status:accepted \
-            status:rejected \
-            status:escalated
-          do
-            gh issue edit "${{ github.event.issue.number }}" \
-              --repo "${{ github.repository }}" --remove-label "$label" || true
-          done
-          gh issue edit "${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}" --add-label status:verifying
-
   verify:
-    needs: mark
-    if: needs.mark.outputs.claimed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     permissions:
       contents: read
+    # Verification runs for up to six hours, and anyone able to prove push
+    # access to a public repository can cause one, so runs are serialised
+    # rather than allowed to exhaust the organisation's runners.
+    concurrency:
+      group: palomar-verify
+      cancel-in-progress: false
     steps:
       - name: Record verification deadline origin
         run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
@@ -210,64 +152,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: mechanical-report-${{ github.event.issue.number }}
+          name: mechanical-report-${{ inputs.request_id }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
           retention-days: 90
 
-  report:
-    needs: [mark, verify]
-    if: >-
-      always() &&
-      needs.mark.result != 'skipped' &&
-      (needs.mark.result == 'failure' ||
-        needs.mark.outputs.claimed == 'true')
-    concurrency:
-      group: palomar-submission-claim-${{ github.event.issue.number }}
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    steps:
-      - name: Checkout trusted reporter
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Download mechanical report
-        if: needs.mark.outputs.claimed == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: mechanical-report-${{ github.event.issue.number }}
-          path: report
-      - name: Report result and transition issue
-        env:
-          CLAIMED: ${{ needs.mark.outputs.claimed }}
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          MARK_RESULT: ${{ needs.mark.result }}
-        run: |
-          if [[ "$MARK_RESULT" == failure && "$CLAIMED" != true ]]
-          then
-            claimed="$(
-              python3 scripts/claim_submission.py \
-                --event "$GITHUB_EVENT_PATH" \
-                --event-name "$EVENT_NAME" \
-                --issue-number "$ISSUE_NUMBER" \
-                --repo "${{ github.repository }}"
-            )"
-            case "$claimed" in
-              true) ;;
-              false) echo "Issue is no longer eligible for failure reporting"; exit 0 ;;
-              *) echo "claim helper returned an invalid result" >&2; exit 1 ;;
-            esac
-          fi
-          python scripts/report_issue.py \
-            --report report/mechanical-report.json \
-            --allow-missing-report \
-            --issue-number "$ISSUE_NUMBER" \
-            --repo "${{ github.repository }}"

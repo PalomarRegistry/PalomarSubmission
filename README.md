@@ -2,7 +2,7 @@
 
 Issue-based intake and mechanical verification for the Palomar registry.
 
-[**Submit a Lean-verified result →**](https://github.com/PalomarRegistry/PalomarSubmission/issues/new?template=submit.yml)
+[**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
 The form asks only for a public GitHub repository and an immutable commit. The
 repository itself carries the metadata and comparator configuration. CI then:
