@@ -1,29 +1,8 @@
 {
-  "schema_version": 1,
-  "lean4export": {
-    "leanprover/lean4:v4.33.0-rc1": "af5aa64bb914c3c2c781f378088dbd38acf4f804",
-    "leanprover/lean4:v4.32.0": "4e7915201d3f9f04470d9eae002fa695f7cdc589",
-    "leanprover/lean4:v4.32.0-rc1": "3de59f10bc4b4a0f2de698597aeb1246caa0df0a",
-    "leanprover/lean4:v4.31.0": "8554815c2dc6b7abe99ec1f08849c9759ba77947",
-    "leanprover/lean4:v4.31.0-rc2": "b66b1cd7b8819db6059bc3d6093b22b0a380e793",
-    "leanprover/lean4:v4.31.0-rc1": "cd502a76e05515e7d3e09eaefee1dfd8349ca592",
-    "leanprover/lean4:v4.30.0": "a3e35a584f59b390667db7269cd37fca8575e4bf",
-    "leanprover/lean4:v4.30.0-rc2": "12581a6b680d8478175596338eb2d53383a323e3",
-    "leanprover/lean4:v4.30.0-rc1": "fb517af7d71065b28c256348afdf764308acc369",
-    "leanprover/lean4:v4.29.0": "5a53b634f6a3e21e55b4852337c4fcf0781ad1aa",
-    "leanprover/lean4:v4.28.0": "d065b0009aed0520e9e99752847a33b337661690"
-  },
-  "verso": {
-    "leanprover/lean4:v4.33.0-rc1": "6af30619664960f9c816b27157dff3ceb1500dcf",
-    "leanprover/lean4:v4.32.0": "e09d21a5f7f66c9fc985b73197708298569bf583",
-    "leanprover/lean4:v4.32.0-rc1": "8cb04559a9b9feb8efab43e135f662514561f668",
-    "leanprover/lean4:v4.31.0": "b677415e8a0becccc0b850137c2d8f6205132a91",
-    "leanprover/lean4:v4.31.0-rc2": "916bb962ceb8b88e6a731db6d28e862f99e834c4",
-    "leanprover/lean4:v4.31.0-rc1": "891a59f2318e507d7df274c92a8f827dcc6823ea",
-    "leanprover/lean4:v4.30.0": "8bcbd2b8723307c329c12997a0c16a6ac174d3e9",
-    "leanprover/lean4:v4.30.0-rc2": "0bce2769d753e69fe092f4f2b02cb1428d6287a6",
-    "leanprover/lean4:v4.30.0-rc1": "a7b8245c47cba20c8c1771c7b3a03e0eabb65342",
-    "leanprover/lean4:v4.29.0": "7ae82ac2ae54ae5dcc9948a701669e9b596e5cae",
-    "leanprover/lean4:v4.28.0": "372f82ee4e67c863cf473a9174a1a77e0bec74a2"
+  "schema_version": 2,
+  "minimum": "v4.28.0",
+  "tooling": {
+    "lean4export": "leanprover/lean4export",
+    "verso": "leanprover/verso"
   }
 }

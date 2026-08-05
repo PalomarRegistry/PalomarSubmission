@@ -49,6 +49,7 @@ jobs:
       - name: Validate configuration JSON
         run: |
           python -m json.tool toolchains.json >/dev/null
+          python -c 'import sys; sys.path.insert(0, "."); from scripts.verify_submission import supported_toolchain; import json; m = json.load(open("toolchains.json"))["minimum"]; supported_toolchain(f"leanprover/lean4:{m}")' 
           python -m json.tool allowed-challenge-repositories.json >/dev/null
       - name: Reject mutable action selectors
         run: |
