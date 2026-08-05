@@ -1419,9 +1419,14 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
     if manifest.exists():
         raise VerificationError("project lake-manifest.json must be a regular file")
 
+    # Only a declarative lakefile.toml can be read without running it, so it is
+    # the only shape whose dependencies can be established without a manifest.
     lakefile = project / "lakefile.toml"
     if lakefile.is_symlink() or not lakefile.is_file():
-        raise VerificationError("lakefile.lean projects require a committed lake-manifest.json")
+        raise VerificationError(
+            "a project with no committed lake-manifest.json must configure Lake with "
+            "a regular lakefile.toml"
+        )
     try:
         configuration = tomllib.loads(lakefile.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:

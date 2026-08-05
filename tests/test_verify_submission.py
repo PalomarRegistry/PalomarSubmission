@@ -59,6 +59,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_a_project_with_no_manifest_and_no_toml_lakefile_says_so(self):
+        """The message named the wrong lakefile: a copy-paste that would have
+        sent a submitter looking at a file they do not have."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "lakefile.lean").write_text("-- arbitrary Lean\n")
+            with self.assertRaisesRegex(
+                verifier.VerificationError, "must configure Lake with"
+            ):
+                verifier.ensure_lake_manifest(project, Path(directory))
+
     def test_repository_license_file_is_one_nonempty_regular_root_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
