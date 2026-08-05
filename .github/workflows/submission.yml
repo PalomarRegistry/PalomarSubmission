@@ -117,6 +117,16 @@ jobs:
     if: >-
       always() &&
       (github.event_name == 'workflow_dispatch' || needs.mark.outputs.claimed == 'true')
+    # Dispatched verification is serialised. Anyone who can prove push access
+    # to any public repository can cause one, and each may run for hours, so
+    # without this a handful of submissions can exhaust the organisation's
+    # runner capacity. Issue-driven runs keep their per-issue group.
+    concurrency:
+      group: >-
+        ${{ github.event_name == 'workflow_dispatch'
+            && 'palomar-verify-dispatch'
+            || format('palomar-verify-issue-{0}', github.event.issue.number) }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 350
     permissions:
