@@ -97,17 +97,27 @@ class RenderChallengeTests(unittest.TestCase):
             "a44bf5ebef846fc69009c02d5617e5af1a2d70d26298ea6db4a20600cead5201",
         )
 
-    def test_toolchain_mapping_is_exact(self):
-        self.assertEqual(
-            toolchain_verso_commit("leanprover/lean4:v4.31.0-rc2"),
-            "916bb962ceb8b88e6a731db6d28e862f99e834c4",
-        )
-        with self.assertRaisesRegex(VerificationError, "no probed Verso"):
-            toolchain_verso_commit("leanprover/lean4:v4.29.1")
+    def test_the_renderer_revision_is_derived_from_the_toolchain(self):
+        """No table to keep current: the tag is the toolchain's own version."""
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=lambda repo, tag: f"{repo}@{tag}",
+        ) as resolve:
+            self.assertEqual(
+                toolchain_verso_commit("leanprover/lean4:v4.31.0-rc2"),
+                "leanprover/verso@v4.31.0-rc2",
+            )
+        self.assertEqual(resolve.call_args.args, ("leanprover/verso", "v4.31.0-rc2"))
 
-    def test_every_accepted_toolchain_has_an_exact_renderer(self):
-        mapping = json.loads((Path(__file__).resolve().parents[1] / "toolchains.json").read_text())
-        self.assertEqual(set(mapping["lean4export"]), set(mapping["verso"]))
+    def test_a_toolchain_below_the_minimum_is_refused(self):
+        with self.assertRaisesRegex(VerificationError, "older than the minimum"):
+            toolchain_verso_commit("leanprover/lean4:v4.20.0")
+
+    def test_a_toolchain_that_is_not_a_lean_release_is_refused(self):
+        for value in ("leanprover/lean4:nightly-2026-08-01", "v4.32.0", "leanprover/lean4:v4"):
+            with self.subTest(value):
+                with self.assertRaisesRegex(VerificationError, "unsupported Lean toolchain"):
+                    toolchain_verso_commit(value)
 
     def test_manifest_merge_reuses_identical_dependency(self):
         shared = {

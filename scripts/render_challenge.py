@@ -23,6 +23,8 @@ if __package__ in {None, ""}:
 
 from scripts.verify_submission import (  # noqa: E402
     GITHUB_RE,
+    resolve_release_commit,
+    supported_toolchain,
     MAX_SOURCE_BYTES,
     SHA_RE,
     VerificationError,
@@ -407,11 +409,14 @@ def load_json_object(path: Path) -> dict[str, Any]:
 
 
 def toolchain_verso_commit(toolchain: str) -> str:
-    mapping = load_json_object(ROOT / "toolchains.json")
-    commit = mapping.get("verso", {}).get(toolchain)
-    if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
-        raise VerificationError(f"no probed Verso renderer for Lean toolchain: {toolchain}")
-    return commit
+    """The Verso release matching this toolchain, resolved to a commit.
+
+    Verso publishes a tag for every Lean release, so the revision is derived
+    from the toolchain rather than looked up in a table that has to be edited
+    for every release. The resolved commit is what gets recorded, so a render
+    always says exactly which Verso built it.
+    """
+    return resolve_release_commit("leanprover/verso", supported_toolchain(toolchain))
 
 
 def normalized_repository(value: str) -> tuple[str, str]:

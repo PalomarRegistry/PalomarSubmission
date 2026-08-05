@@ -102,6 +102,86 @@ RELATED_FORMALIZATION_RELATIONSHIPS = {
     "supersedes",
     "other",
 }
+# A Lean toolchain, as a comparable version. Release candidates sort before the
+# release they lead to, so v4.31.0-rc2 < v4.31.0, and anything that does not
+# parse is refused rather than guessed at.
+TOOLCHAIN_RE = re.compile(
+    r"^leanprover/lean4:v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"(?:-rc(?P<rc>\d+))?$"
+)
+VERSION_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:-rc(?P<rc>\d+))?$")
+
+
+def parse_lean_version(value: str, pattern: re.Pattern[str]) -> tuple[int, int, int, int, int]:
+    match = pattern.fullmatch(value.strip())
+    if not match:
+        raise VerificationError(f"unsupported Lean toolchain: {value!r}")
+    rc = match.group("rc")
+    # The fourth element orders a release candidate before its release.
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        0 if rc else 1,
+        int(rc) if rc else 0,
+    )
+
+
+def toolchain_release_tag(toolchain: str) -> str:
+    """The tag in Palomar's tooling repositories that matches this toolchain.
+
+    lean4export and Verso publish a tag for every Lean release, so the version
+    is derived rather than looked up in a table that has to be edited for every
+    release and is stale the moment it is not.
+    """
+    match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
+    if not match:
+        raise VerificationError(f"unsupported Lean toolchain: {toolchain!r}")
+    return "v" + toolchain.strip().split(":v", 1)[1]
+
+
+def supported_toolchain(toolchain: str) -> str:
+    """Refuse a toolchain below the floor Palomar's tooling supports."""
+    settings = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
+    minimum = settings.get("minimum")
+    if not isinstance(minimum, str) or not VERSION_RE.fullmatch(minimum):
+        raise VerificationError("toolchains.json does not record a valid minimum")
+    if parse_lean_version(toolchain, TOOLCHAIN_RE) < parse_lean_version(minimum, VERSION_RE):
+        raise VerificationError(
+            f"Lean toolchain {toolchain} is older than the minimum Palomar supports ({minimum})"
+        )
+    return toolchain_release_tag(toolchain)
+
+
+def resolve_release_commit(repository: str, tag: str) -> str:
+    """The commit a tooling release points at.
+
+    The tag is resolved once and the commit it named is recorded in the
+    mechanical report, so a record always says exactly which revision of
+    Palomar's own tooling checked it, whatever the tag says afterwards.
+    """
+    proc = subprocess.run(
+        ["git", "ls-remote", f"https://github.com/{repository}", f"refs/tags/{tag}^{{}}",
+         f"refs/tags/{tag}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise VerificationError(f"could not read {repository} releases")
+    commits = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and SHA_RE.fullmatch(parts[0]):
+            commits[parts[1]] = parts[0]
+    # An annotated tag resolves through its peeled ref; prefer that.
+    commit = commits.get(f"refs/tags/{tag}^{{}}") or commits.get(f"refs/tags/{tag}")
+    if not commit:
+        raise VerificationError(f"{repository} has published no {tag} release")
+    return commit
+
+
 LICENSE_FILE_RE = re.compile(
     r"^(?:licen[cs]e|copying|unlicense|ofl)(?:\.(?:md|markdown|txt))?$",
     re.IGNORECASE,
@@ -1212,10 +1292,9 @@ def prepare(args: argparse.Namespace) -> int:
                 "lean-toolchain must be a regular file in the project or repository root"
             )
         toolchain = toolchain_path.read_text(encoding="utf-8").strip()
-        mapping = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
-        export_commit = mapping["lean4export"].get(toolchain)
-        if not export_commit:
-            raise VerificationError(f"unsupported Lean toolchain: {toolchain}")
+        export_commit = resolve_release_commit(
+            "leanprover/lean4export", supported_toolchain(toolchain)
+        )
 
         raw_config_path = values.get("comparator_config_path", "").strip()
         config_relative = (
