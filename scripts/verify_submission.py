@@ -383,14 +383,12 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], dict[str,
             raise VerificationError(f"Submission options are not valid JSON: {error}") from error
         if not isinstance(options, dict):
             raise VerificationError("Submission options must be a JSON object")
-        allowed = {
-            "existing_id",
-            "authorization_relationship",
-            "authorization_evidence",
-            "project_path",
-            "comparator_config_path",
-            "formalization_metadata_path",
-        }
+        # Exactly the optional fields the issue form offers, minus the two
+        # that are inputs in their own right. A field missing from here is
+        # silently dropped rather than refused, which is the worse failure:
+        # the submitter believes they told us something and nobody ever sees
+        # it. The test below pins this against the issue form's own keys.
+        allowed = set(SECTION_KEYS.values()) - {"repository_url", "commit_sha"}
         unknown = sorted(set(options) - allowed)
         if unknown:
             raise VerificationError(f"Unrecognized submission options: {', '.join(unknown)}")

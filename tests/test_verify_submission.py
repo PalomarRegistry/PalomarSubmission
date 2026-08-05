@@ -1651,3 +1651,28 @@ class ServerDispatchWorkflowTests(unittest.TestCase):
         name = " ".join(str(upload["with"]["name"]).split())
         self.assertIn("inputs.request_id", name)
         self.assertIn("github.event.issue.number", name)
+
+
+class DispatchOptionParityTests(unittest.TestCase):
+    """A field the issue form offers must not vanish on the server path."""
+
+    def test_every_optional_issue_field_can_be_supplied_by_the_server(self):
+        optional = set(verifier.SECTION_KEYS.values()) - {"repository_url", "commit_sha"}
+        supplied = {name: "x" for name in optional}
+        supplied["authorization_relationship"] = "I am a responsible author or maintainer"
+        values, _ = verifier.submission_request(
+            {
+                "inputs": {
+                    "repository": "owner/repo",
+                    "commit": "b" * 40,
+                    "request_id": "abc123def456",
+                    "options": json.dumps(supplied),
+                }
+            }
+        )
+        for name in optional:
+            self.assertIn(
+                name,
+                values,
+                f"{name} is offered on the issue form but cannot be submitted via the server",
+            )
