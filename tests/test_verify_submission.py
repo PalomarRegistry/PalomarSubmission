@@ -318,12 +318,16 @@ class VerifySubmissionTests(unittest.TestCase):
         )
         self.assertIn('placeholder: PALOMAR-2026-07-29-000123', form)
 
-    def test_submission_workflow_run_name_includes_issue_number(self) -> None:
+    def test_submission_workflow_run_name_identifies_the_submission(self) -> None:
+        """The run name is how the submission server finds the run it started.
+
+        Dispatching a workflow does not return a run id, so the submission id
+        has to be visible on the run itself.
+        """
         workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml").read_text()
-        self.assertIn(
-            'run-name: "Verify submission #${{ github.event.issue.number }}"',
-            workflow,
-        )
+        run_name = " ".join(workflow.split("run-name:")[1].split("on:")[0].split())
+        self.assertIn("inputs.request_id", run_name)
+        self.assertIn("github.event.issue.number", run_name)
 
     def test_submission_workflow_accepts_only_guarded_author_reverification(self) -> None:
         path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
@@ -363,9 +367,13 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertIn("scripts/claim_submission.py", claim_step["run"])
         self.assertIn("$GITHUB_EVENT_PATH", claim_step["run"])
         self.assertEqual(workflow["jobs"]["verify"]["needs"], "mark")
+        # An issue still reaches verification only by being claimed. A server
+        # dispatch has no issue to claim, so it is admitted explicitly rather
+        # than by weakening the gate that protects the issue path.
         self.assertEqual(
-            workflow["jobs"]["verify"]["if"],
-            "needs.mark.outputs.claimed == 'true'",
+            " ".join(workflow["jobs"]["verify"]["if"].split()),
+            "always() && (github.event_name == 'workflow_dispatch' || "
+            "needs.mark.outputs.claimed == 'true')",
         )
         self.assertEqual(workflow["jobs"]["report"]["needs"], ["mark", "verify"])
         report = workflow["jobs"]["report"]
@@ -1529,3 +1537,117 @@ review:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubmissionRequestTests(unittest.TestCase):
+    """One verification, two intakes: a GitHub issue and a server dispatch."""
+
+    def issue_event(self):
+        body = (
+            "### Repository URL\n\nhttps://github.com/owner/repo\n\n"
+            "### Commit SHA\n\n" + "a" * 40 + "\n"
+        )
+        return {
+            "issue": {
+                "number": 7,
+                "html_url": "https://github.com/owner/repo/issues/7",
+                "user": {"login": "someone"},
+                "body": body,
+            }
+        }
+
+    def dispatch_event(self, **inputs):
+        base = {"repository": "owner/repo", "commit": "b" * 40, "request_id": "abc123def456"}
+        return {"inputs": {**base, **inputs}}
+
+    def test_issue_intake_is_unchanged(self):
+        values, identity = verifier.submission_request(self.issue_event())
+        self.assertEqual(values["commit_sha"], "a" * 40)
+        self.assertEqual(
+            identity,
+            {
+                "kind": "issue",
+                "number": 7,
+                "url": "https://github.com/owner/repo/issues/7",
+                "submitter": "someone",
+            },
+        )
+
+    def test_server_dispatch_supplies_the_same_fields(self):
+        values, identity = verifier.submission_request(
+            self.dispatch_event(
+                options=json.dumps(
+                    {
+                        "project_path": "sub",
+                        "authorization_relationship": "I am a responsible author or maintainer",
+                    }
+                )
+            )
+        )
+        self.assertEqual(values["repository_url"], "https://github.com/owner/repo")
+        self.assertEqual(values["commit_sha"], "b" * 40)
+        self.assertEqual(values["project_path"], "sub")
+        self.assertEqual(identity, {"kind": "server", "submission_id": "abc123def456"})
+
+    def test_server_dispatch_records_no_submitter(self):
+        """The server keeps the submitter private; the report must not leak it."""
+        _, identity = verifier.submission_request(self.dispatch_event())
+        self.assertNotIn("submitter", identity)
+        self.assertNotIn("url", identity)
+
+    def test_dispatch_inputs_are_validated_as_strictly_as_an_issue_body(self):
+        for label, event in [
+            ("uppercase id", self.dispatch_event(request_id="SHOUTING1234")),
+            ("short id", self.dispatch_event(request_id="short")),
+            ("malformed repository", self.dispatch_event(repository="not-a-repo")),
+            ("options that are not JSON", self.dispatch_event(options="{")),
+            ("options that are not an object", self.dispatch_event(options="[]")),
+            ("an unrecognized option", self.dispatch_event(options='{"evil": "x"}')),
+            ("a non-string option", self.dispatch_event(options='{"project_path": 1}')),
+            ("no inputs at all", {}),
+        ]:
+            with self.subTest(label):
+                with self.assertRaises(VerificationError):
+                    verifier.submission_request(event)
+
+
+class ServerDispatchWorkflowTests(unittest.TestCase):
+    """The dispatch entry point, and what it must not disturb."""
+
+    def workflow(self):
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
+        return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+
+    def test_dispatch_declares_exactly_the_inputs_the_verifier_reads(self):
+        inputs = self.workflow()["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(
+            sorted(inputs), ["commit", "options", "repository", "request_id"]
+        )
+        for name in ("repository", "commit", "request_id"):
+            self.assertEqual(inputs[name]["required"], "true")
+        self.assertEqual(inputs["options"]["required"], "false")
+
+    def test_the_issue_claim_gate_is_untouched_by_the_dispatch_path(self):
+        """A dispatch is skipped by `mark` because it is neither issue event.
+
+        The gate must not have been rewritten to accommodate dispatches: an
+        unclaimed issue reaching verification is the failure this guards.
+        """
+        condition = " ".join(self.workflow()["jobs"]["mark"]["if"].split())
+        self.assertTrue(condition.startswith("(github.event_name == 'issues'"))
+        self.assertNotIn("workflow_dispatch", condition)
+
+    def test_the_issue_reporter_does_not_run_for_a_dispatch(self):
+        """`report` comments on an issue, and a dispatch has none."""
+        report = " ".join(self.workflow()["jobs"]["report"]["if"].split())
+        self.assertIn("needs.mark.result != 'skipped'", report)
+
+    def test_the_report_artifact_is_named_for_whichever_intake_ran(self):
+        verify = self.workflow()["jobs"]["verify"]
+        upload = next(
+            step for step in verify["steps"]
+            if "upload-artifact" in str(step.get("uses", ""))
+        )
+        name = " ".join(str(upload["with"]["name"]).split())
+        self.assertIn("inputs.request_id", name)
+        self.assertIn("github.event.issue.number", name)

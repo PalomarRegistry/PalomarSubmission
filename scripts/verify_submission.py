@@ -69,6 +69,7 @@ GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SUBMISSION_ID_RE = re.compile(r"^[0-9a-z]{12}$")
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 GITHUB_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
@@ -331,6 +332,74 @@ def parse_issue_body(body: str) -> dict[str, str]:
                 raise VerificationError(f"duplicate recognized issue section: {match.group(1).strip()}")
             sections[key] = value
     return sections
+
+
+def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
+    """Return the submitted values and how the submitter is identified.
+
+    Verification is the same work whether a submission arrived as a GitHub
+    issue or as a dispatch from the submission server. Only the identity
+    differs: an issue has a number, an author, and a body to parse, while a
+    server submission has an opaque id and supplies the same fields directly
+    as workflow inputs. The server keeps the submitter's identity private, so
+    it is deliberately not passed here and not recorded in the report.
+
+    Inputs are supplied by whoever can dispatch the workflow, which is limited
+    to the organisation, but they are validated exactly as strictly as an
+    issue body is: an intake this trusting is the wrong place to relax.
+    """
+    if "issue" in event:
+        issue = event["issue"]
+        return parse_issue_body(issue.get("body") or ""), {
+            "kind": "issue",
+            "number": int(issue["number"]),
+            "url": issue["html_url"],
+            "submitter": issue["user"]["login"],
+        }
+
+    inputs = event.get("inputs")
+    if not isinstance(inputs, dict):
+        raise VerificationError("workflow dispatch carried no submission inputs")
+    submission_id = str(inputs.get("request_id", "")).strip()
+    if not SUBMISSION_ID_RE.fullmatch(submission_id):
+        raise VerificationError("Submission id must be twelve lowercase alphanumeric characters")
+
+    repository = str(inputs.get("repository", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise VerificationError("Repository must be given as owner/name")
+
+    values = {
+        "repository_url": f"https://github.com/{repository}",
+        "commit_sha": str(inputs.get("commit", "")).strip(),
+    }
+    # Optional fields arrive as one JSON object rather than as separate inputs,
+    # because workflow_dispatch allows only ten and the issue form already has
+    # more optional fields than that leaves room for.
+    raw_options = str(inputs.get("options", "")).strip()
+    if raw_options:
+        try:
+            options = json.loads(raw_options)
+        except json.JSONDecodeError as error:
+            raise VerificationError(f"Submission options are not valid JSON: {error}") from error
+        if not isinstance(options, dict):
+            raise VerificationError("Submission options must be a JSON object")
+        allowed = {
+            "existing_id",
+            "authorization_relationship",
+            "authorization_evidence",
+            "project_path",
+            "comparator_config_path",
+            "formalization_metadata_path",
+        }
+        unknown = sorted(set(options) - allowed)
+        if unknown:
+            raise VerificationError(f"Unrecognized submission options: {', '.join(unknown)}")
+        for key, value in options.items():
+            if not isinstance(value, str):
+                raise VerificationError(f"Submission option {key} must be a string")
+            values[key] = value
+
+    return values, {"kind": "server", "submission_id": submission_id}
 
 
 def normalize_repository(url: str) -> tuple[str, str]:
@@ -1044,8 +1113,7 @@ def prepare(args: argparse.Namespace) -> int:
     try:
         install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
-        issue = event["issue"]
-        values = parse_issue_body(issue.get("body") or "")
+        values, identity = submission_request(event)
         repository, url = normalize_repository(values.get("repository_url", ""))
         commit = values.get("commit_sha", "").strip().lower()
         if not SHA_RE.fullmatch(commit):
@@ -1065,7 +1133,7 @@ def prepare(args: argparse.Namespace) -> int:
         else:
             authorization_relationship = "legacy-unspecified"
             report["warnings"].append(
-                "Legacy submission issue has no authorization relationship declaration"
+                "Submission has no authorization relationship declaration"
             )
         authorization: dict[str, str] = {
             "relationship": authorization_relationship,
@@ -1087,9 +1155,16 @@ def prepare(args: argparse.Namespace) -> int:
         report.update(
             {
                 "issue": {
-                    "number": int(issue["number"]),
-                    "url": issue["html_url"],
-                    "submitter": issue["user"]["login"],
+                    **(
+                        {
+                            "number": identity["number"],
+                            "url": identity["url"],
+                            "submitter": identity["submitter"],
+                        }
+                        if identity["kind"] == "issue"
+                        else {"submission_id": identity["submission_id"]}
+                    ),
+                    "intake": identity["kind"],
                     "authorization": authorization,
                     "requested_paths": {
                         "project_path": raw_project_path,

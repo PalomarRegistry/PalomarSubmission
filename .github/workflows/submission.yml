@@ -1,11 +1,36 @@
 name: Verify submission
-run-name: "Verify submission #${{ github.event.issue.number }}"
+run-name: >-
+  Verify submission
+  ${{ github.event_name == 'workflow_dispatch'
+      && inputs.request_id
+      || format('#{0}', github.event.issue.number) }}
 
 on:
   issues:
     types: [labeled]
   issue_comment:
     types: [created]
+  # The submission server dispatches verification for submissions that have no
+  # issue behind them. The run name carries the submission id so the server can
+  # find the run it started; a dispatch does not return one.
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Public GitHub repository in owner/name form
+        required: true
+        type: string
+      commit:
+        description: Full 40-character commit to verify
+        required: true
+        type: string
+      request_id:
+        description: Opaque submission id from the submission server
+        required: true
+        type: string
+      options:
+        description: JSON object of optional submission fields
+        required: false
+        type: string
 
 jobs:
   mark:
@@ -89,7 +114,9 @@ jobs:
 
   verify:
     needs: mark
-    if: needs.mark.outputs.claimed == 'true'
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.mark.outputs.claimed == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 350
     permissions:
@@ -210,7 +237,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: mechanical-report-${{ github.event.issue.number }}
+          name: >-
+            mechanical-report-${{ github.event_name == 'workflow_dispatch'
+              && inputs.request_id || github.event.issue.number }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
           retention-days: 90
@@ -241,7 +270,9 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: mechanical-report-${{ github.event.issue.number }}
+          name: >-
+            mechanical-report-${{ github.event_name == 'workflow_dispatch'
+              && inputs.request_id || github.event.issue.number }}
           path: report
       - name: Report result and transition issue
         env:
