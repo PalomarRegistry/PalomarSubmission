@@ -912,6 +912,23 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise VerificationError("formalization.yaml must contain one top-level mapping")
 
+    # Named together, and before the field-by-field checks, because a file in an
+    # older or a project's own shape otherwise fails one field at a time: fix,
+    # resubmit, wait, learn the next one.
+    missing = [
+        name
+        for name in ("project", "classification", "automation", "review")
+        if not isinstance(data.get(name), dict)
+    ]
+    if missing:
+        raise VerificationError(
+            "formalization.yaml is missing the sections Palomar requires: "
+            + ", ".join(missing)
+            + ". Palomar follows the mathlib-initiative formalization.yaml v0.3 format "
+            "(https://github.com/mathlib-initiative/formalization.yaml); a file written "
+            "before it, or in a project's own shape, needs those sections adding."
+        )
+
     project = _required_mapping(data.get("project"), "project")
     _required_text(project.get("name"), "project.name")
     _required_people(project.get("authors"), "project.authors")
