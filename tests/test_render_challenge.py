@@ -415,5 +415,68 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
             self.assertEqual([item["path"] for item in files], ["nested/artifact-manifest.json"])
 
 
+class CallSignatureTests(unittest.TestCase):
+    """Every helper the render path calls, called the way it calls it.
+
+    Registration failed on its first real use because `execute` passed
+    `readable_paths=` to a function that did not take it. Nothing caught it:
+    the render path runs only when a submission is being registered, which had
+    never happened, and a TypeError raised there is indistinguishable in the
+    workflow log from any other failed render.
+    """
+
+    def test_the_render_path_calls_its_helpers_with_arguments_they_accept(self):
+        import ast
+        import inspect
+
+        from scripts import render_challenge, verify_submission
+
+        def resolved(node):
+            """The verify_submission callable a call node names, or None.
+
+            Resolved through render_challenge's own namespace, so an alias is
+            followed and a same-named local is not mistaken for an import:
+            render_challenge has its own `parser` and `main`.
+            """
+            if isinstance(node.func, ast.Name):
+                target = getattr(render_challenge, node.func.id, None)
+            elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                module = getattr(render_challenge, node.func.value.id, None)
+                target = getattr(module, node.func.attr, None) if module is not None else None
+            else:
+                return None
+            if not callable(target) or inspect.isclass(target):
+                return None
+            return target if inspect.getmodule(target) is verify_submission else None
+
+        source = Path(inspect.getfile(render_challenge)).read_text()
+        checked = 0
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            target = resolved(node)
+            if target is None:
+                continue
+            # A splat says nothing checkable, so it is outside the guarantee.
+            if any(kw.arg is None for kw in node.keywords) or any(
+                isinstance(arg, ast.Starred) for arg in node.args
+            ):
+                continue
+            names = [kw.arg for kw in node.keywords]
+            try:
+                # bind, not bind_partial: a required argument left out is the
+                # same TypeError at the same place as one that does not exist.
+                inspect.signature(target).bind(
+                    *[mock.ANY] * len(node.args), **{name: mock.ANY for name in names}
+                )
+            except TypeError as error:
+                self.fail(
+                    f"render_challenge line {node.lineno} calls "
+                    f"{target.__name__}() with arguments it does not accept: {error}"
+                )
+            checked += 1
+        self.assertGreater(checked, 10, "no cross-module calls were checked")
+
+
 if __name__ == "__main__":
     unittest.main()
