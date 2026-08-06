@@ -417,3 +417,46 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallSignatureTests(unittest.TestCase):
+    """Every helper the render path calls, called the way it calls it.
+
+    Registration failed on its first real use because `execute` passed
+    `readable_paths=` to a function that did not take it. Nothing caught it:
+    the render path runs only when a submission is being registered, which had
+    never happened, and a TypeError raised there is indistinguishable in the
+    workflow log from any other failed render.
+    """
+
+    def test_the_render_path_calls_its_helpers_with_arguments_they_accept(self):
+        import ast
+        import inspect
+
+        from scripts import render_challenge, verify_submission
+
+        source = Path(inspect.getfile(render_challenge)).read_text()
+        tree = ast.parse(source)
+
+        checked = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            target = getattr(verify_submission, node.func.id, None)
+            if not callable(target) or inspect.isclass(target):
+                continue
+            signature = inspect.signature(target)
+            named = [kw.arg for kw in node.keywords if kw.arg is not None]
+            # A **kwargs splat says nothing checkable; skip rather than guess.
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            try:
+                signature.bind_partial(*[mock.ANY] * len(node.args),
+                                       **{name: mock.ANY for name in named})
+            except TypeError as error:
+                self.fail(
+                    f"{render_challenge.__name__} line {node.lineno} calls "
+                    f"{node.func.id}() with arguments it does not accept: {error}"
+                )
+            checked += 1
+        self.assertGreater(checked, 10, "no cross-module calls were checked")

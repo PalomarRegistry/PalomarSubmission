@@ -2605,10 +2605,17 @@ def verify_filesystem_confinement(
     environment: dict[str, str],
     landrun: Path,
     writable_directories: list[Path],
+    readable_paths: list[Path] | None = None,
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> None:
-    """Exercise the renderer's narrower write-only confinement contract."""
+    """Exercise the renderer's narrower write-only confinement contract.
+
+    The probes run under the same readable-path policy as the work they stand
+    for. A probe confined more tightly than the real run does not test the
+    real run: the denial it observes may be a denial of reading rather than of
+    writing, which is the thing being checked.
+    """
 
     def failure_detail(proc: subprocess.CompletedProcess[str]) -> str:
         detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
@@ -2631,6 +2638,7 @@ def verify_filesystem_confinement(
         environment=environment,
         landrun=landrun,
         writable_directories=writable_directories,
+        readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
         check=False,
@@ -2649,6 +2657,7 @@ def verify_filesystem_confinement(
         environment=environment,
         landrun=landrun,
         writable_directories=writable_directories,
+        readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
         check=False,
