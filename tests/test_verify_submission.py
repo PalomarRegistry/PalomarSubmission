@@ -1505,3 +1505,23 @@ class MetadataShapeTests(unittest.TestCase):
             self.load(
                 "project: {}\nclassification: {}\nautomation: {}\nreview: {}\n"
             )
+
+
+class TaxonomyTextTests(unittest.TestCase):
+    """The MSC descriptions are shown to readers, so they have to be readable."""
+
+    def test_no_description_has_lost_a_character(self):
+        import json
+        import pathlib
+
+        codes = json.loads(
+            (pathlib.Path(__file__).resolve().parents[1] / "taxonomies" / "msc2020-codes.json")
+            .read_text(encoding="utf-8")
+        )
+        # A '?' inside a description is a character that did not survive an
+        # encoding step, not punctuation: no MSC description is a question.
+        broken = sorted(code for code, text in codes.items() if "?" in text)
+        self.assertEqual(broken, [], "MSC descriptions with a lost character")
+        self.assertEqual(
+            codes["52C10"], "Erdős problems and related topics of discrete geometry"
+        )
