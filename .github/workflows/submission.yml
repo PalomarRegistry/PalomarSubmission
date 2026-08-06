@@ -157,3 +157,21 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Fail the run when verification did not pass
+        # Every step after intake is conditional on it having succeeded, so a
+        # failed submission skipped its way to a green run and was recorded as
+        # having passed. The report is the outcome; the run has to say so.
+        if: always()
+        run: |
+          python - <<'PYTHON'
+          import json, pathlib, sys, os
+          report = json.loads(pathlib.Path(os.environ["RUNNER_TEMP"], "mechanical-report.json").read_text())
+          status = report.get("status")
+          if status == "pass":
+              sys.exit(0)
+          print(f"::error::mechanical verification did not pass: {status}")
+          for problem in report.get("errors", []):
+              print(f"::error::{problem}")
+          sys.exit(1)
+          PYTHON
+

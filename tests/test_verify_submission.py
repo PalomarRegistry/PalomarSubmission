@@ -766,7 +766,9 @@ review:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"
             path.write_text("{}\n")
-            with self.assertRaisesRegex(VerificationError, "field project must be a mapping"):
+            with self.assertRaisesRegex(
+                VerificationError, "missing the sections Palomar requires: project"
+            ):
                 load_formalization_metadata(path)
 
     def test_formalization_metadata_rejects_empty_required_values(self):
@@ -1477,3 +1479,29 @@ class DispatchWorkflowTests(unittest.TestCase):
             if "upload-artifact" in str(step.get("uses", ""))
         )
         self.assertIn("inputs.request_id", str(upload["with"]["name"]))
+
+
+class MetadataShapeTests(unittest.TestCase):
+    """A file in another shape should learn everything it is missing at once."""
+
+    def load(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(text, encoding="utf-8")
+            return verifier.load_formalization_metadata(path)
+
+    def test_every_missing_section_is_named_together(self):
+        # The shape a project might reasonably have written before the standard.
+        with self.assertRaises(verifier.VerificationError) as caught:
+            self.load("result:\n  name: x\nartifacts:\n  challenge: Challenge.lean\n")
+        message = str(caught.exception)
+        for section in ("project", "classification", "automation", "review"):
+            self.assertIn(section, message, f"{section} was not named")
+        self.assertIn("mathlib-initiative/formalization.yaml", message)
+
+    def test_a_file_with_the_sections_gets_the_specific_complaint(self):
+        # And once the shape is right, the detailed checks speak again.
+        with self.assertRaisesRegex(verifier.VerificationError, "project.name"):
+            self.load(
+                "project: {}\nclassification: {}\nautomation: {}\nreview: {}\n"
+            )
