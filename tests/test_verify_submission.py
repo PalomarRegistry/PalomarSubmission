@@ -39,7 +39,6 @@ from scripts.verify_submission import (
     normalize_repository,
     normalized_repository_path,
     package_allowlist,
-
     project_tree_url,
     protected_lean_path,
     reject_committed_build_artifacts,
@@ -576,8 +575,6 @@ project:
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
-provenance:
-  result_origin: source-based
 repository:
   role: substantive-development
 classification:
@@ -607,8 +604,6 @@ project:
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
-provenance:
-  result_origin: source-based
 repository:
   role: substantive-development
 classification:
@@ -640,21 +635,62 @@ review:
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
 
-    def test_provenance_accepts_a_source_free_original_result(self):
+    def test_provenance_derives_an_original_result_from_its_source_entry(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "repository": {"role": "substantive-development"},
+                "sources": [
+                    {
+                        "title": "Original proof of the example theorem",
+                        "type": "original-proof",
+                        "relationship": "other",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(provenance["result_origin"], "original")
+        self.assertTrue(provenance["declared"]["result_origin"])
+
+    def test_legacy_source_free_original_result_remains_readable(self):
+        warnings = []
         provenance = verifier.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
                 "provenance": {"result_origin": "original"},
                 "repository": {"role": "substantive-development"},
-            }
+            },
+            warnings=warnings,
         )
-        self.assertEqual(provenance["mathematical_sources"], [])
         self.assertEqual(provenance["result_origin"], "original")
+        self.assertTrue(
+            any("legacy provenance.result_origin" in item for item in warnings)
+        )
+
+    def test_legacy_original_result_with_background_sources_remains_readable(self):
+        warnings = []
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "provenance": {"result_origin": "original"},
+                "repository": {"role": "substantive-development"},
+                "sources": [
+                    {
+                        "title": "Background textbook",
+                        "relationship": "background",
+                    }
+                ],
+            },
+            warnings=warnings,
+        )
+        self.assertEqual(provenance["result_origin"], "original")
+        self.assertTrue(
+            any("no original-proof source" in item for item in warnings)
+        )
 
     def test_source_based_provenance_without_a_substantive_relationship_warns(self):
         data = {
             "project": {"responsible_maintainers": ["Ada Lovelace"]},
-            "provenance": {"result_origin": "source-based"},
             "repository": {"role": "substantive-development"},
             "sources": [
                 {
@@ -683,7 +719,7 @@ review:
             },
             warnings=warnings,
         )
-        self.assertEqual(provenance["result_origin"], "unspecified")
+        self.assertEqual(provenance["result_origin"], "source-based")
         self.assertEqual(provenance["repository_role"], "unspecified")
         self.assertEqual(provenance["responsible_maintainers"], [])
         self.assertEqual(provenance["mathematical_sources"][0]["relationship"], "other")
@@ -693,12 +729,11 @@ review:
         self.assertEqual(
             provenance["declared"],
             {
-                "result_origin": False,
+                "result_origin": True,
                 "repository_role": False,
                 "responsible_maintainers": False,
             },
         )
-        self.assertTrue(any("result_origin" in warning for warning in warnings))
         self.assertTrue(any("repository.role" in warning for warning in warnings))
         self.assertTrue(any("responsible maintainer" in warning for warning in warnings))
         self.assertTrue(any("relationship" in warning for warning in warnings))
@@ -708,9 +743,14 @@ review:
         provenance = verifier.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
-                "provenance": {"result_origin": "original"},
                 "repository": {"role": "thin_wrapper"},
-                "sources": [{"title": "Source", "relationship": "formalizes"}],
+                "sources": [
+                    {
+                        "title": "Original proof",
+                        "type": "original-proof",
+                        "relationship": "formalizes",
+                    }
+                ],
             },
             warnings=warnings,
         )
@@ -719,29 +759,30 @@ review:
         self.assertFalse(provenance["declared"]["result_origin"])
         self.assertFalse(provenance["declared"]["repository_role"])
 
-    def test_unquoted_yaml_boolean_author_contacted_is_normalized(self):
+    def test_source_author_contact_state_is_carried_by_endorsement(self):
         provenance = verifier.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
-                "provenance": {"result_origin": "source-based"},
                 "repository": {"role": "substantive-development"},
                 "sources": [
                     {
                         "title": "Source",
                         "relationship": "formalizes",
-                        "author_contacted": False,
+                        "author_endorsement": "not-contacted",
                     }
                 ],
             }
         )
-        self.assertEqual(provenance["mathematical_sources"][0]["author_contacted"], "no")
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["author_endorsement"],
+            "not-contacted",
+        )
 
     def test_thin_wrapper_records_the_substantive_repository_at_a_full_commit(self):
         revision = "a" * 40
         provenance = verifier.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
-                "provenance": {"result_origin": "original"},
                 "repository": {
                     "role": "thin-wrapper",
                     "substantive_formalization": {
@@ -749,6 +790,13 @@ review:
                         "revision": revision,
                     },
                 },
+                "sources": [
+                    {
+                        "title": "Original proof",
+                        "type": "original-proof",
+                        "relationship": "other",
+                    }
+                ],
             }
         )
         self.assertEqual(

@@ -78,7 +78,7 @@ AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
 }
-RESULT_ORIGINS = {"original", "source-based"}
+ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
 SOURCE_RELATIONSHIPS = {
     "formalizes",
@@ -729,11 +729,7 @@ def normalized_provenance(
 
     provenance_value = data.get("provenance")
     provenance = provenance_value if isinstance(provenance_value, dict) else {}
-    result_origin = provenance.get("result_origin")
-    result_origin_declared = result_origin in RESULT_ORIGINS
-    if result_origin not in RESULT_ORIGINS:
-        result_origin = "unspecified"
-        warn("No recognized provenance.result_origin was declared; recorded as unspecified")
+    legacy_result_origin = provenance.get("result_origin")
 
     repository_value = data.get("repository")
     repository = repository_value if isinstance(repository_value, dict) else {}
@@ -800,12 +796,9 @@ def normalized_provenance(
             ("type", "type", 200),
             ("location", "location", 1_000),
             ("license", "license", 500),
-            ("author_contacted", "author_contacted", 100),
             ("author_endorsement", "author_endorsement", 100),
         ):
             raw_value = item.get(source_key)
-            if source_key == "author_contacted" and isinstance(raw_value, bool):
-                raw_value = "yes" if raw_value else "no"
             value = _optional_text(raw_value, f"{path}.{source_key}", maximum=maximum)
             if value is not None:
                 record[record_key] = value
@@ -813,11 +806,42 @@ def normalized_provenance(
         if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
             del record["author_endorsement"]
             warn(f"Ignoring unrecognized {path}.author_endorsement")
-        contacted = record.get("author_contacted")
-        if contacted is not None and contacted not in {"yes", "no", "n/a"}:
-            del record["author_contacted"]
-            warn(f"Ignoring unrecognized {path}.author_contacted")
         sources.append(record)
+
+    has_original_proof = any(
+        source.get("type") == ORIGINAL_PROOF_TYPE for source in sources
+    )
+    if has_original_proof:
+        result_origin = "original"
+        result_origin_declared = True
+        if legacy_result_origin == "source-based":
+            warn(
+                "Ignoring legacy provenance.result_origin because it conflicts with sources"
+            )
+    elif legacy_result_origin == "original":
+        # Older v0.3 metadata could declare an original result and still list
+        # background sources. Keep it readable while asking new submissions to
+        # use the original-proof source type.
+        result_origin = "original"
+        result_origin_declared = True
+        warn(
+            "Using legacy provenance.result_origin because no original-proof source was declared"
+        )
+    elif sources:
+        result_origin = "source-based"
+        result_origin_declared = True
+    elif legacy_result_origin == "source-based":
+        # Preserve already-submitted v0.3 metadata while the ecosystem moves to
+        # the required sources/original-proof convention.
+        result_origin = "source-based"
+        result_origin_declared = True
+        warn(
+            "Using legacy provenance.result_origin because no source entry declares origin"
+        )
+    else:
+        result_origin = "unspecified"
+        result_origin_declared = False
+        warn("No source entry declared result origin; recorded as unspecified")
 
     substantive_relationships = {"formalizes", "adapts", "independently-proves"}
     if result_origin == "source-based" and not any(
