@@ -265,6 +265,44 @@ VERSO_RUNTIME = r'''(() => {
     return content;
   }
 
+  const MARGIN = 8;
+  const GAP = 6;
+
+  /**
+   * Put the popup beside the thing it describes, never on top of it.
+   *
+   * The old placement clamped the top to `innerHeight - 160`, which for any
+   * token in the lower part of the view put the box over the token and so
+   * under the pointer. The pointer then left the token, the popup hid, the
+   * pointer was over the token again, and it flickered. Choosing the roomier
+   * side removes the cause; `pointer-events: none` in the stylesheet removes
+   * the possibility.
+   */
+  function place(popup, box) {
+    popup.style.position = "fixed";
+    popup.style.maxWidth = `${Math.max(320, innerWidth - 2 * MARGIN)}px`;
+    popup.style.maxHeight = "none";
+    popup.style.overflow = "visible";
+    popup.style.zIndex = "2147483647";
+    // Measured after the width is set and before a side is chosen: how tall it
+    // wants to be depends on how wide it is allowed to be.
+    popup.style.left = `${MARGIN}px`;
+    popup.style.top = `${MARGIN}px`;
+    const wanted = popup.getBoundingClientRect();
+
+    const below = innerHeight - box.bottom - GAP - MARGIN;
+    const above = box.top - GAP - MARGIN;
+    const under = wanted.height <= below || below >= above;
+    const height = Math.max(64, Math.min(wanted.height, under ? below : above));
+    popup.style.maxHeight = `${height}px`;
+    popup.style.overflow = "auto";
+    popup.style.top = under
+      ? `${box.bottom + GAP}px`
+      : `${Math.max(MARGIN, box.top - GAP - height)}px`;
+    popup.style.left =
+      `${Math.max(MARGIN, Math.min(box.left, innerWidth - wanted.width - MARGIN))}px`;
+  }
+
   function installHovers(docs) {
     const popup = document.createElement("div");
     popup.className = "palomar-hover hl lean";
@@ -277,14 +315,7 @@ VERSO_RUNTIME = r'''(() => {
         if (!content) return;
         popup.replaceChildren(content);
         popup.hidden = false;
-        const box = target.getBoundingClientRect();
-        popup.style.position = "fixed";
-        popup.style.left = `${Math.max(8, Math.min(box.left, innerWidth - 420))}px`;
-        popup.style.top = `${Math.min(innerHeight - 160, box.bottom + 6)}px`;
-        popup.style.maxWidth = "400px";
-        popup.style.maxHeight = "300px";
-        popup.style.overflow = "auto";
-        popup.style.zIndex = "2147483647";
+        place(popup, target.getBoundingClientRect());
       });
       target.addEventListener("mouseleave", () => { popup.hidden = true; });
     }
@@ -1005,7 +1036,17 @@ def static_html_sanitize(
         padding: .65rem !important; border: 1px solid #888 !important;
         border-radius: .35rem; background: #fff !important; color: #24292e !important;
         box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%);
+        /* The pointer must never land on the popup. If it does, it has left
+           the token, so the popup hides, so the pointer is over the token
+           again, so it shows: a flicker that sustains itself. */
+        pointer-events: none;
+        /* Lean signatures are long and were being cut off inside a 400px box.
+           Wrap them instead, and only where they can be broken. */
+        white-space: pre-wrap;
+        overflow-wrap: break-word;
       }
+      .palomar-hover .hl.lean, .palomar-hover .popup,
+      .palomar-hover .hover-info { white-space: pre-wrap; }
       .palomar-hover .popup,
       .palomar-hover .hover-info,
       .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }
