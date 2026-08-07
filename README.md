@@ -25,10 +25,13 @@ handled, so stale or duplicate requests do not start another verification.
 
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
-Lake build directories. Repositories containing Git submodules or Git LFS
-pointers are rejected, as are Git dependencies hosted anywhere other than
-GitHub; Palomar must be able to preserve the complete accepted source graph in
-ordinary Git. The Challenge is compiled
+Lake build directories. Submitted or substantive source repositories containing
+Git submodules are rejected. An inert submodule gitlink in a dependency is
+allowed because dependency submodules are never initialized or read; the exact
+gitlink is retained by the archive fork. Git LFS pointers are rejected everywhere, as are
+Git dependencies hosted anywhere other than GitHub. Palomar must be able to
+preserve the complete source graph consumed by the accepted build in ordinary
+Git. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
 allowlisted dependencies; its protected module is the statement Comparator
 exports. Common submitted prebuilt artifacts are rejected early, and no

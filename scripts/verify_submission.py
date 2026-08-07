@@ -1068,13 +1068,22 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
     run([*git, "remote", "set-url", "--push", "origin", "no_push"], env=git_env)
 
 
-def validate_preservable_git_checkout(checkout: Path, label: str) -> None:
+def validate_preservable_git_checkout(
+    checkout: Path,
+    label: str,
+    *,
+    allow_inert_submodules: bool = False,
+) -> None:
     """Reject Git shapes whose contents a GitHub fork would not preserve.
 
-    A submodule entry preserves only another repository pointer, and a Git LFS
-    entry preserves only a pointer into storage owned by the original
-    repository.  Until Palomar archives those stores recursively, accepting
-    either would make the source-preservation promise untrue.
+    A native fork preserves a submodule's gitlink but not the referenced
+    repository. Submitted and substantive sources therefore may not use them.
+    Dependency checkouts are different: Palomar never initializes their
+    submodules, so an inert historical gitlink is part of the preserved Git
+    tree but not part of the source consumed by the build.
+
+    Git LFS entries always preserve only pointers into storage owned by the
+    original repository, so they remain disallowed in every checkout.
     """
     git = [
         "git",
@@ -1083,13 +1092,14 @@ def validate_preservable_git_checkout(checkout: Path, label: str) -> None:
         "-C",
         str(checkout),
     ]
-    index = run([*git, "ls-files", "--stage", "-z"]).stdout
-    for record in index.split("\0"):
-        if record and record.split(None, 1)[0] == "160000":
-            path = record.split("\t", 1)[-1]
-            raise VerificationError(
-                f"{label} contains Git submodule {path!r}; submodules are not preservable"
-            )
+    if not allow_inert_submodules:
+        index = run([*git, "ls-files", "--stage", "-z"]).stdout
+        for record in index.split("\0"):
+            if record and record.split(None, 1)[0] == "160000":
+                path = record.split("\t", 1)[-1]
+                raise VerificationError(
+                    f"{label} contains Git submodule {path!r}; submodules are not preservable"
+                )
 
     tracked = run([*git, "ls-files", "-z"]).stdout
     if not tracked:
@@ -2844,7 +2854,11 @@ def materialize_packages(
             timeout=EXECUTION_BUDGET_SECONDS,
         )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
-        validate_preservable_git_checkout(package_dir, f"Git package {name!r}")
+        validate_preservable_git_checkout(
+            package_dir,
+            f"Git package {name!r}",
+            allow_inert_submodules=True,
+        )
         writable.extend(remove_untrusted_lake_state(package_dir))
     return validate_writable_directories(boundary, writable)
 

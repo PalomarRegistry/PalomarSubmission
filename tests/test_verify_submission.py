@@ -110,6 +110,14 @@ class VerifySubmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(VerificationError, "Git submodule 'vendor'"):
                 validate_preservable_git_checkout(checkout, "submitted source")
 
+            # Dependency submodules are never initialized or read by Palomar.
+            # Their exact gitlinks remain part of the archived repository tree.
+            validate_preservable_git_checkout(
+                checkout,
+                "Git package 'historical'",
+                allow_inert_submodules=True,
+            )
+
     def test_git_lfs_paths_are_not_preservable(self):
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)
@@ -118,7 +126,11 @@ class VerifySubmissionTests(unittest.TestCase):
             (checkout / "large.bin").write_text("version https://git-lfs.github.com/spec/v1\n")
             subprocess.run(["git", "add", "."], cwd=checkout, check=True)
             with self.assertRaisesRegex(VerificationError, "Git LFS"):
-                validate_preservable_git_checkout(checkout, "submitted source")
+                validate_preservable_git_checkout(
+                    checkout,
+                    "Git package 'dependency'",
+                    allow_inert_submodules=True,
+                )
 
     def test_a_project_with_no_manifest_and_no_toml_lakefile_says_so(self):
         """The message named the wrong lakefile: a copy-paste that would have
