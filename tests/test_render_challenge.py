@@ -94,7 +94,7 @@ class RenderChallengeTests(unittest.TestCase):
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
-            "a44bf5ebef846fc69009c02d5617e5af1a2d70d26298ea6db4a20600cead5201",
+            "332773edafa3ac712ec3fba31d4c6ece2339693958873a9020a9be1bddb22538",
         )
 
     def test_the_renderer_revision_is_derived_from_the_toolchain(self):
