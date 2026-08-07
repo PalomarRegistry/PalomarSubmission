@@ -46,6 +46,13 @@ environment.
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier
   does not run `lake update` or dependency post-update hooks.
+- Every submitted, dependency, and separately recorded substantive source must
+  be a public GitHub repository pinned to a full commit so registration can
+  preserve the complete accepted source graph in native GitHub forks. Git LFS
+  pointers are rejected throughout that graph. Submitted and substantive
+  repositories containing submodules are rejected; an inert dependency
+  submodule gitlink is allowed only because the verifier never initializes or
+  reads it and the native fork preserves the exact ordinary Git object.
 - An allowlisted Mathlib or Tau Ceti revision is trusted only if Git proves that
   it is an ancestor of the configured branch in the canonical repository.
   A compatibility exception may name an exact historical commit explicitly;
