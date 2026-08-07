@@ -350,6 +350,7 @@ def run(
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
     timeout: int = 600,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
@@ -358,7 +359,7 @@ def run(
         command,
         cwd=cwd,
         env=env,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -371,6 +372,10 @@ def run(
     ]
     for reader in readers:
         reader.start()
+    if input_text is not None:
+        assert proc.stdin is not None
+        proc.stdin.write(input_text.encode("utf-8"))
+        proc.stdin.close()
     try:
         returncode = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1030,6 +1035,7 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_LFS_SKIP_SMUDGE": "1",
         }
     )
     git = [
@@ -1062,6 +1068,54 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
     run([*git, "remote", "set-url", "--push", "origin", "no_push"], env=git_env)
 
 
+def validate_preservable_git_checkout(
+    checkout: Path,
+    label: str,
+    *,
+    allow_inert_submodules: bool = False,
+) -> None:
+    """Reject Git shapes whose contents a GitHub fork would not preserve.
+
+    A native fork preserves a submodule's gitlink but not the referenced
+    repository. Submitted and substantive sources therefore may not use them.
+    Dependency checkouts are different: Palomar never initializes their
+    submodules, so an inert historical gitlink is part of the preserved Git
+    tree but not part of the source consumed by the build.
+
+    Git LFS entries always preserve only pointers into storage owned by the
+    original repository, so they remain disallowed in every checkout.
+    """
+    git = [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        str(checkout),
+    ]
+    if not allow_inert_submodules:
+        index = run([*git, "ls-files", "--stage", "-z"]).stdout
+        for record in index.split("\0"):
+            if record and record.split(None, 1)[0] == "160000":
+                path = record.split("\t", 1)[-1]
+                raise VerificationError(
+                    f"{label} contains Git submodule {path!r}; submodules are not preservable"
+                )
+
+    tracked = run([*git, "ls-files", "-z"]).stdout
+    if not tracked:
+        return
+    attributes = run(
+        [*git, "check-attr", "--cached", "-z", "filter", "--stdin"],
+        input_text=tracked,
+    ).stdout.split("\0")
+    for position in range(0, len(attributes) - 2, 3):
+        path, attribute, value = attributes[position : position + 3]
+        if attribute == "filter" and value == "lfs":
+            raise VerificationError(
+                f"{label} tracks {path!r} with Git LFS; LFS objects are not preservable"
+            )
+
+
 def tree_size(root: Path) -> int:
     total = 0
     for path in root.rglob("*"):
@@ -1071,6 +1125,18 @@ def tree_size(root: Path) -> int:
         if total > MAX_SOURCE_BYTES:
             break
     return total
+
+
+def validate_preservable_remote_source(
+    work: Path, source: dict[str, str], label: str
+) -> None:
+    """Fetch and inspect a recorded source that is not part of the proof build."""
+    with tempfile.TemporaryDirectory(prefix="palomar-preservation-", dir=work) as directory:
+        checkout = Path(directory) / "source"
+        clone_commit(source["repository_url"], source["commit"], checkout)
+        validate_preservable_git_checkout(checkout, label)
+        if tree_size(checkout) > MAX_SOURCE_BYTES:
+            raise VerificationError(f"{label} exceeds the 500 MiB cap")
 
 
 def strip_lean_comments(text: str) -> str:
@@ -1262,6 +1328,7 @@ def prepare(args: argparse.Namespace) -> int:
         )
         source = work / "source"
         clone_commit(url, commit, source)
+        validate_preservable_git_checkout(source, "submitted source")
         size = tree_size(source)
         if size > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
@@ -1305,6 +1372,13 @@ def prepare(args: argparse.Namespace) -> int:
         )
         formalization = load_formalization_metadata(metadata_path)
         provenance = normalized_provenance(formalization, warnings=report["warnings"])
+        substantive = provenance.get("substantive_formalization")
+        if isinstance(substantive, dict):
+            validate_preservable_remote_source(
+                work,
+                substantive,
+                "substantive formalization source",
+            )
 
         report["stage"] = "license"
         declared_license = formalization["project"]["license"].strip()
@@ -1463,9 +1537,17 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
     for package in data.get("packages", []):
         package_type = package.get("type")
         url = package.get("url")
-        if package_type == "git" and isinstance(url, str):
-            repository = github_repository(url) or url
+        if package_type == "git":
+            repository = github_repository(url) if isinstance(url, str) else None
+            if repository is None:
+                raise VerificationError(
+                    f"Git package {str(package.get('name') or '')!r} must be hosted on GitHub"
+                )
             revision = str(package.get("rev") or package.get("inputRev") or "")
+            if not SHA_RE.fullmatch(revision):
+                raise VerificationError(
+                    f"Git package {str(package.get('name') or '')!r} is not pinned to a full commit"
+                )
         elif package_type == "path":
             directory = str(package.get("dir") or "")
             repository = f"path:{directory}"
@@ -1741,6 +1823,7 @@ def git_environment(source: Path, base_env: dict[str, str]) -> dict[str, str]:
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_LFS_SKIP_SMUDGE": "1",
     }
 
 
@@ -2771,6 +2854,11 @@ def materialize_packages(
             timeout=EXECUTION_BUDGET_SECONDS,
         )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
+        validate_preservable_git_checkout(
+            package_dir,
+            f"Git package {name!r}",
+            allow_inert_submodules=True,
+        )
         writable.extend(remove_untrusted_lake_state(package_dir))
     return validate_writable_directories(boundary, writable)
 
