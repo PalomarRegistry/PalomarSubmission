@@ -51,6 +51,7 @@ from scripts.verify_submission import (
     sandboxed_run,
     systemd_command,
     trusted_package_url_map,
+    validate_preservable_git_checkout,
     verify_official_revision,
 )
 
@@ -58,6 +59,79 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_non_github_git_dependency_is_not_preservable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "elsewhere",
+                                "type": "git",
+                                "url": "https://gitlab.com/example/elsewhere",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
+            with self.assertRaisesRegex(VerificationError, "must be hosted on GitHub"):
+                verifier.manifest_packages(source)
+
+    def test_git_dependency_without_a_repository_is_not_preservable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "missing",
+                                "type": "git",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
+            with self.assertRaisesRegex(VerificationError, "must be hosted on GitHub"):
+                verifier.manifest_packages(source)
+
+    def test_git_submodules_are_not_preservable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "update-index", "--add", "--cacheinfo", "160000," + "1" * 40 + ",vendor"],
+                cwd=checkout,
+                check=True,
+            )
+            with self.assertRaisesRegex(VerificationError, "Git submodule 'vendor'"):
+                validate_preservable_git_checkout(checkout, "submitted source")
+
+            # Dependency submodules are never initialized or read by Palomar.
+            # Their exact gitlinks remain part of the archived repository tree.
+            validate_preservable_git_checkout(
+                checkout,
+                "Git package 'historical'",
+                allow_inert_submodules=True,
+            )
+
+    def test_git_lfs_paths_are_not_preservable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            (checkout / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+            (checkout / "large.bin").write_text("version https://git-lfs.github.com/spec/v1\n")
+            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+            with self.assertRaisesRegex(VerificationError, "Git LFS"):
+                validate_preservable_git_checkout(
+                    checkout,
+                    "Git package 'dependency'",
+                    allow_inert_submodules=True,
+                )
+
     def test_a_project_with_no_manifest_and_no_toml_lakefile_says_so(self):
         """The message named the wrong lakefile: a copy-paste that would have
         sent a submitter looking at a file they do not have."""
