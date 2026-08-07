@@ -4,8 +4,12 @@ Mechanical verification for the Palomar registry.
 
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
-The form asks only for a public GitHub repository and an immutable commit. The
-repository itself carries the metadata and comparator configuration. CI then:
+The form asks for a public GitHub repository, an immutable commit, and the
+repository-relative path of exactly one Comparator configuration. The
+repository itself carries the metadata. One configuration becomes one Palomar
+entry; several configurations at the same repository and commit are submitted
+separately, while one configuration selecting several declarations is verified
+and reviewed as a whole. CI then:
 
 1. validates the required root files and pinned commit, including parsing
    `formalization.yaml` and enforcing Palomar's documented metadata minimum;

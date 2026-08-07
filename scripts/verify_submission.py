@@ -448,6 +448,11 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
                 raise VerificationError(f"Submission option {key} must be a string")
             values[key] = value
 
+    if not values.get("comparator_config_path", "").strip():
+        raise VerificationError(
+            "Comparator configuration path must be supplied explicitly for this submission"
+        )
+
     return values, submission_id
 
 
@@ -1412,10 +1417,12 @@ def prepare(args: argparse.Namespace) -> int:
         )
 
         raw_config_path = values.get("comparator_config_path", "").strip()
-        config_relative = (
-            normalized_repository_path(raw_config_path, "Comparator configuration path")
-            if raw_config_path
-            else joined_repository_path(project_relative, "comparator.json")
+        if not raw_config_path:
+            raise VerificationError(
+                "Comparator configuration path must be supplied explicitly for this submission"
+            )
+        config_relative = normalized_repository_path(
+            raw_config_path, "Comparator configuration path"
         )
         if config_relative.suffix.lower() != ".json":
             raise VerificationError("Comparator configuration path must name a .json file")

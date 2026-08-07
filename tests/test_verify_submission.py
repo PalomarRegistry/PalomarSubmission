@@ -1540,11 +1540,16 @@ class SubmissionRequestTests(unittest.TestCase):
 
     def test_a_dispatch_supplies_the_submission(self):
         values, submission_id = verifier.submission_request(
-            self.dispatch(options=json.dumps({"project_path": "sub", "context": "notes"}))
+            self.dispatch(options=json.dumps({
+                "project_path": "sub",
+                "comparator_config_path": "sub/comparator.json",
+                "context": "notes",
+            }))
         )
         self.assertEqual(values["repository_url"], "https://github.com/owner/repo")
         self.assertEqual(values["commit_sha"], "b" * 40)
         self.assertEqual(values["project_path"], "sub")
+        self.assertEqual(values["comparator_config_path"], "sub/comparator.json")
         self.assertEqual(values["context"], "notes")
         self.assertEqual(submission_id, "abc123def456")
 
@@ -1560,6 +1565,10 @@ class SubmissionRequestTests(unittest.TestCase):
         )
         for name in verifier.OPTIONAL_FIELDS:
             self.assertIn(name, values, f"{name} cannot be submitted")
+
+    def test_comparator_configuration_must_be_selected_explicitly(self):
+        with self.assertRaisesRegex(VerificationError, "must be supplied explicitly"):
+            verifier.submission_request(self.dispatch(options="{}"))
 
     def test_dispatch_inputs_are_validated_strictly(self):
         for label, event in [
