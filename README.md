@@ -23,8 +23,12 @@ is in any other state.
 Eligibility is rechecked against the issue's current state when the command is
 handled, so stale or duplicate requests do not start another verification.
 
-The proof project may use arbitrary pinned Git dependencies that build from
-source inside Palomar's fresh Lake build directories. The Challenge is compiled
+The proof project may use arbitrary pinned **public GitHub** Git dependencies
+at full 40-character commit SHAs. They build from source inside Palomar's fresh
+Lake build directories. Repositories containing Git submodules or Git LFS
+pointers are rejected, as are Git dependencies hosted anywhere other than
+GitHub; Palomar must be able to preserve the complete accepted source graph in
+ordinary Git. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
 allowlisted dependencies; its protected module is the statement Comparator
 exports. Common submitted prebuilt artifacts are rejected early, and no
