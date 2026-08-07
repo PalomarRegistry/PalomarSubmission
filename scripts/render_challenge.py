@@ -1050,6 +1050,18 @@ def static_html_sanitize(
       .palomar-hover .popup,
       .palomar-hover .hover-info,
       .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }
+      /* Verso separates a signature from its docstring with an empty span and
+         leaves the spacing to a stylesheet we do not ship, so the two ran
+         together: "... : Type (max u_7 u_8)The standard real/complex Euclidean
+         space ...". The docstring is also still an inline <code>, because the
+         Markdown renderer that would have made it a block is not loaded here. */
+      .palomar-hover .sep { display: block; height: 0; }
+      .palomar-hover .docstring {
+        display: block;
+        margin-top: .55rem;
+        padding-top: .55rem;
+        border-top: 1px solid #e1e4e8;
+      }
       .palomar-render-error { margin: 1rem; font-family: sans-serif; }
     </style>"""
     text = re.sub(
