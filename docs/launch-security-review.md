@@ -2,6 +2,14 @@
 
 Date: 2026-07-31
 
+Current-infrastructure update: 2026-08-07. The security review remains the
+record of the launch-hardening work, but the database publication boundary has
+since changed: `PalomarDatabase` is private, its active-only projection is
+published to private R2, and `data.palomar-registry.org` is a read-only Worker.
+The private repository is on GitHub Free and therefore no longer has enforced
+branch protection; its append-only controls are CI plus maintainer procedure
+until the organization upgrades to GitHub Team.
+
 This record covers the launch hardening tracked by
 [`PalomarSubmission#5`](https://github.com/PalomarRegistry/PalomarSubmission/issues/5).
 It records the implemented boundary, the checks used to exercise it, and the
@@ -101,21 +109,27 @@ context, literature evidence, or prior model output.
 
 PalomarDatabase enforces effective URI/date-time formats, canonical GitHub
 evidence URLs, cross-field source/issue/trust consistency, safe relative paths,
-and immutable `(id, version)` records. PalomarWeb pins production registry and
-render sources, restricts development overrides to loopback, validates the
-supported schema/status/verdict and selected identity, rejects duplicate or
-escaping summaries, centralizes safe links, applies CSP, and displays the
-Challenge/Solution digests.
+and immutable `(id, version)` records. Its complete ledger and takedown state
+remain private; a validated active-only release is published atomically to R2
+and exposed through a Worker that allowlists read-only public paths. PalomarWeb
+pins that production registry and render origin, restricts development
+overrides to loopback, validates the supported schema/status/verdict and
+selected identity, rejects duplicate or escaping summaries, centralizes safe
+links, applies CSP, and displays the Challenge/Solution digests.
 
 ## Repository controls
 
-The default branches of PalomarSubmission, PalomarDatabase, PalomarWeb,
-PalomarReviewer, and PalomarPolicy require up-to-date CI, one approving review,
-stale-review dismissal, conversation resolution, and administrator enforcement.
-Force pushes and branch deletion are disabled. Required checks are `test` and
-the cold `compatibility` run for Submission, `test` for Web/Reviewer,
-`validate` and `append-only` for Database, and `validate` for Policy. Database
-publication remains append-only for existing versioned record paths.
+The protected default branches of PalomarSubmission, PalomarWeb,
+PalomarReviewer, and PalomarPolicy require their configured reviews and checks;
+force pushes and branch deletion are disabled by their repository controls.
+`PalomarDatabase` is the exception: GitHub Free supports those controls for
+public organization repositories but not private ones. Its `validate` and
+`append-only` jobs still detect violations, and maintainers must use current
+pull requests, wait for both jobs, squash merge, and avoid direct/force pushes
+or branch deletion. Upgrade the organization to GitHub Team and restore the
+enforced Database protection described in
+`PalomarDatabase/docs/append-only.md` when practical. Database publication
+remains append-only for existing versioned record paths.
 
 ## Accepted residual risks and deferred work
 
