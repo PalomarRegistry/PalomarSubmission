@@ -50,8 +50,9 @@ artifact as hostile. Its security-relevant sequence is:
    dependency list and source bytes before candidate Lake configuration
    executes.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
-   outer Landrun/systemd boundary with a verifier-owned configuration that
-   forces NanoDa on regardless of the submitted flag. Resolve the protected
+   outer Landrun/systemd boundary with a verifier-protected, byte-identical copy
+   of a submitted configuration that already requires `"enable_nanoda": true`.
+   Resolve the protected
    Challenge module, Lean core, and frozen trusted modules before candidate
    paths in Comparator's `LEAN_PATH`; candidate output cannot replace any of
    them. Require both Lean's kernel and the pinned independent NanoDa kernel to
@@ -82,10 +83,10 @@ The maintained test surfaces are:
   required final gate, including renames, deletions, unusual paths, and failed
   classification or build jobs;
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
-  accepted `erdos-unit-distance-comparator` fixture at commit
-  `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
-  Lake-file-based, and ordinary proof dependencies, followed by the real pinned
-  Comparator, toolchain-matched `lean4export`, and pinned NanoDa under the nested sandbox. It
+  current `PalomarTemplate` contract at commit
+  `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`, including its Mathlib closure,
+  followed by the real pinned Comparator, toolchain-matched `lean4export`, and
+  pinned NanoDa under the nested sandbox. It
   uses the hosted tier's 330-minute capacity measured from the start of its
   350-minute job, so setup time and candidate execution consume one allowance.
   The verifier's trusted default supports twelve hours on a suitably configured
@@ -101,13 +102,12 @@ The maintained test surfaces are:
   succeeds and either the selected cold build succeeds or the change is
   explicitly confined to that exact prose set.
 
-The cold fixture passed locally with Lean `v4.31.0-rc2`, Landrun, 16 pinned
-project dependencies, canonical Challenge compilation, source provenance
-audit, the complete confinement probe set, and candidate Challenge/Solution
-builds and comparison. The pull-request workflow must reproduce that result on
-the supported GitHub-hosted runner before merging any execution-affecting
-change. The explicit prose-only gate is sufficient for the documentation paths
-described above.
+The cold fixture uses Lean `v4.32.0` and exercises canonical Challenge
+compilation, source provenance audit, the complete confinement probe set, and
+candidate Challenge/Solution builds and comparison. The pull-request workflow
+must reproduce that result on the supported GitHub-hosted runner before merging
+any execution-affecting change. The explicit prose-only gate is sufficient for
+the documentation paths described above.
 
 ## Component review
 
@@ -118,10 +118,11 @@ The workflow pins Comparator commit
 exports Challenge and Solution environments, checks configured declarations and
 their dependency closures, enforces the permitted-axiom set, and replays the
 comparison through both Lean's kernel and the pinned independent NanoDa kernel.
-The verifier forces NanoDa in a protected configuration copy; the submitted
-`enable_nanoda` value is non-authoritative. Comparator's own Landrun domains remain in
-place. They are nested inside Palomar's outer domain, so they can narrow but not
-widen Palomar's filesystem or network policy. Palomar independently protects
+The verifier accepts only the exact JSON boolean `"enable_nanoda": true` and
+passes a byte-identical protected copy to Comparator; it does not rewrite a
+submitter-selected value. Comparator's own Landrun domains remain in place.
+They are nested inside Palomar's outer domain, so they can narrow but not widen
+Palomar's filesystem or network policy. Palomar independently protects
 the Challenge module because Comparator assumes the supplied Challenge build is
 the intended statement.
 

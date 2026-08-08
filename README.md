@@ -48,9 +48,11 @@ dependencies remain available to the proof in `Solution.lean`. A Tau Ceti import
 is recorded as a qualified trust surface; no other statement dependency is
 accepted, including one from a project Palomar has already indexed.
 
-`enable_nanoda` in a submitted `comparator.json` is retained for upstream
-schema compatibility but is not authoritative. The trusted runner writes a
-separate configuration with NanoDa enabled and passes that copy to Comparator.
+NanoDa replay is a registry invariant, not a submitter option. A submitted
+`comparator.json` must contain `"enable_nanoda": true` with the JSON boolean value
+exactly; false, missing, non-boolean, and unknown compatibility fields fail
+intake. The trusted runner copies the validated configuration byte-for-byte to
+a protected path and passes that unchanged copy to Comparator.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
@@ -121,7 +123,10 @@ The prototype accepts public GitHub repositories and any released or RC Lean
 toolchain at or above the minimum recorded in
 [`toolchains.json`](toolchains.json). There is no list of accepted versions:
 the matching tooling revisions are derived from the toolchain's release tag,
-which is what a table of them kept getting wrong.
+which is what a table of them kept getting wrong. The file is deliberately a
+closed record containing only its schema version and the minimum Lean release;
+it does not claim to configure tooling repositories that the verifier does not
+read from it.
 
 ## Licensing
 

@@ -207,6 +207,7 @@ class RenderChallengeTests(unittest.TestCase):
                         "theorem_names": ["headline"],
                         "definition_names": [],
                         "permitted_axioms": [],
+                        "enable_nanoda": True,
                     }
                 ),
                 encoding="utf-8",
@@ -308,6 +309,7 @@ class RenderChallengeTests(unittest.TestCase):
                         "theorem_names": ["headline"],
                         "definition_names": [],
                         "permitted_axioms": [],
+                        "enable_nanoda": True,
                     }
                 ),
                 encoding="utf-8",
@@ -615,7 +617,7 @@ end Example
                         "theorem_names": ["Example.headline"],
                         "definition_names": [],
                         "permitted_axioms": [],
-                        "enable_nanoda": False,
+                        "enable_nanoda": True,
                     }
                 ),
                 encoding="utf-8",
