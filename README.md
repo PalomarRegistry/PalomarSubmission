@@ -4,28 +4,31 @@ Mechanical verification for the Palomar registry.
 
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
-The form asks for a public GitHub repository, an immutable commit, and the
-repository-relative path of exactly one Comparator configuration. The
-repository itself carries the metadata. One configuration becomes one Palomar
-entry; several configurations at the same repository and commit are submitted
-separately, while one configuration selecting several declarations is verified
-and reviewed as a whole. CI then:
+The form asks for a public GitHub repository, an immutable commit, the
+repository-relative path of exactly one Comparator configuration, and a
+declaration of the submitter's relationship to the substantive formalization,
+which is a claim about a person rather than about the code and is recorded
+permanently. The repository itself carries the metadata. One configuration
+becomes one Palomar entry; several configurations at the same repository and
+commit are submitted separately, while one configuration selecting several
+declarations is verified and reviewed as a whole. CI then:
 
 1. validates the required root files and pinned commit, including parsing
    `formalization.yaml` and enforcing Palomar's documented metadata minimum;
 2. installs a matching `lean4export`;
 3. runs [Comparator](https://github.com/leanprover/comparator) under its Landrun
-   sandbox, using the three standard permitted axioms, and forces every exported
-   proof through both Lean's kernel and the pinned independent NanoDa kernel;
-4. computes the transitive source closure of `Challenge.lean`;
-5. compiles the Challenge against frozen, canonical Mathlib/Tau Ceti output and
-   verifies every transitive source byte;
-6. publishes a machine-readable report as a run artifact
+   sandbox, permitting at most the three standard axioms, and forces every
+   exported proof through both Lean's kernel and the pinned independent NanoDa
+   kernel;
+4. compiles the Challenge against frozen, canonical Mathlib/Tau Ceti output;
+5. computes the transitive source closure of the Challenge and verifies every
+   byte in it;
+6. publishes a machine-readable report as a run artifact.
 
-from other users, on pull requests or closed issues, and while the submission
-is in any other state.
-Eligibility is rechecked against the issue's current state when the command is
-handled, so stale or duplicate requests do not start another verification.
+Verification is dispatched by the submission server, not started from this
+repository. The run carries the submission identifier in its name, and the
+report leaves as an artifact rather than as a comment, so nothing here needs a
+credential that can write anywhere.
 
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
@@ -51,24 +54,30 @@ separate configuration with NanoDa enabled and passes that copy to Comparator.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
-automatically against passing open issues, using the prompts in
-[`PalomarPolicy`](https://github.com/PalomarRegistry/PalomarPolicy). No person starts a
-review or approves its result.
+automatically against the mechanical report of a passing run, using the prompts
+in [`PalomarPolicy`](https://github.com/PalomarRegistry/PalomarPolicy). No
+person starts a review or approves its result.
 
 ## Required source layout
 
 See [`PalomarRegistry/PalomarPolicy`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md).
-The root contract is:
+The contract is:
 
 ```text
-lean-toolchain
-lakefile.toml
+lean-toolchain            # in the project or the repository root
+lakefile.toml             #   or lakefile.lean, which also needs lake-manifest.json
 formalization.yaml
-Challenge.lean
-Solution.lean
-comparator.json
-LICENSE
+<the Comparator configuration named by the submission>
+<its challenge_module and solution_module sources>
+LICENSE                   # repository root, and only there
 ```
+
+Only `formalization.yaml` is required under that exact name. The Challenge and
+Solution paths follow from `challenge_module` and `solution_module` in the
+Comparator configuration, and the configuration's own path is the one the
+submission named, so none of the three is a fixed filename. The selected project
+need not be the repository root either: `project_path` may name a subdirectory,
+and everything but the licence is resolved inside it.
 
 The licence filename is case-insensitive and may instead use `LICENCE`,
 `COPYING`, `UNLICENSE`, or `OFL`, with an optional `.md`, `.markdown`, or
@@ -77,9 +86,13 @@ nonempty UTF-8 text, match one standard SPDX licence mechanically, and agree
 exactly with the SPDX identifier in `project.license`.
 
 `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
-project identity, authorship, license, classification, source citation,
-automation-method, and review-status fields. Classification requires one or two
-official arXiv subject classes and at least one MSC2020 code. The exact
+project identity, authorship, license, classification, automation-method, and
+review-status fields. Classification requires one or two official arXiv subject
+classes and between one and eight distinct MSC2020 codes. Source citation is not
+in that list: a missing or unusable `sources` entry is recorded as
+`unspecified`, with a warning, and left to editorial review, because whether a
+citation is adequate is a judgement and not something a parser can settle. The
+exact
 mechanical minimum is documented in
 [`PalomarPolicy/CONTRIBUTING.md`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md#1-required-repository-shape).
 
@@ -89,8 +102,11 @@ of the official [arXiv taxonomy](https://arxiv.org/category_taxonomy) and
 editorial AI separately checks whether the selected subjects are plausible for
 the submitted result.
 
-The prototype accepts public GitHub repositories and supported released or RC
-Lean toolchains listed in [`toolchains.json`](toolchains.json).
+The prototype accepts public GitHub repositories and any released or RC Lean
+toolchain at or above the minimum recorded in
+[`toolchains.json`](toolchains.json). There is no list of accepted versions:
+the matching tooling revisions are derived from the toolchain's release tag,
+which is what a table of them kept getting wrong.
 
 ## Licensing
 
@@ -102,6 +118,7 @@ cited papers, reused formalizations, and dependencies retain their own licences.
 ## Security
 
 Submission Lean is hostile input. The verification job has read-only repository
-permissions and no credential in its environment; the issue-reporting job has a
-separate token and never executes submitted data. See [`SECURITY.md`](SECURITY.md)
-before changing the workflow or verifier.
+permissions and no credential in its environment, and its only output is a
+bounded JSON artifact, so there is no second job holding a write token to
+compromise. See [`SECURITY.md`](SECURITY.md) before changing the workflow or
+verifier.

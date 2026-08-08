@@ -1,14 +1,16 @@
 # Palomar security policy
 
-Palomar mechanically checks Lean projects supplied through GitHub issues. A
-submission is untrusted input, not merely untrusted Lean source. This document
-describes the threat model, the verification boundary, and how to report a
-problem without exposing other users to it.
+Palomar mechanically checks Lean projects dispatched here by the submission
+server at <https://submit.palomar-registry.org>. A submission is untrusted
+input, not merely untrusted Lean source. This document describes the threat
+model, the verification boundary, and how to report a problem without exposing
+other users to it.
 
 ## Threat model
 
-The submitter controls the issue fields and every byte of the referenced Git
-commit. In particular, the following are treated as potentially hostile:
+The submitter controls the dispatched request fields and every byte of the
+referenced Git commit. In particular, the following are treated as potentially
+hostile:
 
 - `Challenge.lean`, `Solution.lean`, and any other source file;
 - `formalization.yaml`, including parser-expansion and malformed-structure attacks;
@@ -37,8 +39,8 @@ environment.
 
 - The verifier accepts only a public, credential-free
   `https://github.com/owner/repository` URL and a full 40-character commit SHA.
-  Dynamic issue values are passed as files or subprocess arguments, not
-  interpolated into shell programs.
+  Dynamic request values are read from the workflow event payload and passed as
+  files or subprocess arguments, not interpolated into shell programs.
 - `formalization.yaml` is capped at 256 KiB and parsed in the credential-free
   intake job with PyYAML's safe loader, duplicate-key rejection, and explicit
   rejection of YAML merge keys before they can be expanded.
@@ -154,30 +156,32 @@ executes and checked before and after sandboxed phases.
 The mechanical report is outside every sandbox-writable directory and is
 written only by the trusted verifier after the sandboxed process exits.
 
-### Credentials and reporting separation
+### Credentials
 
-The verification job has `contents: read` permission and is not given an issue
+The verification job has `contents: read` permission and is not given a write
 token, App token, private-repository credential, or submission secret. Trusted
 checkouts disable credential persistence, and Landrun passes an explicit small
 environment-variable allowlist to untrusted processes through the systemd unit
 and its own environment filter.
 
-The later reporting job is separate. It receives issue-write permission but
-does not check out or execute the submitted project; it reads only the bounded
-JSON artifact produced by the verification job. Its authority target comes
-from the trusted workflow event and must agree with the issue number recorded
-in the artifact. It updates only a marker comment owned by
-`github-actions[bot]`; a submitter-authored lookalike cannot claim that slot.
-Build diagnostics are rendered as inert code rather than Markdown structure.
+There is no longer a second job to compromise. Verification writes a bounded
+JSON report outside every sandbox-writable directory and uploads it as the
+`mechanical-report-<request_id>` artifact, and the submission server collects it
+out of band. That removed the whole class of question the reporting job raised:
+it held a write token, and every argument about marker-comment ownership and
+inert diagnostics existed because hostile text was being rendered by something
+holding one. Nothing in this repository now holds a credential that can write
+anywhere.
 
 ## Pins and trusted computing base
 
 GitHub Actions, Comparator, Landrun, NanoDa, elan releases, and source-built
 verifier tools are pinned to immutable revisions or checksums. NanoDa uses the
 `robsimmons/nanoda_lib` fork deployed by Comparator Live at commit
-`68d5ca9db226849b41a6fff59d796ff19d0a8840`. `lean4export` revisions are mapped
-to exact Lean toolchain releases in `toolchains.json`. Pin changes require
-security review and an end-to-end comparison probe.
+`68d5ca9db226849b41a6fff59d796ff19d0a8840`. A `lean4export` revision is resolved
+from the submitted toolchain's own release tag rather than from a table, because
+a table is a second place for the answer to be wrong and it kept being the wrong
+one. Pin changes require security review and an end-to-end comparison probe.
 
 This design still trusts the GitHub-hosted Linux runner, the Linux kernel and
 Landlock implementation, systemd, Git and its protocol parsers, the selected
@@ -196,8 +200,9 @@ questions are recorded in
 The sandbox limits effects of hostile project code; it does not make any of
 these trusted components infallible.
 
-Current protocol limits include public GitHub repositories, `lakefile.toml` at
-the submission root, a 500 MiB checked-out-source cap, a 256 KiB cap on
+Current protocol limits include public GitHub repositories, exactly one of
+`lakefile.toml` or `lakefile.lean` in the selected project, a 500 MiB
+checked-out-source cap, a 256 KiB cap on
 `formalization.yaml`, a 100 KiB / 1,000-line hard cap on `Challenge.lean`, and
 a 1 MiB cap on the single regular UTF-8 root licence file. Licensee reads only
 that selected file, with package and README detection disabled and bounded
