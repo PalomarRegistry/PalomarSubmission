@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,16 +258,33 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         template_commit = "d720f59dbe2edd29e0b9273c113139cdb1f24d2b"
         self.assertIn(f"/{template_commit}/formalization.yaml", pinned_step["run"])
         self.assertIn(f"/{template_commit}/comparator.json", pinned_step["run"])
+        self.assertIn("cmp tests/fixtures/palomar-template-comparator.json", pinned_step["run"])
         self.assertIn("load_comparator_config", pinned_step["run"])
         self.assertNotIn("/main/formalization.yaml", pinned_step["run"])
         self.assertNotIn("/main/comparator.json", pinned_step["run"])
 
         drift_step = self.step("scope", "template")
+        python_step = self.step("scope", "template-python")
+        dependency_step = self.step("scope", "template-dependencies")
+        self.assertEqual(
+            python_step["uses"],
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        )
+        self.assertEqual(python_step["with"]["python-version"], "3.11.10")
+        self.assertEqual(python_step["if"], "github.event_name != 'pull_request'")
+        self.assertEqual(dependency_step["if"], "github.event_name != 'pull_request'")
+        self.assertIn("--require-hashes", dependency_step["run"])
+        self.assertIn("--no-deps -r requirements.txt", dependency_step["run"])
         self.assertEqual(drift_step["if"], "github.event_name != 'pull_request'")
         self.assertIn("/main/formalization.yaml", drift_step["run"])
         self.assertIn("/main/comparator.json", drift_step["run"])
         self.assertIn("load_comparator_config", drift_step["run"])
         self.assertIn("cmp tests/fixtures/palomar-template-formalization.yaml", drift_step["run"])
+        self.assertIn("cmp tests/fixtures/palomar-template-comparator.json", drift_step["run"])
+
+        scope_steps = self.workflow["jobs"]["scope"]["steps"]
+        self.assertLess(scope_steps.index(python_step), scope_steps.index(drift_step))
+        self.assertLess(scope_steps.index(dependency_step), scope_steps.index(drift_step))
 
         fixture_step = next(
             step
@@ -275,6 +293,28 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         )
         self.assertIn("PalomarRegistry/PalomarTemplate.git", fixture_step["run"])
         self.assertIn(template_commit, fixture_step["run"])
+        self.assertIn(
+            'fixture/lean-toolchain)" = "leanprover/lean4:v4.32.0"',
+            fixture_step["run"],
+        )
+
+        fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-comparator.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from scripts.verify_submission import load_comparator_config; "
+                    f"load_comparator_config(Path({str(fixture)!r}))"
+                ),
+            ],
+            cwd=REPOSITORY_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_required_gate_passes_only_the_two_valid_outcomes(self):
         prose = self.run_gate("success", "false", "skipped")

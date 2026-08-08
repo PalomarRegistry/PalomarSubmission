@@ -750,6 +750,27 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             protected_comparator_config(path, protected)
             self.assertEqual(protected.read_bytes(), path.read_bytes())
 
+            protected.unlink()
+            valid_json = json.dumps(config)
+            for key, value in (
+                ("enable_nanoda", "false"),
+                ("permitted_axioms", '["sorryAx"]'),
+            ):
+                with self.subTest(duplicate=key):
+                    path.write_text(valid_json[:-1] + f', "{key}": {value}' + "}")
+                    with self.assertRaisesRegex(
+                        VerificationError, f"duplicate keys: {key}"
+                    ):
+                        protected_comparator_config(path, protected)
+                    self.assertFalse(protected.exists())
+
+            path.write_text("{")
+            with self.assertRaisesRegex(VerificationError, "valid UTF-8 JSON"):
+                load_comparator_config(path)
+            path.write_bytes(b"\xff")
+            with self.assertRaisesRegex(VerificationError, "valid UTF-8 JSON"):
+                load_comparator_config(path)
+
             for value in (False, None, 0, 1, "true", [], {}):
                 with self.subTest(enable_nanoda=value):
                     config["enable_nanoda"] = value
@@ -773,6 +794,13 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 load_comparator_config(path)
 
             config["enable_nanoda"] = True
+            config["challenge_module"] = "Audit.PeriodicGeneral.Challenge"
+            config["solution_module"] = "Audit.PeriodicGeneral.Solution"
+            path.write_text(json.dumps(config))
+            loaded = load_comparator_config(path)
+            self.assertEqual(loaded["challenge_module"], config["challenge_module"])
+            self.assertEqual(loaded["solution_module"], config["solution_module"])
+
             config["solution_module"] = config["challenge_module"]
             path.write_text(json.dumps(config))
             with self.assertRaisesRegex(VerificationError, "must be distinct"):
@@ -784,27 +812,30 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "toolchains.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 2,
-                        "minimum": "v4.28.0",
-                        "tooling": {"lean4export": "not-consumed"},
-                    }
-                )
+            invalid_shapes = (
+                {"schema_version": 2, "minimum": "v4.28.0", "unknown": True},
+                {"minimum": "v4.28.0"},
+                {"schema_version": 2},
             )
-            with mock.patch.object(verifier, "ROOT", root):
-                with self.assertRaisesRegex(
-                    VerificationError, "exactly schema_version and minimum"
-                ):
-                    verifier.supported_toolchain("leanprover/lean4:v4.32.0")
+            for settings in invalid_shapes:
+                with self.subTest(settings=settings):
+                    (root / "toolchains.json").write_text(json.dumps(settings))
+                    with mock.patch.object(verifier, "ROOT", root):
+                        with self.assertRaisesRegex(
+                            VerificationError, "exactly schema_version and minimum"
+                        ):
+                            verifier.supported_toolchain("leanprover/lean4:v4.32.0")
 
-            (root / "toolchains.json").write_text(
-                json.dumps({"schema_version": 2.0, "minimum": "v4.28.0"})
-            )
-            with mock.patch.object(verifier, "ROOT", root):
-                with self.assertRaisesRegex(VerificationError, "schema version 2"):
-                    verifier.supported_toolchain("leanprover/lean4:v4.32.0")
+            for schema_version in (True, 2.0, 3):
+                with self.subTest(schema_version=schema_version):
+                    (root / "toolchains.json").write_text(
+                        json.dumps(
+                            {"schema_version": schema_version, "minimum": "v4.28.0"}
+                        )
+                    )
+                    with mock.patch.object(verifier, "ROOT", root):
+                        with self.assertRaisesRegex(VerificationError, "schema version 2"):
+                            verifier.supported_toolchain("leanprover/lean4:v4.32.0")
 
     def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
         with tempfile.TemporaryDirectory() as directory:

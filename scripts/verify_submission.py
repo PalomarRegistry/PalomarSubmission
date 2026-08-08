@@ -1224,12 +1224,34 @@ def direct_imports(text: str) -> list[str]:
     return sorted(set(imports))
 
 
+def unique_comparator_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object without accepting last-key-wins ambiguity."""
+    result: dict[str, Any] = {}
+    duplicates: set[str] = set()
+    for key, value in pairs:
+        if key in result:
+            duplicates.add(key)
+        result[key] = value
+    if duplicates:
+        raise VerificationError(
+            f"Comparator configuration has duplicate keys: {', '.join(sorted(duplicates))}"
+        )
+    return result
+
+
 def load_comparator_config(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise VerificationError("Comparator configuration is not a regular file")
     if path.stat().st_size > MAX_CONFIGURATION_BYTES:
         raise VerificationError("Comparator configuration exceeds the 1 MiB hard cap")
-    config = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        config = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=unique_comparator_object
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(
+            "Comparator configuration must contain valid UTF-8 JSON"
+        ) from error
     if not isinstance(config, dict):
         raise VerificationError("Comparator configuration must contain one JSON object")
     required = {
@@ -1271,6 +1293,9 @@ def protected_comparator_config(source: Path, destination: Path) -> Path:
     load_comparator_config(source)
     source_sha256 = sha256(source)
     shutil.copyfile(source, destination)
+    # The digest establishes an exact byte copy. Revalidating the destination
+    # closes the source-mutation/TOCTOU window: the bytes Comparator will read,
+    # rather than only an earlier view of the submitted path, must be valid.
     if sha256(destination) != source_sha256:
         raise VerificationError("protected Comparator configuration does not match its source")
     load_comparator_config(destination)

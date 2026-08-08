@@ -109,6 +109,13 @@ must reproduce that result on the supported GitHub-hosted runner before merging
 any execution-affecting change. The explicit prose-only gate is sufficient for
 the documentation paths described above.
 
+That current Template fixture deliberately replaces an obsolete fixture whose
+Comparator configuration disabled NanoDa. It does not retain the old fixture's
+real multi-dependency and Tau Ceti closure coverage. A current fail-closed
+fixture with those properties remains a compatibility follow-up; restoring the
+obsolete fixture or rewriting its submitted configuration is not an acceptable
+substitute.
+
 ## Component review
 
 ### Comparator
