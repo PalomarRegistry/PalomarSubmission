@@ -85,9 +85,10 @@ The maintained test surfaces are:
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
   checked multi-dependency fixture in `tests/fixtures/cold-tauceti`, followed by
   the real pinned Comparator, toolchain-matched `lean4export`, and pinned NanoDa
-  under the nested sandbox. The separate ordinary and scheduled checks keep the
-  fixture copies of the current `PalomarTemplate` authoring contracts aligned
-  with Template commit `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`. The cold job
+  under the nested sandbox. The ordinary pull-request check byte-compares the
+  checked `formalization.yaml` and `comparator.json` contracts with Template
+  commit `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks
+  reconcile those two files with Template `main`. The cold job
   uses the hosted tier's 330-minute capacity measured from the start of its
   350-minute job, so setup time and candidate execution consume one allowance.
   The verifier's trusted default supports twelve hours on a suitably configured
@@ -103,7 +104,8 @@ The maintained test surfaces are:
   succeeds and either the selected cold build succeeds or the change is
   explicitly confined to that exact prose set.
 
-The cold fixture uses Lean `v4.31.0-rc2`, exact Comparator boolean
+The cold fixture uses Lean `v4.31.0-rc2`, the toolchain fixed by the accepted
+Tau Ceti revision, exact Comparator boolean
 `"enable_nanoda": true`, and ten pinned project packages. Its canonical
 Challenge imports only Mathlib. Its candidate Solution imports the Tau Ceti
 root at accepted revision `221bb56a017bb794421eac4fa543d7a5e85add75`, so the
@@ -112,11 +114,17 @@ closure and compiles Tau Ceti's broad module graph. The same run exercises
 canonical Challenge compilation, source provenance audit, the complete
 confinement probe set, candidate Challenge/Solution builds, and comparison
 through both kernels. CI materializes the checked files as a clean temporary Git
-checkout because the production source-boundary checks require real repository
-metadata; it does not rewrite the submitted configuration. The pull-request
-workflow must reproduce that result on the supported GitHub-hosted runner before
-merging any execution-affecting change. The explicit prose-only gate is
-sufficient for the documentation paths described above.
+checkout to mirror the production checkout boundary; it does not rewrite the
+submitted configuration.
+
+This fixture does not cold-build Template's current `v4.32.0` project,
+`lakefile.toml`, or `lake-manifest.json`. The Template checks above establish
+the current authoring metadata and Comparator bytes, not current-toolchain
+execution compatibility. Runtime coverage here is instead exact for the older
+toolchain and dependency graph required by the accepted Tau Ceti snapshot. The
+pull-request workflow must reproduce that result on the supported GitHub-hosted
+runner before merging any execution-affecting change. The explicit prose-only
+gate is sufficient for the documentation paths described above.
 
 ## Component review
 

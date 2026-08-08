@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the production statement boundary on a clean Git fixture."""
+"""Exercise the production boundary on a fixture shaped like a Git checkout."""
 
 from __future__ import annotations
 

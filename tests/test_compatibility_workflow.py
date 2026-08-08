@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -296,10 +297,6 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         self.assertIn("git -C fixture init --quiet", fixture_step["run"])
         self.assertIn("git -C fixture add --all", fixture_step["run"])
         self.assertIn("commit --quiet", fixture_step["run"])
-        self.assertIn(
-            'fixture/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"',
-            fixture_step["run"],
-        )
 
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-comparator.json"
         result = subprocess.run(
@@ -321,14 +318,27 @@ class ColdBuildWorkflowTests(unittest.TestCase):
 
     def test_checked_cold_fixture_reaches_the_exact_tauceti_closure(self):
         fixture = REPOSITORY_ROOT / "tests/fixtures/cold-tauceti"
+        toolchain = (fixture / "lean-toolchain").read_text().strip()
         for path in sorted(fixture.iterdir()):
             with self.subTest(classified_path=path.name):
                 relative = path.relative_to(REPOSITORY_ROOT).as_posix()
                 self.assertEqual(self.run_scope((relative,)), "cold_build=true")
         self.assertEqual(
-            (fixture / "lean-toolchain").read_text().strip(),
+            toolchain,
             "leanprover/lean4:v4.31.0-rc2",
         )
+
+        allowlist = json.loads(
+            (REPOSITORY_ROOT / "allowed-challenge-repositories.json").read_text()
+        )
+        tauceti_policy = next(
+            root
+            for root in allowlist["roots"]
+            if root["repository"] == "TauCetiProject/TauCeti"
+        )
+        self.assertEqual(tauceti_policy["repository_aliases"], ["FormalFrontier/TauCeti"])
+        self.assertEqual(len(tauceti_policy["accepted_revisions"]), 1)
+        tauceti_revision = tauceti_policy["accepted_revisions"][0]
 
         config = json.loads((fixture / "comparator.json").read_text())
         self.assertIs(config["enable_nanoda"], True)
@@ -363,7 +373,7 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             {
-                "TauCeti": "221bb56a017bb794421eac4fa543d7a5e85add75",
+                "TauCeti": tauceti_revision,
                 "mathlib": "0be66d77ba290828a5260d883ace636f56bce89a",
                 "plausible": "744117af710b1c0400cd297c9ce91f8d0ad3a347",
                 "LeanSearchClient": "c5d5b8fe6e5158def25cd28eb94e4141ad97c843",
@@ -380,11 +390,16 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(tauceti["url"], "https://github.com/FormalFrontier/TauCeti")
         self.assertEqual(tauceti["inherited"], False)
-        lakefile = (fixture / "lakefile.toml").read_text()
-        self.assertIn('name = "TauCeti"', lakefile)
-        self.assertIn('git = "https://github.com/FormalFrontier/TauCeti"', lakefile)
-        self.assertIn(
-            'rev = "221bb56a017bb794421eac4fa543d7a5e85add75"', lakefile
+        lakefile = tomllib.loads((fixture / "lakefile.toml").read_text())
+        self.assertEqual(
+            lakefile["require"],
+            [
+                {
+                    "name": "TauCeti",
+                    "git": "https://github.com/FormalFrontier/TauCeti",
+                    "rev": tauceti_revision,
+                }
+            ],
         )
         self.assertNotIn("import TauCeti", (fixture / "Challenge.lean").read_text())
         self.assertIn("import Mathlib", (fixture / "Challenge.lean").read_text())
@@ -404,16 +419,22 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             for step in cold_steps
             if step.get("name") == "Exercise cold trusted and candidate builds"
         )
+        fixture_step = next(
+            step
+            for step in cold_steps
+            if step.get("name") == "Prepare the checked multi-dependency fixture"
+        )
+        self.assertIn(f'fixture/lean-toolchain)" = "{toolchain}"', fixture_step["run"])
         self.assertIn(
-            "toolchain install leanprover/lean4:v4.31.0-rc2", install_step["run"]
+            f"toolchain install {toolchain}", install_step["run"]
         )
         self.assertIn(
-            'supported_toolchain("leanprover/lean4:v4.31.0-rc2")',
+            f'supported_toolchain("{toolchain}")',
             build_step["run"],
         )
         self.assertEqual(
             exercise_step["env"]["ELAN_TOOLCHAIN"],
-            "leanprover/lean4:v4.31.0-rc2",
+            toolchain,
         )
         self.assertIn("--source fixture", exercise_step["run"])
 
