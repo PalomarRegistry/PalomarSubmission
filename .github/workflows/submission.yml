@@ -30,11 +30,27 @@ jobs:
     timeout-minutes: 350
     permissions:
       contents: read
-    # Verification runs for up to six hours, and anyone able to prove push
-    # access to a public repository can cause one, so runs are serialised
-    # rather than allowed to exhaust the organisation's runners.
+    # One group per submission, so two admitted submissions may verify at the
+    # same time. The single literal group that used to be here was a cap, but a
+    # cap of one, and it was standing in for a bound that belongs to the
+    # submission server: that server decides what is admitted and how much may
+    # be in flight at once, so how many runs this workflow can be asked for is
+    # settled before any run starts. Sharing one group added nothing to that
+    # bound and took a great deal away, because GitHub holds at most one run of
+    # a group pending and cancels the one already waiting when another arrives.
+    # With a run able to hold the group for the whole 350 minutes below, a few
+    # deliberately slow submissions meant days in which the next submitter
+    # either waited or had their run cancelled by the one behind it.
+    #
+    # `request_id` is minted by the submission server rather than chosen by the
+    # submitter, and dispatching this workflow at all needs write access here,
+    # so the group name is not something an outsider picks. What per-submission
+    # groups spend is the organisation's concurrent-job allowance, which is the
+    # resource worth spending: this repository is public and runs on standard
+    # runners, so the minutes themselves are free. `render-challenge.yml` has
+    # always queued this way.
     concurrency:
-      group: palomar-verify
+      group: palomar-verify-${{ inputs.request_id }}
       cancel-in-progress: false
     steps:
       - name: Record verification deadline origin

@@ -154,7 +154,11 @@ remains append-only for existing versioned record paths.
 - Verification is dispatched automatically by the submission server, so compute
   abuse is bounded there rather than here: a submitter must prove push access to
   the repository being submitted, must wait out an interval between starts, and
-  the `palomar-verify` concurrency group caps how much runs at once.
+  the server admits only a bounded number of submissions at once. This workflow
+  no longer adds a bound of its own. Its concurrency group is per submission,
+  because the single literal group it used to share serialised every submission
+  ever made and cancelled the run waiting behind the one in progress, which cost
+  availability without tightening the bound the server already applies.
 - Database pull requests run both the proposed validator and the validator from
   the base revision. Runtime/CSP pins are append-only compatibility data, while
   the existing base-owned append-only checker continues to judge record history.

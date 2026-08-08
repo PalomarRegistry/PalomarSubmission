@@ -1591,15 +1591,42 @@ class DispatchWorkflowTests(unittest.TestCase):
         path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
         return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
+    def render_workflow(self):
+        path = REPOSITORY_ROOT / ".github" / "workflows" / "render-challenge.yml"
+        return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+
     def test_verification_is_reachable_only_by_dispatch(self):
         self.assertEqual(list(self.workflow()["on"]), ["workflow_dispatch"])
         self.assertEqual(list(self.workflow()["jobs"]), ["verify"])
 
-    def test_dispatched_runs_are_serialised(self):
-        """Anyone who can prove push access can cause a six-hour run."""
+    def test_a_slow_run_delays_only_its_own_submission(self):
+        """A literal group here serialises every submission ever made.
+
+        The cap on how much verification may be running belongs to the
+        submission server, which decides what is admitted; a shared group adds
+        nothing to it, and costs the submissions behind a slow run their place
+        in the queue, since GitHub keeps only one run of a group pending.
+        """
         concurrency = self.workflow()["jobs"]["verify"]["concurrency"]
-        self.assertEqual(concurrency["group"], "palomar-verify")
+        self.assertEqual(concurrency["group"], "palomar-verify-${{ inputs.request_id }}")
         self.assertEqual(concurrency["cancel-in-progress"], "false")
+
+    def test_both_dispatched_workflows_queue_per_request(self):
+        """Rendering has always queued this way; verification was the exception.
+
+        The two workflows are dispatched by the same server for the same
+        submission, so a rule that holds for one and not the other is a
+        difference nobody decided on.
+        """
+        for name, group in (
+            ("submission.yml", self.workflow()["jobs"]["verify"]["concurrency"]["group"]),
+            ("render-challenge.yml", self.render_workflow()["concurrency"]["group"]),
+        ):
+            with self.subTest(name):
+                self.assertTrue(
+                    group.endswith("-${{ inputs.request_id }}"),
+                    f"{name} shares one concurrency group across submissions: {group}",
+                )
 
     def test_the_run_and_artifact_carry_the_submission_id(self):
         path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
