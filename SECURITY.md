@@ -63,6 +63,13 @@ If the file and this paragraph disagree, the file is right.
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier
   does not run `lake update` or dependency post-update hooks.
+- Checkout containment is derived from the verifier-owned clone path and Git
+  metadata, never from a marker copied out of submitted source. The reserved
+  `.palomar-checkout-root` name is rejected at any depth before verification or
+  rendering. Renderer workspace writes remove hostile final symlinks and
+  directories before installing the accepted fixed-name files, and their
+  writable directories are checked against the explicitly supplied workspace
+  boundary rather than a discoverable ancestor checkout.
 - Every submitted, dependency, and separately recorded substantive source must
   be a public GitHub repository pinned to a full commit so registration can
   preserve the complete accepted source graph in native GitHub forks. Git LFS

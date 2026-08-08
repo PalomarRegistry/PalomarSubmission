@@ -42,8 +42,10 @@ from scripts.verify_submission import (
     project_tree_url,
     protected_lean_path,
     reject_committed_build_artifacts,
+    reject_reserved_checkout_markers,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
+    repository_checkout_root,
     repository_license_file,
     require_protected_paths,
     resolve_module_source,
@@ -52,6 +54,7 @@ from scripts.verify_submission import (
     systemd_command,
     trusted_package_url_map,
     validate_preservable_git_checkout,
+    validate_writable_directories,
     verify_official_revision,
 )
 
@@ -59,6 +62,95 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_verifier_intake_rejects_a_reserved_checkout_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = root / "event.json"
+            output = root / "report.json"
+            event.write_text(
+                json.dumps(
+                    {
+                        "inputs": {
+                            "repository": "example/project",
+                            "commit": "1" * 40,
+                            "request_id": "abc123def456",
+                            "options": json.dumps(
+                                {
+                                    "authorization_relationship": (
+                                        "I am a responsible author or maintainer"
+                                    ),
+                                    "comparator_config_path": "comparator.json",
+                                }
+                            ),
+                        }
+                    }
+                )
+            )
+            args = Namespace(event=event, output=output, work_dir=root / "work")
+
+            def hostile_clone(_url, _commit, destination):
+                destination.mkdir(parents=True)
+                (destination / ".palomar-checkout-root").mkdir()
+
+            with (
+                mock.patch("scripts.verify_submission.clone_commit", side_effect=hostile_clone),
+                mock.patch("scripts.verify_submission.validate_preservable_git_checkout"),
+            ):
+                self.assertEqual(verifier.prepare(args), 0)
+
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "error")
+            self.assertRegex(report["errors"][0], "reserved path.*palomar-checkout-root")
+
+    def test_reserved_marker_scan_fails_closed_on_walk_errors(self):
+        def inaccessible_walk(_checkout, *, followlinks, onerror):
+            self.assertFalse(followlinks)
+            onerror(PermissionError("denied"))
+            return ()
+
+        with mock.patch("scripts.verify_submission.os.walk", side_effect=inaccessible_walk):
+            with self.assertRaisesRegex(VerificationError, "could not inspect"):
+                reject_reserved_checkout_markers(Path("/submitted"))
+
+    def test_submitted_markers_do_not_define_a_checkout_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            (root / ".git").mkdir()
+            (root / ".palomar-checkout-root").write_bytes(b"")
+            (project / ".palomar-checkout-root").write_bytes(b"")
+
+            self.assertEqual(repository_checkout_root(project), root.resolve())
+
+    def test_explicit_writable_boundary_does_not_widen_to_an_ancestor_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ancestor = Path(directory)
+            (ancestor / ".git").mkdir()
+            checkout = ancestor / "workspace"
+            source = checkout / "project"
+            source.mkdir(parents=True)
+            (source / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+            outside = ancestor / "outside"
+            outside.mkdir()
+
+            with self.assertRaisesRegex(VerificationError, "escapes the source tree"):
+                validate_writable_directories(source, [outside], boundary=checkout)
+
+            with mock.patch(
+                "scripts.verify_submission.validate_writable_directories",
+                wraps=validate_writable_directories,
+            ) as validate:
+                writable = materialize_packages(
+                    source, checkout=checkout, base_env={"PATH": "/usr/bin"}
+                )
+
+            self.assertEqual(validate.call_args.kwargs["boundary"], checkout.resolve())
+            self.assertTrue(writable)
+            self.assertTrue(all(path.is_relative_to(checkout) for path in writable))
+
     def test_non_github_git_dependency_is_not_preservable(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
@@ -266,6 +358,7 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_expired_job_deadline_is_reported_and_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            (root / "work" / "source").mkdir(parents=True)
             report_path = root / "report.json"
             report_path.write_text(json.dumps({"status": "pending", "errors": []}))
             tools = []

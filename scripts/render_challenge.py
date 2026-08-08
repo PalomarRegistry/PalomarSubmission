@@ -23,8 +23,6 @@ if __package__ in {None, ""}:
 
 from scripts.verify_submission import (  # noqa: E402
     GITHUB_RE,
-    resolve_release_commit,
-    supported_toolchain,
     MAX_SOURCE_BYTES,
     SHA_RE,
     VerificationError,
@@ -37,11 +35,14 @@ from scripts.verify_submission import (  # noqa: E402
     materialize_packages,
     normalized_repository_path,
     now,
+    reject_reserved_checkout_markers,
     require_protected_paths,
+    resolve_release_commit,
     resolve_repository_path,
     run,
     sandboxed_run,
     sha256,
+    supported_toolchain,
     systemd_command,
     tool_snapshot,
     tree_size,
@@ -479,6 +480,7 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("challenge_sha256 must be 64 lowercase hexadecimal characters")
         source = work / "source"
         clone_commit(repository_url, commit, source)
+        reject_reserved_checkout_markers(source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         supplied_paths = {
@@ -735,6 +737,16 @@ def trusted_lakefile(source_manifest: dict[str, Any], verso_commit: str) -> str:
     return "\n".join(lines)
 
 
+def replace_workspace_file(path: Path, content: bytes) -> None:
+    """Replace one hostile workspace path without following its final symlink."""
+    if path.is_symlink() or path.exists():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    path.write_bytes(content)
+
+
 def prepare_workspace(
     source: Path,
     workspace: Path,
@@ -744,6 +756,7 @@ def prepare_workspace(
 ) -> Path:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
+    reject_reserved_checkout_markers(source)
     project_value = str(source_record.get("project_path") or "")
     project_relative = (
         normalized_repository_path(project_value, "render project_path")
@@ -798,7 +811,6 @@ def prepare_workspace(
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", ".lake"),
     )
-    (workspace / ".palomar-checkout-root").write_bytes(b"")
     workspace_project = workspace.joinpath(*project_relative.parts) if project_relative else workspace
     for lakefile_name in ("lakefile.lean", "lakefile.toml"):
         submitted_lakefile = workspace_project / lakefile_name
@@ -807,13 +819,14 @@ def prepare_workspace(
                 shutil.rmtree(submitted_lakefile)
             else:
                 submitted_lakefile.unlink()
-    (workspace_project / "lakefile.toml").write_text(
-        trusted_lakefile(source_manifest, verso_commit), encoding="utf-8"
+    replace_workspace_file(
+        workspace_project / "lakefile.toml",
+        trusted_lakefile(source_manifest, verso_commit).encode("utf-8"),
     )
     write_json(workspace_project / "lake-manifest.json", merged_manifest)
-    (workspace_project / "Challenge.lean").write_bytes(accepted_challenge)
-    (workspace_project / "Solution.lean").write_bytes(accepted_solution)
-    (workspace_project / "comparator.json").write_bytes(accepted_comparator)
+    replace_workspace_file(workspace_project / "Challenge.lean", accepted_challenge)
+    replace_workspace_file(workspace_project / "Solution.lean", accepted_solution)
+    replace_workspace_file(workspace_project / "comparator.json", accepted_comparator)
     return workspace_project.resolve()
 
 

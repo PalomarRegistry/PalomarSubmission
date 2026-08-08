@@ -17,6 +17,7 @@ from scripts.render_challenge import (
     merge_renderer_manifest,
     parsed_challenge_metadata,
     prepare,
+    prepare_workspace,
     sanitize_bundle,
     static_html_sanitize,
     toolchain_verso_commit,
@@ -25,6 +26,132 @@ from scripts.render_challenge import (
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_prepare_rejects_reserved_checkout_markers_at_any_depth(self):
+        cases = (
+            ("root file", Path(".palomar-checkout-root"), "file"),
+            ("nested directory", Path("nested/.palomar-checkout-root"), "directory"),
+            ("root file symlink", Path(".palomar-checkout-root"), "file-symlink"),
+            (
+                "nested directory symlink",
+                Path("nested/.palomar-checkout-root"),
+                "directory-symlink",
+            ),
+        )
+        for label, relative, kind in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "report.json"
+                args = argparse.Namespace(
+                    repository="example/project",
+                    commit="1" * 40,
+                    challenge_sha256="2" * 64,
+                    project_path="",
+                    challenge_path="",
+                    solution_path="",
+                    comparator_config_path="",
+                    lakefile_path="",
+                    lean_toolchain_path="",
+                    work_dir=str(root / "work"),
+                    output=str(output),
+                )
+
+                def hostile_clone(
+                    _url,
+                    _commit,
+                    destination,
+                    marker_relative=relative,
+                    marker_kind=kind,
+                ):
+                    destination.mkdir(parents=True)
+                    marker = destination / marker_relative
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    if marker_kind == "file":
+                        marker.write_bytes(b"")
+                    elif marker_kind == "directory":
+                        marker.mkdir()
+                    elif marker_kind == "file-symlink":
+                        target = destination / "marker-target"
+                        target.write_bytes(b"")
+                        marker.symlink_to(target)
+                    else:
+                        target = destination / "marker-target"
+                        target.mkdir()
+                        marker.symlink_to(target, target_is_directory=True)
+
+                with mock.patch("scripts.render_challenge.clone_commit", side_effect=hostile_clone):
+                    self.assertEqual(prepare(args), 0)
+
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["status"], "error")
+                self.assertRegex(report["errors"][0], "reserved path.*palomar-checkout-root")
+
+    def test_workspace_replaces_hostile_fixed_paths_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            project = source / "project"
+            accepted = project / "accepted"
+            accepted.mkdir(parents=True)
+            challenge = accepted / "Task.lean"
+            solution = accepted / "Answer.lean"
+            comparator = accepted / "settings.json"
+            challenge.write_bytes(b"accepted challenge")
+            solution.write_bytes(b"accepted solution")
+            comparator.write_bytes(b'{"accepted": true}')
+            (source / "lean-toolchain").write_text("leanprover/lean4:v4.31.0-rc2\n")
+            (project / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+
+            external = root / "external"
+            external.write_bytes(b"do not replace")
+            (project / "Challenge.lean").symlink_to(external)
+            external_comparator = root / "external-comparator"
+            external_comparator.write_bytes(b"also do not replace")
+            (project / "comparator.json").symlink_to(external_comparator)
+            hostile_solution = project / "Solution.lean"
+            hostile_solution.mkdir()
+            (hostile_solution / "payload").write_bytes(b"hostile directory")
+
+            work = root / "work"
+            work.mkdir()
+            workspace = root / "workspace"
+            source_record = {
+                "project_path": "project",
+                "challenge_path": "project/accepted/Task.lean",
+                "solution_path": "project/accepted/Answer.lean",
+                "comparator_config_path": "project/accepted/settings.json",
+                "lean_toolchain_path": "lean-toolchain",
+            }
+
+            def clone_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.31.0-rc2\n"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []})
+                )
+
+            with mock.patch("scripts.render_challenge.clone_commit", side_effect=clone_verso):
+                workspace_project = prepare_workspace(
+                    source, workspace, "3" * 40, work, source_record
+                )
+
+            self.assertEqual(external.read_bytes(), b"do not replace")
+            self.assertEqual(external_comparator.read_bytes(), b"also do not replace")
+            self.assertFalse((workspace_project / "Challenge.lean").is_symlink())
+            self.assertEqual(
+                (workspace_project / "Challenge.lean").read_bytes(), b"accepted challenge"
+            )
+            self.assertTrue((workspace_project / "Solution.lean").is_file())
+            self.assertEqual(
+                (workspace_project / "Solution.lean").read_bytes(), b"accepted solution"
+            )
+            self.assertEqual(
+                (workspace_project / "comparator.json").read_bytes(), b'{"accepted": true}'
+            )
+
     def test_prepare_binds_a_nested_project_and_configured_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
