@@ -2,13 +2,23 @@
 
 Date: 2026-07-31
 
-Current-infrastructure update: 2026-08-07. The security review remains the
-record of the launch-hardening work, but the database publication boundary has
-since changed: `PalomarDatabase` is private, its active-only projection is
-published to private R2, and `data.palomar-registry.org` is a read-only Worker.
-The private repository is on GitHub Free and therefore no longer has enforced
+Current-infrastructure update: 2026-08-08. The security review remains the
+record of the launch-hardening work, and several things it describes have since
+been replaced. Intake is no longer a GitHub issue: submissions are dispatched
+here by the submission server, and the reporting job that bound a result to an
+issue is gone along with the write token it held. The database publication
+boundary changed too: `PalomarDatabase` is private, its active-only projection
+is published to private R2, and `data.palomar-registry.org` is a read-only
+Worker serving one document per question, with no whole-registry index. Review
+scores were moved out of the record into a private `scores/` file, which is why
+there is one record schema again rather than a canonical and a public one. The
+private repository is on GitHub Free and therefore no longer has enforced
 branch protection; its append-only controls are CI plus maintainer procedure
 until the organization upgrades to GitHub Team.
+
+Where the sections below describe the issue-based intake or the reporting job,
+read them as a record of what was reviewed in July, not as a description of what
+runs now.
 
 This record covers the launch hardening tracked by
 [`PalomarSubmission#5`](https://github.com/PalomarRegistry/PalomarSubmission/issues/5).
@@ -18,12 +28,13 @@ from the tracker are the authoritative diffs.
 
 ## Submission boundary
 
-The final verifier treats the issue, the submission checkout, every dependency,
+The final verifier treats the request, the submission checkout, every dependency,
 Lake configuration, generated process, build diagnostic, and committed build
 artifact as hostile. Its security-relevant sequence is:
 
-1. Parse a unique set of issue-form fields and fetch the submitted full commit
-   without credentials, hooks, local Git transport, or ambient Git config.
+1. Parse the dispatched request fields, against an exact allowlist of optional
+   keys, and fetch the submitted full commit without credentials, hooks, local
+   Git transport, or ambient Git config.
 2. Delete submitted Lake state and independently materialize every full manifest
    revision without running `lake update` or post-update hooks.
 3. Verify canonical Mathlib/Tau Ceti ancestry (or an exact, reviewed legacy
@@ -42,8 +53,10 @@ artifact as hostile. Its security-relevant sequence is:
    paths in Comparator's `LEAN_PATH`; candidate output cannot replace any of
    them. Require both Lean's kernel and the pinned independent NanoDa kernel to
    accept the exported proof.
-7. Write the bounded report after sandboxed execution. A separate reporting job
-   binds it to the triggering issue and renders hostile diagnostics inertly.
+7. Write the bounded report after sandboxed execution, outside every
+   sandbox-writable directory, and upload it as a run artifact. There is no
+   second job: the submission server collects the artifact, so nothing here
+   renders hostile diagnostics while holding a write token.
 
 The outer filesystem policy has no `--ro /` or broad home/workspace rule. Live
 tests establish permitted source reads and build writes, reject sibling reads
@@ -60,8 +73,8 @@ The maintained test surfaces are:
   protected paths, environment path bounds, and systemd policy construction;
 - `tests/test_sandbox_integration.py`: real Landrun/systemd read, write, process,
   and network probes plus direct canonical Challenge compilation;
-- `tests/test_report_issue.py`: trusted issue binding, bot-owned marker selection,
-  and Markdown-inert hostile diagnostics;
+- `tests/test_render_challenge.py` and `tests/test_landrun_passthrough.py`:
+  the pinned Verso rendering path and the sandbox flags it is given;
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
   accepted `erdos-unit-distance-comparator` fixture at commit
   `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
@@ -96,22 +109,24 @@ the intended statement.
 
 ### Reviewer and policy
 
-PalomarReviewer accepts a mechanical report only from the GitHub Actions bot,
-frames each submission/model evidence item as hostile JSON with a digest, and
-repeats the evidence boundary after the hostile material. Public model prose is
-Markdown-inert. `--apply` posts only a previously inspected dry-run artifact and
-revalidates the issue, source, report, schema, and pinned policy revision; it
-does not rerun a model at apply time. PalomarPolicy prompts explicitly reject
-instructions embedded in formalization metadata, Lean/repository text, issue
-context, literature evidence, or prior model output.
+PalomarReviewer accepts a mechanical report only from the run the submission
+server pinned, frames each submission/model evidence item as hostile JSON with a
+digest, and repeats the evidence boundary after the hostile material. Public
+model prose is Markdown-inert. `--apply` delivers only a previously stored
+review and revalidates the submission, source, report, schema, and pinned policy
+revision; it does not rerun a model at apply time. PalomarPolicy prompts
+explicitly reject instructions embedded in formalization metadata,
+Lean/repository text, submission context, literature evidence, or prior model
+output.
 
 ### Database and website
 
 PalomarDatabase enforces effective URI/date-time formats, canonical GitHub
-evidence URLs, cross-field source/issue/trust consistency, safe relative paths,
-and immutable `(id, version)` records. Its complete ledger and takedown state
-remain private; a validated active-only release is published atomically to R2
-and exposed through a Worker that allowlists read-only public paths. PalomarWeb
+evidence URLs, cross-field source/submission/trust consistency, safe relative
+paths, and immutable `(id, version)` records. Its complete ledger and takedown
+state remain private; a validated active-only projection is published to R2 and
+exposed through a Worker that allowlists read-only public paths, with records at
+keys that never change and only the aggregates under a release. PalomarWeb
 pins that production registry and render origin, restricts development
 overrides to loopback, validates the supported schema/status/verdict and
 selected identity, rejects duplicate or escaping summaries, centralizes safe
@@ -133,8 +148,10 @@ remains append-only for existing versioned record paths.
 
 ## Accepted residual risks and deferred work
 
-- Automatic issue-triggered verification remains enabled. Compute abuse and
-  rate limiting are tracked separately in issue #3.
+- Verification is dispatched automatically by the submission server, so compute
+  abuse is bounded there rather than here: a submitter must prove push access to
+  the repository being submitted, must wait out an interval between starts, and
+  the `palomar-verify` concurrency group caps how much runs at once.
 - Database pull requests run both the proposed validator and the validator from
   the base revision. Runtime/CSP pins are append-only compatibility data, while
   the existing base-owned append-only checker continues to judge record history.
