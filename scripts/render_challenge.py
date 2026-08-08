@@ -21,6 +21,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
+from scripts.render_report import (  # noqa: E402
+    AcceptedRenderPaths,
+    PreparedRenderReport,
+    RenderReportError,
+    RenderSource,
+    intake_report,
+    parse_prepared_report,
+)
 from scripts.verify_submission import (  # noqa: E402
     GITHUB_RE,
     MAX_SOURCE_BYTES,
@@ -462,13 +470,7 @@ def normalized_repository(value: str) -> tuple[str, str]:
 def prepare(args: argparse.Namespace) -> int:
     work = Path(args.work_dir).resolve()
     output = Path(args.output).resolve()
-    report: dict[str, Any] = {
-        "schema_version": 1,
-        "status": "error",
-        "stage": "intake",
-        "errors": [],
-        "prepared_at": now(),
-    }
+    report = intake_report(now())
     try:
         repository, repository_url = normalized_repository(args.repository)
         commit = args.commit.strip().lower()
@@ -477,33 +479,21 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("commit must be 40 lowercase hexadecimal characters")
         if not re.fullmatch(r"[0-9a-f]{64}", challenge_sha256):
             raise VerificationError("challenge_sha256 must be 64 lowercase hexadecimal characters")
+        supplied_paths = AcceptedRenderPaths(
+            project_path=args.project_path.strip(),
+            challenge_path=args.challenge_path.strip(),
+            solution_path=args.solution_path.strip(),
+            comparator_config_path=args.comparator_config_path.strip(),
+            lakefile_path=args.lakefile_path.strip(),
+            lean_toolchain_path=args.lean_toolchain_path.strip(),
+        )
         source = work / "source"
         clone_commit(repository_url, commit, source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
-        supplied_paths = {
-            "project_path": getattr(args, "project_path", "").strip(),
-            "challenge_path": getattr(args, "challenge_path", "").strip(),
-            "solution_path": getattr(args, "solution_path", "").strip(),
-            "comparator_config_path": getattr(args, "comparator_config_path", "").strip(),
-            "lakefile_path": getattr(args, "lakefile_path", "").strip(),
-            "lean_toolchain_path": getattr(args, "lean_toolchain_path", "").strip(),
-        }
-        path_aware = any(supplied_paths.values())
-        if path_aware and not all(
-            supplied_paths[name]
-            for name in (
-                "challenge_path",
-                "solution_path",
-                "comparator_config_path",
-                "lakefile_path",
-                "lean_toolchain_path",
-            )
-        ):
-            raise VerificationError("path-aware render requests must bind every accepted file path")
         project_relative = (
-            normalized_repository_path(supplied_paths["project_path"], "project_path")
-            if supplied_paths["project_path"]
+            normalized_repository_path(supplied_paths.project_path, "project_path")
+            if supplied_paths.project_path
             else None
         )
         project = (
@@ -511,28 +501,21 @@ def prepare(args: argparse.Namespace) -> int:
             if project_relative is not None
             else source.resolve()
         )
-        if path_aware:
-            challenge_relative = normalized_repository_path(
-                supplied_paths["challenge_path"], "challenge_path"
-            )
-            solution_relative = normalized_repository_path(
-                supplied_paths["solution_path"], "solution_path"
-            )
-            comparator_relative = normalized_repository_path(
-                supplied_paths["comparator_config_path"], "comparator_config_path"
-            )
-            lakefile_relative = normalized_repository_path(
-                supplied_paths["lakefile_path"], "lakefile_path"
-            )
-            toolchain_relative = normalized_repository_path(
-                supplied_paths["lean_toolchain_path"], "lean_toolchain_path"
-            )
-        else:
-            challenge_relative = normalized_repository_path("Challenge.lean", "challenge_path")
-            solution_relative = normalized_repository_path("Solution.lean", "solution_path")
-            comparator_relative = normalized_repository_path("comparator.json", "comparator_config_path")
-            lakefile_relative = normalized_repository_path("lakefile.toml", "lakefile_path")
-            toolchain_relative = normalized_repository_path("lean-toolchain", "lean_toolchain_path")
+        challenge_relative = normalized_repository_path(
+            supplied_paths.challenge_path, "challenge_path"
+        )
+        solution_relative = normalized_repository_path(
+            supplied_paths.solution_path, "solution_path"
+        )
+        comparator_relative = normalized_repository_path(
+            supplied_paths.comparator_config_path, "comparator_config_path"
+        )
+        lakefile_relative = normalized_repository_path(
+            supplied_paths.lakefile_path, "lakefile_path"
+        )
+        toolchain_relative = normalized_repository_path(
+            supplied_paths.lean_toolchain_path, "lean_toolchain_path"
+        )
         challenge = resolve_repository_path(source, challenge_relative, "challenge_path", kind="file")
         solution = resolve_repository_path(source, solution_relative, "solution_path", kind="file")
         comparator = resolve_repository_path(
@@ -569,33 +552,26 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("Challenge source does not match the accepted mechanical report")
         toolchain = toolchain_file.read_text(encoding="utf-8").strip()
         verso_commit = toolchain_verso_commit(toolchain)
-        source_record = {
-            "repository": repository,
-            "repository_url": repository_url,
-            "commit": commit,
-            "challenge_sha256": challenge_sha256,
-        }
-        if path_aware:
-            source_record.update(
-                {
-                    "project_path": supplied_paths["project_path"],
-                    "challenge_path": challenge_relative.as_posix(),
-                    "solution_path": solution_relative.as_posix(),
-                    "comparator_config_path": comparator_relative.as_posix(),
-                    "lakefile_path": lakefile_relative.as_posix(),
-                    "lean_toolchain_path": toolchain_relative.as_posix(),
-                }
-            )
-        report.update(
-            {
-                "schema_version": 2 if path_aware else 1,
-                "status": "pending",
-                "stage": "prepared",
-                "source": source_record,
-                "lean_toolchain": toolchain,
-                "verso_commit": verso_commit,
-            }
+        accepted_paths = AcceptedRenderPaths(
+            project_path=project_relative.as_posix() if project_relative else "",
+            challenge_path=challenge_relative.as_posix(),
+            solution_path=solution_relative.as_posix(),
+            comparator_config_path=comparator_relative.as_posix(),
+            lakefile_path=lakefile_relative.as_posix(),
+            lean_toolchain_path=toolchain_relative.as_posix(),
         )
+        report = PreparedRenderReport(
+            source=RenderSource(
+                repository=repository,
+                repository_url=repository_url,
+                commit=commit,
+                challenge_sha256=challenge_sha256,
+                paths=accepted_paths,
+            ),
+            lean_toolchain=toolchain,
+            verso_commit=verso_commit,
+            prepared_at=report["prepared_at"],
+        ).as_dict()
         write_json(output, report)
         workflow_output = os.environ.get("GITHUB_OUTPUT")
         if workflow_output:
@@ -750,14 +726,13 @@ def prepare_workspace(
     workspace: Path,
     verso_commit: str,
     work: Path,
-    source_record: dict[str, Any],
+    accepted_paths: AcceptedRenderPaths,
 ) -> Path:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
-    project_value = str(source_record.get("project_path") or "")
     project_relative = (
-        normalized_repository_path(project_value, "render project_path")
-        if project_value
+        normalized_repository_path(accepted_paths.project_path, "render project_path")
+        if accepted_paths.project_path
         else None
     )
     source_project = (
@@ -773,17 +748,17 @@ def prepare_workspace(
     ensure_lake_manifest(source_project, source)
     source_manifest = load_json_object(source_project / "lake-manifest.json")
     challenge_relative = normalized_repository_path(
-        str(source_record.get("challenge_path") or "Challenge.lean"), "render challenge_path"
+        accepted_paths.challenge_path, "render challenge_path"
     )
     solution_relative = normalized_repository_path(
-        str(source_record.get("solution_path") or "Solution.lean"), "render solution_path"
+        accepted_paths.solution_path, "render solution_path"
     )
     comparator_relative = normalized_repository_path(
-        str(source_record.get("comparator_config_path") or "comparator.json"),
+        accepted_paths.comparator_config_path,
         "render comparator_config_path",
     )
     toolchain_relative = normalized_repository_path(
-        str(source_record.get("lean_toolchain_path") or "lean-toolchain"),
+        accepted_paths.lean_toolchain_path,
         "render lean_toolchain_path",
     )
     accepted_challenge = resolve_repository_path(
@@ -1504,8 +1479,23 @@ def execute(args: argparse.Namespace) -> int:
     work = Path(args.work_dir).resolve()
     output = Path(args.output).resolve()
     report = load_json_object(output)
-    if report.get("status") != "pending":
+    try:
+        prepared = parse_prepared_report(report)
+    except RenderReportError as error:
+        previous_errors = report.get("errors")
+        failure = intake_report(now())
+        failure["stage"] = "contract"
+        failure["errors"] = [
+            *(
+                item
+                for item in (previous_errors if isinstance(previous_errors, list) else [])
+                if isinstance(item, str)
+            ),
+            str(error),
+        ]
+        write_json(output, failure)
         return 1
+    report = prepared.as_dict()
     report.update(
         {
             "status": "error",
@@ -1521,21 +1511,21 @@ def execute(args: argparse.Namespace) -> int:
             raise VerificationError("renderer and Landrun commits must be immutable SHAs")
         source = work / "source"
         challenge_relative = normalized_repository_path(
-            str(report["source"].get("challenge_path") or "Challenge.lean"),
+            prepared.source.paths.challenge_path,
             "render challenge_path",
         )
         accepted_challenge = resolve_repository_path(
             source, challenge_relative, "render challenge_path", kind="file"
         )
-        if sha256(accepted_challenge) != report["source"]["challenge_sha256"]:
+        if sha256(accepted_challenge) != prepared.source.challenge_sha256:
             raise VerificationError("accepted Challenge source changed after render intake")
         workspace_checkout = work / "workspace"
         workspace = prepare_workspace(
             source,
             workspace_checkout,
-            str(report["verso_commit"]),
+            prepared.verso_commit,
             work,
-            report["source"],
+            prepared.source.paths,
         )
 
         landrun = Path(args.landrun).resolve(strict=True)
@@ -1557,7 +1547,7 @@ def execute(args: argparse.Namespace) -> int:
         if not elan_command:
             raise VerificationError("trusted elan executable is unavailable")
         toolchain_env = env.copy()
-        toolchain_env["ELAN_TOOLCHAIN"] = str(report["lean_toolchain"])
+        toolchain_env["ELAN_TOOLCHAIN"] = prepared.lean_toolchain
         lean = Path(
             run([elan_command, "which", "lean"], cwd=work, env=toolchain_env).stdout.strip()
         ).resolve(strict=True)
@@ -1762,12 +1752,12 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--repository", required=True)
     prepare_parser.add_argument("--commit", required=True)
     prepare_parser.add_argument("--challenge-sha256", required=True)
-    prepare_parser.add_argument("--project-path", default="")
-    prepare_parser.add_argument("--challenge-path", default="")
-    prepare_parser.add_argument("--solution-path", default="")
-    prepare_parser.add_argument("--comparator-config-path", default="")
-    prepare_parser.add_argument("--lakefile-path", default="")
-    prepare_parser.add_argument("--lean-toolchain-path", default="")
+    prepare_parser.add_argument("--project-path", required=True)
+    prepare_parser.add_argument("--challenge-path", required=True)
+    prepare_parser.add_argument("--solution-path", required=True)
+    prepare_parser.add_argument("--comparator-config-path", required=True)
+    prepare_parser.add_argument("--lakefile-path", required=True)
+    prepare_parser.add_argument("--lean-toolchain-path", required=True)
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
     prepare_parser.set_defaults(func=prepare)

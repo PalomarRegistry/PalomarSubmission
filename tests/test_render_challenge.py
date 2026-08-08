@@ -13,9 +13,11 @@ from scripts.render_challenge import (
     VERSO_RUNTIME,
     VerificationError,
     artifact_manifest,
+    execute,
     extract_module_doc,
     merge_renderer_manifest,
     parsed_challenge_metadata,
+    parser,
     prepare,
     prepare_workspace,
     sanitize_bundle,
@@ -23,6 +25,7 @@ from scripts.render_challenge import (
     toolchain_verso_commit,
     trusted_lakefile,
 )
+from scripts.render_report import AcceptedRenderPaths
 
 
 class RenderChallengeTests(unittest.TestCase):
@@ -57,13 +60,14 @@ class RenderChallengeTests(unittest.TestCase):
             work = root / "work"
             work.mkdir()
             workspace = root / "workspace"
-            source_record = {
-                "project_path": "project",
-                "challenge_path": "project/accepted/Task.lean",
-                "solution_path": "project/accepted/Answer.lean",
-                "comparator_config_path": "project/accepted/settings.json",
-                "lean_toolchain_path": "lean-toolchain",
-            }
+            accepted_paths = AcceptedRenderPaths(
+                project_path="project",
+                challenge_path="project/accepted/Task.lean",
+                solution_path="project/accepted/Answer.lean",
+                comparator_config_path="project/accepted/settings.json",
+                lakefile_path="project/lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+            )
 
             def clone_verso(_url, _commit, destination):
                 destination.mkdir()
@@ -76,7 +80,7 @@ class RenderChallengeTests(unittest.TestCase):
 
             with mock.patch("scripts.render_challenge.clone_commit", side_effect=clone_verso):
                 workspace_project = prepare_workspace(
-                    source, workspace, "3" * 40, work, source_record
+                    source, workspace, "3" * 40, work, accepted_paths
                 )
 
             self.assertEqual(external.read_bytes(), b"do not replace")
@@ -111,7 +115,14 @@ class RenderChallengeTests(unittest.TestCase):
                     root / "workspace",
                     "3" * 40,
                     work,
-                    {"project_path": "linked/project"},
+                    AcceptedRenderPaths(
+                        project_path="linked/project",
+                        challenge_path="linked/project/Challenge.lean",
+                        solution_path="linked/project/Solution.lean",
+                        comparator_config_path="linked/project/comparator.json",
+                        lakefile_path="linked/project/lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
                 )
 
     def test_workspace_revalidates_project_components_after_copy(self):
@@ -130,13 +141,14 @@ class RenderChallengeTests(unittest.TestCase):
             work = root / "work"
             work.mkdir()
             workspace = root / "workspace"
-            source_record = {
-                "project_path": "nested/project",
-                "challenge_path": "nested/project/Challenge.lean",
-                "solution_path": "nested/project/Solution.lean",
-                "comparator_config_path": "nested/project/comparator.json",
-                "lean_toolchain_path": "lean-toolchain",
-            }
+            accepted_paths = AcceptedRenderPaths(
+                project_path="nested/project",
+                challenge_path="nested/project/Challenge.lean",
+                solution_path="nested/project/Solution.lean",
+                comparator_config_path="nested/project/comparator.json",
+                lakefile_path="nested/project/lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+            )
 
             def clone_verso(_url, _commit, destination):
                 destination.mkdir()
@@ -173,7 +185,7 @@ class RenderChallengeTests(unittest.TestCase):
                     "render workspace project_path contains a symlinked path component",
                 ),
             ):
-                prepare_workspace(source, workspace, "3" * 40, work, source_record)
+                prepare_workspace(source, workspace, "3" * 40, work, accepted_paths)
 
     def test_prepare_binds_a_nested_project_and_configured_modules(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -231,11 +243,163 @@ class RenderChallengeTests(unittest.TestCase):
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(report["schema_version"], 2)
             self.assertEqual(report["status"], "pending")
-            self.assertEqual(report["source"]["project_path"], "examples/headline")
             self.assertEqual(
-                report["source"]["challenge_path"], "examples/headline/Audit/Task.lean"
+                report["source"],
+                {
+                    "repository": "example/project",
+                    "repository_url": "https://github.com/example/project",
+                    "commit": "1" * 40,
+                    "challenge_sha256": args.challenge_sha256,
+                    "project_path": "examples/headline",
+                    "challenge_path": "examples/headline/Audit/Task.lean",
+                    "solution_path": "examples/headline/Audit/Answer.lean",
+                    "comparator_config_path": "examples/headline/settings.json",
+                    "lakefile_path": "examples/headline/lakefile.toml",
+                    "lean_toolchain_path": "lean-toolchain",
+                },
             )
-            self.assertEqual(report["source"]["comparator_config_path"], "examples/headline/settings.json")
+
+    def test_prepare_refuses_an_incomplete_accepted_path_set_before_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report.json"
+            args = argparse.Namespace(
+                repository="example/project",
+                commit="1" * 40,
+                challenge_sha256="2" * 64,
+                project_path="",
+                challenge_path="",
+                solution_path="Solution.lean",
+                comparator_config_path="comparator.json",
+                lakefile_path="lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+                work_dir=str(root / "work"),
+                output=str(output),
+            )
+
+            with mock.patch("scripts.render_challenge.clone_commit") as clone:
+                self.assertEqual(prepare(args), 0)
+
+            clone.assert_not_called()
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["status"], "error")
+            self.assertEqual(report["stage"], "intake")
+            self.assertIn(
+                "render report source.challenge_path must be a nonempty string",
+                report["errors"],
+            )
+
+    def test_prepare_preserves_an_explicit_root_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template"
+            template.mkdir()
+            challenge = template / "Challenge.lean"
+            challenge.write_text("theorem headline : True := by trivial\n", encoding="utf-8")
+            (template / "Solution.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (template / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (template / "lakefile.toml").write_text(
+                'name = "headline"\n[[lean_lib]]\nname = "Headline"\n', encoding="utf-8"
+            )
+            (template / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.31.0-rc2\n", encoding="utf-8"
+            )
+            output = root / "report.json"
+            args = argparse.Namespace(
+                repository="example/project",
+                commit="1" * 40,
+                challenge_sha256=hashlib.sha256(challenge.read_bytes()).hexdigest(),
+                project_path="",
+                challenge_path="Challenge.lean",
+                solution_path="Solution.lean",
+                comparator_config_path="comparator.json",
+                lakefile_path="lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+                work_dir=str(root / "work"),
+                output=str(output),
+            )
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.clone_commit",
+                    side_effect=lambda _url, _commit, destination: shutil.copytree(
+                        template, destination
+                    ),
+                ),
+                mock.patch(
+                    "scripts.render_challenge.toolchain_verso_commit",
+                    return_value="3" * 40,
+                ),
+            ):
+                self.assertEqual(prepare(args), 0)
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "pending")
+            self.assertIn("project_path", report["source"])
+            self.assertEqual(report["source"]["project_path"], "")
+
+    def test_prepare_parser_requires_the_complete_path_set(self):
+        command = next(
+            action
+            for action in parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ).choices["prepare"]
+        required = {action.dest for action in command._actions if action.required}
+        self.assertTrue(
+            {
+                "project_path",
+                "challenge_path",
+                "solution_path",
+                "comparator_config_path",
+                "lakefile_path",
+                "lean_toolchain_path",
+            }.issubset(required)
+        )
+
+    def test_execute_marks_a_legacy_report_as_a_contract_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report.json"
+            output.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "pending",
+                        "stage": "prepared",
+                        "errors": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = execute(
+                argparse.Namespace(work_dir=str(root / "work"), output=str(output))
+            )
+
+            self.assertEqual(result, 1)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["status"], "error")
+            self.assertEqual(report["stage"], "contract")
+            self.assertEqual(
+                set(report),
+                {"schema_version", "status", "stage", "errors", "prepared_at"},
+            )
+            self.assertIn("schema_version 2", report["errors"][0])
 
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
