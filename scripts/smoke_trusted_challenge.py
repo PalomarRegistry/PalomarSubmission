@@ -79,7 +79,9 @@ def main() -> int:
     printenv = Path(printenv_command).absolute()
     touch = Path(touch_command).absolute()
 
-    writable_directories = materialize_packages(source, base_env=environment)
+    writable_directories = materialize_packages(
+        source, checkout=source, base_env=environment
+    )
     home = source / ".lake" / "config" / "home"
     temporary = source / ".lake" / "config" / "tmp"
     home.mkdir()
@@ -155,10 +157,15 @@ def main() -> int:
     )
 
     packages = manifest_packages(source)
-    allowlist = package_allowlist(source, packages, base_env=environment)
-    reject_untrusted_package_artifacts(source, packages, allowlist)
+    allowlist = package_allowlist(
+        source, packages, checkout=source, base_env=environment
+    )
+    reject_untrusted_package_artifacts(
+        source, packages, allowlist, checkout=source
+    )
     get_mathlib_cache(
         source,
+        checkout=source,
         base_env=environment,
         allowlist=allowlist,
         lake=lake,
@@ -169,6 +176,7 @@ def main() -> int:
     )
     build_allowlisted_roots(
         source,
+        checkout=source,
         packages=packages,
         allowlist=allowlist,
         base_env=environment,
@@ -179,8 +187,11 @@ def main() -> int:
         tools=tools,
     )
 
-    trusted = set(trusted_lake_directories(source, allowlist))
-    trusted_builds = {package_lake_directories(source, name)[0] for name in allowlist}
+    trusted = set(trusted_lake_directories(source, allowlist, checkout=source))
+    trusted_builds = {
+        package_lake_directories(source, name, checkout=source)[0]
+        for name in allowlist
+    }
     candidate_writable = [path for path in writable_directories if path not in trusted]
     require_protected_paths(
         [
@@ -203,6 +214,7 @@ def main() -> int:
     canonical, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
         work,
         source,
+        checkout=source,
         lean=lean,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
@@ -216,6 +228,7 @@ def main() -> int:
     require_protected_paths([canonical], candidate_writable)
     audit = audit_challenge_sources(
         source,
+        checkout=source,
         dependency_sources=dependency_sources,
         lean_prefix=lean_prefix,
         allowlist=allowlist,

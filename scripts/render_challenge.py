@@ -35,7 +35,6 @@ from scripts.verify_submission import (  # noqa: E402
     materialize_packages,
     normalized_repository_path,
     now,
-    reject_reserved_checkout_markers,
     require_protected_paths,
     resolve_release_commit,
     resolve_repository_path,
@@ -480,7 +479,6 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("challenge_sha256 must be 64 lowercase hexadecimal characters")
         source = work / "source"
         clone_commit(repository_url, commit, source)
-        reject_reserved_checkout_markers(source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         supplied_paths = {
@@ -756,14 +754,22 @@ def prepare_workspace(
 ) -> Path:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
-    reject_reserved_checkout_markers(source)
     project_value = str(source_record.get("project_path") or "")
     project_relative = (
         normalized_repository_path(project_value, "render project_path")
         if project_value
         else None
     )
-    source_project = source.joinpath(*project_relative.parts) if project_relative else source
+    source_project = (
+        resolve_repository_path(
+            source,
+            project_relative,
+            "render project_path",
+            kind="directory",
+        )
+        if project_relative
+        else source.resolve()
+    )
     ensure_lake_manifest(source_project, source)
     source_manifest = load_json_object(source_project / "lake-manifest.json")
     challenge_relative = normalized_repository_path(
@@ -811,7 +817,16 @@ def prepare_workspace(
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", ".lake"),
     )
-    workspace_project = workspace.joinpath(*project_relative.parts) if project_relative else workspace
+    workspace_project = (
+        resolve_repository_path(
+            workspace,
+            project_relative,
+            "render workspace project_path",
+            kind="directory",
+        )
+        if project_relative
+        else workspace.resolve()
+    )
     for lakefile_name in ("lakefile.lean", "lakefile.toml"):
         submitted_lakefile = workspace_project / lakefile_name
         if submitted_lakefile.exists() or submitted_lakefile.is_symlink():

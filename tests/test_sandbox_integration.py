@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import subprocess
@@ -8,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from scripts.verify_submission import (
-    audit_challenge_sources,
     compile_canonical_challenge,
     protected_lean_path,
     remove_untrusted_lake_state,
@@ -124,6 +122,7 @@ class SandboxIntegrationTests(unittest.TestCase):
             canonical, dependencies, trusted_paths = compile_canonical_challenge(
                 work,
                 source,
+                checkout=source,
                 lean=lean,
                 lean_prefix=lean_prefix,
                 allowlist={},
