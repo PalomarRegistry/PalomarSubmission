@@ -71,7 +71,7 @@ loads candidate Lake configuration.
 
 The maintained test surfaces are:
 
-- `tests/test_verify_submission.py`: provenance ancestry and exact legacy pins,
+- `tests/test_verify_submission.py`: current provenance and exact tool pins,
   official closure substitution, duplicate form sections, artifact rejection,
   protected paths, environment path bounds, and systemd policy construction;
 - `tests/test_sandbox_integration.py`: real Landrun/systemd read, write, process,

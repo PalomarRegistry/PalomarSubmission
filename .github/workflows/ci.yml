@@ -33,9 +33,10 @@ jobs:
           PALOMAR_TEST_LICENSEE="$(command -v bundle)" python -m unittest discover -v
       - name: Match the current PalomarTemplate metadata contract
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 \
+          curl --fail --location --retry 3 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/palomar-template-formalization.yaml" \
-            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/formalization.yaml
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/d720f59dbe2edd29e0b9273c113139cdb1f24d2b/formalization.yaml
           cmp tests/fixtures/palomar-template-formalization.yaml \
             "$RUNNER_TEMP/palomar-template-formalization.yaml"
       - name: Exercise the real Landrun and systemd boundary

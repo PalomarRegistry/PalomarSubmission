@@ -1295,7 +1295,7 @@ review:
     def test_original_proof_cannot_also_claim_a_source_based_origin(self):
         with self.assertRaisesRegex(
             VerificationError,
-            "every source must use relationship background or other",
+            "every source must use relationship background or other.*Remove type: original-proof",
         ):
             verifier.normalized_provenance(
                 {
@@ -1318,7 +1318,7 @@ review:
     def test_original_proof_source_itself_needs_relationship_other(self):
         with self.assertRaisesRegex(
             VerificationError,
-            r"type: original-proof must use relationship: other",
+            r"type: original-proof declares.*must use relationship: other.*prior publication",
         ):
             verifier.normalized_provenance(
                 {
@@ -1368,7 +1368,7 @@ review:
         }
         with self.assertRaisesRegex(
             VerificationError,
-            r"type: original-proof must use relationship: other.*additional sources",
+            r"type: original-proof declares.*must use relationship: other.*prior publication",
         ):
             verifier.normalized_provenance(invalid)
 

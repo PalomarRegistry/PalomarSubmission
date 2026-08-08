@@ -866,8 +866,10 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         for source in sources
     ):
         raise VerificationError(
-            "formalization.yaml entries with type: original-proof must use relationship: "
-            "other; background is only for additional sources accompanying an original result"
+            "formalization.yaml type: original-proof declares that this formalization first "
+            "presents the result and must use relationship: other. If the source is a prior "
+            "publication of the result, use its actual type (such as paper or book) and keep "
+            "the substantive relationship instead"
         )
     if result_origin == "original" and any(
         source["relationship"] in substantive_relationships for source in sources
@@ -875,7 +877,8 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         raise VerificationError(
             "formalization.yaml declares an original-proof, so every source must use "
             "relationship background or other; formalizes, adapts, and independently-proves "
-            "declare a source-based result"
+            "declare a source-based result. Remove type: original-proof when the named source "
+            "is a prior presentation of the result"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -889,8 +892,9 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         item = _required_mapping(related_item, path)
         relationship = _required_text(item.get("relationship"), f"{path}.relationship").strip()
         if relationship not in RELATED_FORMALIZATION_RELATIONSHIPS:
+            allowed = ", ".join(sorted(RELATED_FORMALIZATION_RELATIONSHIPS))
             raise VerificationError(
-                f"formalization.yaml field {path}.relationship is not recognized"
+                f"formalization.yaml field {path}.relationship must be one of: {allowed}"
             )
         record = {
             "identifier": _required_text(item.get("id"), f"{path}.id").strip(),

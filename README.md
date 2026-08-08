@@ -102,9 +102,9 @@ other relationship is `background` or `other`; it is source-based exactly when
 there is no `original-proof` entry and at least one relationship is
 `formalizes`, `adapts`, or `independently-proves`. All other combinations fail.
 A supplied source `type` must be exactly `paper`, `book`, `web discussion`,
-`folklore`, `original-proof`, or `other`; it may be omitted for source-based
-entries. Invalid or missing provenance fails mechanical verification with the
-field that needs changing.
+`folklore`, `original-proof`, or `other`; it may be omitted except where
+`original-proof` is the origin declaration. Invalid or missing provenance fails
+mechanical verification with the field that needs changing.
 Do not add a top-level `provenance` block: put maintainers under `project`, the
 repository role under `repository`, and result origin in the source entries as
 above. The exact mechanical minimum is enforced here; the fields' intended
