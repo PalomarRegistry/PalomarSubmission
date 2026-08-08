@@ -33,7 +33,6 @@ MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
-RESERVED_CHECKOUT_MARKER = ".palomar-checkout-root"
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 COMPILED_ARTIFACT_SUFFIXES = {
     ".a",
@@ -479,6 +478,7 @@ def normalized_repository_path(value: str, field: str) -> pathlib.PurePosixPath:
         or "?" in raw
         or "#" in raw
         or any(not segment or segment in {".", ".."} for segment in segments)
+        or any(segment.lower() in {".git", ".lake"} for segment in segments)
         or ":" in segments[0]
         or any(ord(character) < 32 or ord(character) == 127 for character in raw)
     ):
@@ -522,21 +522,6 @@ def repository_relative_path(checkout: Path, path: Path) -> str:
         return path.resolve().relative_to(checkout.resolve()).as_posix()
     except ValueError as error:
         raise VerificationError("resolved project file escapes the pinned repository checkout") from error
-
-
-def reject_reserved_checkout_markers(checkout: Path) -> None:
-    """Reject the former internal boundary marker anywhere in hostile source."""
-    def fail_closed(error: OSError) -> None:
-        raise VerificationError("could not inspect submitted source for reserved paths") from error
-
-    for _current, directories, files in os.walk(
-        checkout, followlinks=False, onerror=fail_closed
-    ):
-        if RESERVED_CHECKOUT_MARKER in directories or RESERVED_CHECKOUT_MARKER in files:
-            raise VerificationError(
-                f"submitted source contains reserved path {RESERVED_CHECKOUT_MARKER!r}"
-            )
-        directories[:] = [name for name in directories if name != ".git"]
 
 
 def project_tree_url(repository_url: str, commit: str, project_path: str | None) -> str:
@@ -1342,7 +1327,6 @@ def prepare(args: argparse.Namespace) -> int:
         source = work / "source"
         clone_commit(url, commit, source)
         validate_preservable_git_checkout(source, "submitted source")
-        reject_reserved_checkout_markers(source)
         size = tree_size(source)
         if size > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
@@ -1770,7 +1754,7 @@ def recorded_project_dependencies(
     records: list[dict[str, str]] = []
     for package in packages:
         if package["url"].startswith("path:"):
-            target = (source / package["url"].removeprefix("path:")).resolve()
+            target = package_checkout(source, package, checkout=checkout)
             relative = target.relative_to(checkout.resolve()).as_posix()
             records.append({"name": package["name"], "path": relative or "."})
         else:
@@ -2021,11 +2005,26 @@ def package_lake_directories(
     package = next((item for item in manifest_packages(source) if item["name"] == name), None)
     if package is None:
         raise VerificationError(f"trusted package {name!r} is absent from the manifest")
-    package_dir = package_checkout(source, package, checkout=checkout)
-    return (
-        (package_dir / ".lake" / "build").resolve(),
-        (package_dir / ".lake" / "config").resolve(),
-    )
+    boundary = checkout.resolve()
+    package_dir = package_checkout(source, package, checkout=boundary)
+    result: list[Path] = []
+    for leaf in ("build", "config"):
+        candidate = package_dir / ".lake" / leaf
+        try:
+            relative = pathlib.PurePosixPath(candidate.relative_to(boundary).as_posix())
+        except ValueError as error:
+            raise VerificationError(
+                f"trusted package {name!r} Lake directory escapes the repository checkout"
+            ) from error
+        result.append(
+            resolve_repository_path(
+                boundary,
+                relative,
+                f"trusted package {name!r} Lake {leaf} directory",
+                kind="directory",
+            )
+        )
+    return result[0], result[1]
 
 
 def trusted_lake_directories(
@@ -3452,16 +3451,22 @@ def execute(args: argparse.Namespace) -> int:
         write_json(output, report)
 
     try:
-        install_execution_deadline(
-            os.environ.get("PALOMAR_JOB_STARTED_AT"),
-            getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
-        )
-        reject_reserved_checkout_markers(checkout)
+        if checkout.is_symlink() or not checkout.is_dir():
+            raise VerificationError("verifier-owned source checkout is not a real directory")
+        git_metadata = checkout / ".git"
+        if git_metadata.is_symlink() or not git_metadata.is_dir():
+            raise VerificationError(
+                "verifier-owned source checkout has no real Git metadata directory"
+            )
         if metrics_path.is_symlink() or (metrics_path.exists() and not metrics_path.is_file()):
             raise VerificationError("resource metrics path is not a regular file")
         metrics_path.unlink(missing_ok=True)
         _RESOURCE_METRICS_PATH = metrics_path
         _RESOURCE_DISK_PATH = checkout
+        install_execution_deadline(
+            os.environ.get("PALOMAR_JOB_STARTED_AT"),
+            getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
+        )
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()

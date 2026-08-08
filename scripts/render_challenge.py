@@ -35,7 +35,6 @@ from scripts.verify_submission import (  # noqa: E402
     materialize_packages,
     normalized_repository_path,
     now,
-    reject_reserved_checkout_markers,
     require_protected_paths,
     resolve_release_commit,
     resolve_repository_path,
@@ -480,7 +479,6 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("challenge_sha256 must be 64 lowercase hexadecimal characters")
         source = work / "source"
         clone_commit(repository_url, commit, source)
-        reject_reserved_checkout_markers(source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         supplied_paths = {
@@ -756,7 +754,6 @@ def prepare_workspace(
 ) -> Path:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
-    reject_reserved_checkout_markers(source)
     project_value = str(source_record.get("project_path") or "")
     project_relative = (
         normalized_repository_path(project_value, "render project_path")

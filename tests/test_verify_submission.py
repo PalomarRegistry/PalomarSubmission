@@ -42,7 +42,6 @@ from scripts.verify_submission import (
     project_tree_url,
     protected_lean_path,
     reject_committed_build_artifacts,
-    reject_reserved_checkout_markers,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
     repository_license_file,
@@ -61,56 +60,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
-    def test_verifier_intake_rejects_a_reserved_checkout_marker(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            event = root / "event.json"
-            output = root / "report.json"
-            event.write_text(
-                json.dumps(
-                    {
-                        "inputs": {
-                            "repository": "example/project",
-                            "commit": "1" * 40,
-                            "request_id": "abc123def456",
-                            "options": json.dumps(
-                                {
-                                    "authorization_relationship": (
-                                        "I am a responsible author or maintainer"
-                                    ),
-                                    "comparator_config_path": "comparator.json",
-                                }
-                            ),
-                        }
-                    }
-                )
-            )
-            args = Namespace(event=event, output=output, work_dir=root / "work")
-
-            def hostile_clone(_url, _commit, destination):
-                destination.mkdir(parents=True)
-                (destination / ".palomar-checkout-root").mkdir()
-
-            with (
-                mock.patch("scripts.verify_submission.clone_commit", side_effect=hostile_clone),
-                mock.patch("scripts.verify_submission.validate_preservable_git_checkout"),
-            ):
-                self.assertEqual(verifier.prepare(args), 0)
-
-            report = json.loads(output.read_text())
-            self.assertEqual(report["status"], "error")
-            self.assertRegex(report["errors"][0], "reserved path.*palomar-checkout-root")
-
-    def test_reserved_marker_scan_fails_closed_on_walk_errors(self):
-        def inaccessible_walk(_checkout, *, followlinks, onerror):
-            self.assertFalse(followlinks)
-            onerror(PermissionError("denied"))
-            return ()
-
-        with mock.patch("scripts.verify_submission.os.walk", side_effect=inaccessible_walk):
-            with self.assertRaisesRegex(VerificationError, "could not inspect"):
-                reject_reserved_checkout_markers(Path("/submitted"))
-
     def test_manifest_packages_directory_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             ancestor = Path(directory)
@@ -176,11 +125,66 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertTrue(writable)
             self.assertTrue(all(path.is_relative_to(checkout) for path in writable))
 
+    def test_recorded_path_dependencies_use_checkout_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / "checkout"
+            source = checkout / "project"
+            package = checkout / "vendor" / "helper"
+            source.mkdir(parents=True)
+            package.mkdir(parents=True)
+            (source / "linked-vendor").symlink_to(
+                checkout / "vendor", target_is_directory=True
+            )
+            packages = [
+                {
+                    "name": "helper",
+                    "repository": "path:helper",
+                    "url": "path:linked-vendor/helper",
+                    "revision": "source-tree",
+                }
+            ]
+
+            with self.assertRaisesRegex(VerificationError, "symlinked component"):
+                verifier.recorded_project_dependencies(source, checkout, packages)
+
+    def test_trusted_lake_directories_reject_symlink_redirection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            package = source / ".lake" / "packages" / "trusted"
+            package.mkdir(parents=True)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "trusted",
+                                "type": "git",
+                                "url": "https://github.com/example/trusted",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                )
+            )
+            redirected = root / "redirected-lake"
+            (redirected / "build").mkdir(parents=True)
+            (redirected / "config").mkdir()
+            (package / ".lake").symlink_to(redirected, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                VerificationError,
+                "trusted package 'trusted' Lake build directory contains a symlinked path component",
+            ):
+                verifier.package_lake_directories(
+                    source, "trusted", checkout=source
+                )
+
     def test_boundary_sensitive_production_calls_supply_an_explicit_checkout(self):
         import ast
         import inspect
 
-        from scripts import verify_submission
+        from scripts import render_challenge, verify_submission
 
         helper_names = {
             "audit_challenge_sources",
@@ -199,6 +203,7 @@ class VerifySubmissionTests(unittest.TestCase):
         checked = 0
         modules = (
             (verify_submission.__name__, Path(inspect.getfile(verify_submission))),
+            (render_challenge.__name__, Path(inspect.getfile(render_challenge))),
             (
                 "scripts.smoke_trusted_challenge",
                 REPOSITORY_ROOT / "scripts" / "smoke_trusted_challenge.py",
@@ -207,13 +212,25 @@ class VerifySubmissionTests(unittest.TestCase):
         for module_name, module_path in modules:
             source_text = module_path.read_text(encoding="utf-8")
             for node in ast.walk(ast.parse(source_text)):
-                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                if not isinstance(node, ast.Call):
                     continue
-                if node.func.id not in helper_names:
+                if isinstance(node.func, ast.Name):
+                    helper_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    helper_name = node.func.attr
+                else:
                     continue
-                target = getattr(verify_submission, node.func.id)
+                if helper_name not in helper_names:
+                    continue
+                if any(isinstance(argument, ast.Starred) for argument in node.args) or any(
+                    keyword.arg is None for keyword in node.keywords
+                ):
+                    continue
+                target = getattr(verify_submission, helper_name)
                 names = [keyword.arg for keyword in node.keywords]
                 try:
+                    # Signature binding proves every required explicit argument is
+                    # present; it cannot prove which runtime Path value was supplied.
                     inspect.signature(target).bind(
                         *[mock.ANY] * len(node.args),
                         **{name: mock.ANY for name in names},
@@ -221,7 +238,7 @@ class VerifySubmissionTests(unittest.TestCase):
                 except TypeError as error:
                     self.fail(
                         f"{module_name} line {node.lineno} calls "
-                        f"{target.__name__}() without its explicit checkout: {error}"
+                        f"{target.__name__}() without required explicit arguments: {error}"
                     )
                 checked += 1
         self.assertGreater(checked, 30, "no boundary-sensitive calls were checked")
@@ -430,49 +447,47 @@ class VerifySubmissionTests(unittest.TestCase):
         ):
             _deadline_timeout(600, ["probe"])
 
-    def test_execute_arms_deadline_before_scanning_reserved_markers(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "work" / "source").mkdir(parents=True)
-            report_path = root / "report.json"
-            report_path.write_text(
-                json.dumps({"status": "pending", "errors": [], "source": {}})
-            )
-            args = Namespace(
-                output=report_path,
-                work_dir=root / "work",
-                comparator_commit="a" * 40,
-                landrun_commit="b" * 40,
-                nanoda_commit="c" * 40,
-                workflow_url="https://github.com/example/project/actions/runs/1",
-            )
-            order: list[str] = []
+    def test_execute_requires_a_real_verifier_owned_checkout(self):
+        cases = ("checkout-symlink", "git-file")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                work = root / "work"
+                work.mkdir()
+                if case == "checkout-symlink":
+                    real_source = root / "real-source"
+                    (real_source / ".git").mkdir(parents=True)
+                    (work / "source").symlink_to(real_source, target_is_directory=True)
+                    expected = "source checkout is not a real directory"
+                else:
+                    source = work / "source"
+                    source.mkdir()
+                    (source / ".git").write_text("gitdir: /tmp/not-owned\n")
+                    expected = "no real Git metadata directory"
+                report_path = root / "report.json"
+                report_path.write_text(
+                    json.dumps({"status": "pending", "errors": [], "source": {}})
+                )
+                args = Namespace(
+                    output=report_path,
+                    work_dir=work,
+                    comparator_commit="a" * 40,
+                    landrun_commit="b" * 40,
+                    nanoda_commit="c" * 40,
+                    workflow_url="https://github.com/example/project/actions/runs/1",
+                )
 
-            def install(*_args, **_kwargs):
-                order.append("deadline")
-
-            def scan(_checkout):
-                order.append("scan")
-                raise VerificationError("stop after ordering check")
-
-            with (
-                mock.patch(
-                    "scripts.verify_submission.install_execution_deadline",
-                    side_effect=install,
-                ),
-                mock.patch(
-                    "scripts.verify_submission.reject_reserved_checkout_markers",
-                    side_effect=scan,
-                ),
-            ):
                 self.assertEqual(execute(args), 0)
 
-            self.assertEqual(order, ["deadline", "scan"])
+                report = json.loads(report_path.read_text())
+                self.assertEqual(report["status"], "error")
+                self.assertIn(expected, report["errors"][0])
 
     def test_expired_job_deadline_is_reported_and_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "work" / "source").mkdir(parents=True)
+            (root / "work" / "source" / ".git").mkdir()
             report_path = root / "report.json"
             report_path.write_text(json.dumps({"status": "pending", "errors": []}))
             tools = []
@@ -665,7 +680,17 @@ class VerifySubmissionTests(unittest.TestCase):
             ),
             f"https://github.com/example/project/tree/{'1' * 40}/examples/Sharp%20Smoothing",
         )
-        for unsafe in ("../project", "./project", "project//nested", "/project", "a\\b"):
+        for unsafe in (
+            "../project",
+            "./project",
+            "project//nested",
+            "/project",
+            "a\\b",
+            ".git/config",
+            "nested/.git/config",
+            ".lake/build",
+            "nested/.LAKE/build",
+        ):
             with self.subTest(unsafe=unsafe), self.assertRaises(VerificationError):
                 normalized_repository_path(unsafe, "project")
 

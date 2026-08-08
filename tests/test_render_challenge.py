@@ -26,65 +26,6 @@ from scripts.render_challenge import (
 
 
 class RenderChallengeTests(unittest.TestCase):
-    def test_prepare_rejects_reserved_checkout_markers_at_any_depth(self):
-        cases = (
-            ("root file", Path(".palomar-checkout-root"), "file"),
-            ("nested directory", Path("nested/.palomar-checkout-root"), "directory"),
-            ("root file symlink", Path(".palomar-checkout-root"), "file-symlink"),
-            (
-                "nested directory symlink",
-                Path("nested/.palomar-checkout-root"),
-                "directory-symlink",
-            ),
-        )
-        for label, relative, kind in cases:
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                output = root / "report.json"
-                args = argparse.Namespace(
-                    repository="example/project",
-                    commit="1" * 40,
-                    challenge_sha256="2" * 64,
-                    project_path="",
-                    challenge_path="",
-                    solution_path="",
-                    comparator_config_path="",
-                    lakefile_path="",
-                    lean_toolchain_path="",
-                    work_dir=str(root / "work"),
-                    output=str(output),
-                )
-
-                def hostile_clone(
-                    _url,
-                    _commit,
-                    destination,
-                    marker_relative=relative,
-                    marker_kind=kind,
-                ):
-                    destination.mkdir(parents=True)
-                    marker = destination / marker_relative
-                    marker.parent.mkdir(parents=True, exist_ok=True)
-                    if marker_kind == "file":
-                        marker.write_bytes(b"")
-                    elif marker_kind == "directory":
-                        marker.mkdir()
-                    elif marker_kind == "file-symlink":
-                        target = destination / "marker-target"
-                        target.write_bytes(b"")
-                        marker.symlink_to(target)
-                    else:
-                        target = destination / "marker-target"
-                        target.mkdir()
-                        marker.symlink_to(target, target_is_directory=True)
-
-                with mock.patch("scripts.render_challenge.clone_commit", side_effect=hostile_clone):
-                    self.assertEqual(prepare(args), 0)
-
-                report = json.loads(output.read_text(encoding="utf-8"))
-                self.assertEqual(report["status"], "error")
-                self.assertRegex(report["errors"][0], "reserved path.*palomar-checkout-root")
-
     def test_workspace_replaces_hostile_fixed_paths_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -152,7 +93,7 @@ class RenderChallengeTests(unittest.TestCase):
                 (workspace_project / "comparator.json").read_bytes(), b'{"accepted": true}'
             )
 
-    def test_workspace_revalidates_nested_project_symlink_components(self):
+    def test_workspace_revalidates_source_project_symlink_components(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
@@ -172,6 +113,67 @@ class RenderChallengeTests(unittest.TestCase):
                     work,
                     {"project_path": "linked/project"},
                 )
+
+    def test_workspace_revalidates_project_components_after_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            project = source / "nested" / "project"
+            project.mkdir(parents=True)
+            (project / "Challenge.lean").write_text("theorem challenge : True := by trivial\n")
+            (project / "Solution.lean").write_text("theorem challenge : True := by trivial\n")
+            (project / "comparator.json").write_text("{}")
+            (project / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+            (source / "lean-toolchain").write_text("leanprover/lean4:v4.31.0-rc2\n")
+            work = root / "work"
+            work.mkdir()
+            workspace = root / "workspace"
+            source_record = {
+                "project_path": "nested/project",
+                "challenge_path": "nested/project/Challenge.lean",
+                "solution_path": "nested/project/Solution.lean",
+                "comparator_config_path": "nested/project/comparator.json",
+                "lean_toolchain_path": "lean-toolchain",
+            }
+
+            def clone_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.31.0-rc2\n"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []})
+                )
+
+            real_copytree = shutil.copytree
+
+            def copy_with_workspace_symlink(*args, **kwargs):
+                # Restore the real module attribute during recursion: patching the
+                # renderer's imported module also patches shutil.copytree itself.
+                with mock.patch("shutil.copytree", real_copytree):
+                    result = real_copytree(*args, **kwargs)
+                nested = workspace / "nested"
+                relocated = workspace / "relocated"
+                nested.rename(relocated)
+                nested.symlink_to(relocated.name, target_is_directory=True)
+                return result
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.clone_commit", side_effect=clone_verso
+                ),
+                mock.patch(
+                    "scripts.render_challenge.shutil.copytree",
+                    side_effect=copy_with_workspace_symlink,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "render workspace project_path contains a symlinked path component",
+                ),
+            ):
+                prepare_workspace(source, workspace, "3" * 40, work, source_record)
 
     def test_prepare_binds_a_nested_project_and_configured_modules(self):
         with tempfile.TemporaryDirectory() as directory:

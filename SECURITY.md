@@ -64,13 +64,11 @@ If the file and this paragraph disagree, the file is right.
   transport, and interactive credential prompts are disabled. The verifier
   does not run `lake update` or dependency post-update hooks.
 - Checkout containment uses the verifier-owned clone path supplied by the
-  caller, never ancestor Git metadata or a marker copied out of submitted
-  source. The reserved
-  `.palomar-checkout-root` name is rejected at any depth before verification or
-  rendering. The renderer revalidates every nested project-path component when
-  preparing its workspace. Workspace writes remove hostile final symlinks and
-  directories before installing the accepted fixed-name files, and writable
-  directories are checked against the explicitly supplied workspace boundary.
+  caller, never ancestor Git metadata or submitted source. The renderer
+  revalidates every nested project-path component when preparing its workspace.
+  Workspace writes remove hostile final symlinks and directories before
+  installing the accepted fixed-name files, and writable directories are
+  checked against the explicitly supplied workspace boundary.
 - Every submitted, dependency, and separately recorded substantive source must
   be a public GitHub repository pinned to a full commit so registration can
   preserve the complete accepted source graph in native GitHub forks. Git LFS
