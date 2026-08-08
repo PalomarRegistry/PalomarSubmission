@@ -1127,7 +1127,8 @@ review:
             with self.subTest(obsolete=obsolete):
                 with self.assertRaisesRegex(
                     VerificationError,
-                    r"top-level field provenance is obsolete.*Every source needs relationship",
+                    r"obsolete provenance fields: top-level provenance.*"
+                    r"project\.responsible_maintainers.*sources with required relationships",
                 ):
                     verifier.normalized_provenance({**current, "provenance": obsolete})
 
@@ -1164,7 +1165,9 @@ review:
             "responsible_maintainer": "Ada Lovelace"
         }
         with self.assertRaisesRegex(
-            VerificationError, r"responsible_maintainer is obsolete.*responsible_maintainers"
+            VerificationError,
+            r"obsolete provenance fields: project\.responsible_maintainer.*"
+            r"project\.responsible_maintainers",
         ):
             verifier.normalized_provenance(obsolete_maintainer)
 
@@ -1172,9 +1175,37 @@ review:
         obsolete_author["sources"][0].pop("authors")
         obsolete_author["sources"][0]["author"] = "Emmy Noether"
         with self.assertRaisesRegex(
-            VerificationError, r"sources\[0\]\.author is obsolete.*sources\[0\]\.authors"
+            VerificationError,
+            r"obsolete provenance fields: sources\[0\]\.author.*sources\[0\]\.authors",
         ):
             verifier.normalized_provenance(obsolete_author)
+
+    def test_all_known_obsolete_provenance_fields_are_reported_together(self):
+        with self.assertRaises(VerificationError) as caught:
+            verifier.normalized_provenance(
+                {
+                    "project": {
+                        "responsible_maintainer": "Ada Lovelace",
+                        "responsible_maintainers": ["Ada Lovelace"],
+                    },
+                    "provenance": {"result_origin": "source-based"},
+                    "repository": {"role": "substantive-development"},
+                    "sources": [
+                        {
+                            "title": "A source theorem",
+                            "author": "Emmy Noether",
+                            "authors": ["Emmy Noether"],
+                            "relationship": "formalizes",
+                        }
+                    ],
+                }
+            )
+        message = str(caught.exception)
+        self.assertIn("project.responsible_maintainer", message)
+        self.assertIn("top-level provenance", message)
+        self.assertIn("sources[0].author", message)
+        self.assertIn("project.responsible_maintainers", message)
+        self.assertIn("sources[0].authors", message)
 
     def test_current_provenance_declarations_are_required(self):
         current = {
@@ -1284,10 +1315,10 @@ review:
                 }
             )
 
-    def test_original_proof_source_itself_needs_a_non_substantive_relationship(self):
+    def test_original_proof_source_itself_needs_relationship_other(self):
         with self.assertRaisesRegex(
             VerificationError,
-            "every source must use relationship background or other",
+            r"type: original-proof must use relationship: other",
         ):
             verifier.normalized_provenance(
                 {
@@ -1403,6 +1434,21 @@ review:
             provenance["substantive_formalization"]["tree_url"],
             f"https://github.com/example/substantive/tree/{revision}",
         )
+
+    def test_thin_wrapper_requires_a_substantive_repository_target(self):
+        with self.assertRaisesRegex(
+            VerificationError,
+            r"repository\.substantive_formalization is a required mapping.*thin-wrapper",
+        ):
+            verifier.normalized_provenance(
+                {
+                    "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                    "repository": {"role": "thin-wrapper"},
+                    "sources": [
+                        {"title": "A source theorem", "relationship": "formalizes"}
+                    ],
+                }
+            )
 
     def test_substantive_repository_rejects_a_thin_wrapper_target(self):
         with self.assertRaisesRegex(

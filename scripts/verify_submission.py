@@ -706,29 +706,44 @@ def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | Non
     return text
 
 
+def reject_obsolete_provenance_fields(data: dict[str, Any]) -> None:
+    """Name every known pre-launch provenance spelling in one migration error."""
+
+    obsolete: list[str] = []
+    project = data.get("project")
+    if isinstance(project, dict) and "responsible_maintainer" in project:
+        obsolete.append(
+            "project.responsible_maintainer (use project.responsible_maintainers as a "
+            "nonempty list)"
+        )
+    if "provenance" in data:
+        obsolete.append(
+            "top-level provenance (remove it; use project.responsible_maintainers, "
+            "repository, and sources with required relationships)"
+        )
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        for index, source in enumerate(sources):
+            if isinstance(source, dict) and "author" in source:
+                obsolete.append(
+                    f"sources[{index}].author (use sources[{index}].authors as a list)"
+                )
+    if obsolete:
+        raise VerificationError(
+            "formalization.yaml uses obsolete provenance fields: " + "; ".join(obsolete)
+        )
+
+
 def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize the current Palomar provenance contract."""
 
+    reject_obsolete_provenance_fields(data)
     project = _required_mapping(data.get("project"), "project")
-    if "responsible_maintainer" in project:
-        raise VerificationError(
-            "formalization.yaml field project.responsible_maintainer is obsolete; "
-            "use project.responsible_maintainers as a nonempty list"
-        )
     maintainers = _person_records(
         project.get("responsible_maintainers"),
         "project.responsible_maintainers",
         required=True,
     )
-
-    if "provenance" in data:
-        raise VerificationError(
-            "formalization.yaml top-level field provenance is obsolete; declare provenance "
-            "through project.responsible_maintainers, repository, and sources. Every source "
-            "needs relationship; an original-proof entry must use relationship: other and "
-            "additional sources may use background or other, while formalizes, adapts, or "
-            "independently-proves declares a source-based result"
-        )
 
     repository = _required_mapping(data.get("repository"), "repository")
     repository_role = _required_text(repository.get("role"), "repository.role").strip()
@@ -747,10 +762,12 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             "when repository.role is thin-wrapper; remove it for substantive-development"
         )
     if repository_role == "thin-wrapper":
-        item = _required_mapping(
-            repository.get("substantive_formalization"),
-            "repository.substantive_formalization",
-        )
+        if not isinstance(repository.get("substantive_formalization"), dict):
+            raise VerificationError(
+                "formalization.yaml field repository.substantive_formalization is a required "
+                "mapping when repository.role is thin-wrapper"
+            )
+        item = repository["substantive_formalization"]
         repository_id = _required_text(
             item.get("id"), "repository.substantive_formalization.id"
         )
@@ -782,11 +799,6 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     for index, source in enumerate(raw_sources):
         path = f"sources[{index}]"
         item = _required_mapping(source, path)
-        if "author" in item:
-            raise VerificationError(
-                f"formalization.yaml field {path}.author is obsolete; use {path}.authors "
-                "as a list"
-            )
         raw_relationship = item.get("relationship")
         if not isinstance(raw_relationship, str) or not raw_relationship.strip():
             raise VerificationError(
@@ -850,20 +862,20 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             "formalizes, adapts, or independently-proves relationship"
         )
     if result_origin == "original" and any(
-        source["relationship"] in substantive_relationships for source in sources
-    ):
-        raise VerificationError(
-            "formalization.yaml declares an original-proof, so every source must use "
-            "relationship background or other; formalizes, adapts, and independently-proves "
-            "declare a source-based result"
-        )
-    if result_origin == "original" and any(
         source.get("type") == ORIGINAL_PROOF_TYPE and source["relationship"] != "other"
         for source in sources
     ):
         raise VerificationError(
             "formalization.yaml entries with type: original-proof must use relationship: "
             "other; background is only for additional sources accompanying an original result"
+        )
+    if result_origin == "original" and any(
+        source["relationship"] in substantive_relationships for source in sources
+    ):
+        raise VerificationError(
+            "formalization.yaml declares an original-proof, so every source must use "
+            "relationship background or other; formalizes, adapts, and independently-proves "
+            "declare a source-based result"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -955,6 +967,8 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             "current repository and provenance additions; a plain v0.3 file, an older file, "
             "or a project-specific shape needs those sections adding."
         )
+
+    reject_obsolete_provenance_fields(data)
 
     project = _required_mapping(data.get("project"), "project")
     _required_text(project.get("name"), "project.name")
