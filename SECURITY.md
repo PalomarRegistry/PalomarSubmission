@@ -35,6 +35,21 @@ environment.
 
 ## Defensive boundary
 
+The shape of the pipeline is short enough to check against the file.
+[`.github/workflows/submission.yml`](.github/workflows/submission.yml) has a
+single trigger, `workflow_dispatch`, so a run happens because something
+dispatched it, ordinarily the submission server; no push, comment, or pull
+request starts one. There is one job, `verify`, and its `permissions` block is
+`contents: read`. Its inputs are a repository, a commit, an opaque submission
+id, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
+allowlist in [`scripts/verify_submission.py`](scripts/verify_submission.py):
+three optional paths, an existing Palomar id, and the declared authorization
+relationship with its optional evidence and free-text context. There is no
+input for the submitter's GitHub identity, and none for an editorial review,
+which happens elsewhere and afterwards. The run uploads exactly one artifact,
+`mechanical-report-<request_id>`, holding the bounded `mechanical-report.json`.
+If the file and this paragraph disagree, the file is right.
+
 ### Intake and dependency provenance
 
 - The verifier accepts only a public, credential-free
@@ -167,8 +182,8 @@ and its own environment filter.
 There is no longer a second job to compromise. Verification writes a bounded
 JSON report outside every sandbox-writable directory and uploads it as the
 `mechanical-report-<request_id>` artifact, and the submission server collects it
-out of band. That removed the whole class of question the reporting job raised:
-it held a write token, and every argument about marker-comment ownership and
+out of band. That removed a whole class of question the second job used to
+raise: it held a write token, and every argument about comment ownership and
 inert diagnostics existed because hostile text was being rendered by something
 holding one. Nothing in this repository now holds a credential that can write
 anywhere.
@@ -196,6 +211,24 @@ by Palomar. This is an explicit trust decision, not a property established by
 the sandbox. The verified implementation details and residual operational
 questions are recorded in
 [`docs/mathlib-cache-trust.md`](docs/mathlib-cache-trust.md).
+
+The submission server at <https://submit.palomar-registry.org> belongs in that
+list too, for part of the answer rather than all of it. It chooses the
+repository, commit and paths a run is given, it chooses the ref of this
+repository that the run executes, and it decides which submission the resulting
+report is filed against. What it does not do is take part in the verification:
+the job fetches the submitted commit without its help, and the report records
+the inputs the run resolved along with the Comparator, `lean4export`, NanoDa and
+Landrun revisions that ran. PalomarReviewer downloads the pinned artifact itself
+and refuses one whose workflow revision is not in this repository's trusted
+history, so the server's choice of ref is checked rather than trusted.
+
+So what a run of a trusted revision establishes about the source it names does
+not depend on the server, while what that result is attributed to does. A
+compromised server could file an honest verification against the wrong
+submission, or start runs nobody asked for. What it could not do is make a
+trusted revision of this workflow report a pass for a project that does not
+verify.
 
 The sandbox limits effects of hostile project code; it does not make any of
 these trusted components infallible.
@@ -225,9 +258,12 @@ same trusted workflow on a worker with the required lifetime; lack of such a
 worker leaves verification inconclusive rather than changing what Palomar
 accepts.
 
-The current pre-launch component review, adversarial evidence, repository
-controls, and accepted residual risks are recorded in
-[`docs/launch-security-review.md`](docs/launch-security-review.md).
+This document describes the boundary as it stands. The component review of July
+2026, its adversarial evidence, repository controls, and accepted residual risks
+are recorded in
+[`docs/launch-security-review.md`](docs/launch-security-review.md), which is a
+record of what was reviewed then and still describes the issue-based intake that
+has since been replaced. Read it for the evidence, not for the current shape.
 
 ## Reporting a vulnerability
 
