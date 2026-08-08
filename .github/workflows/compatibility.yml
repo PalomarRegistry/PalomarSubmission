@@ -3,12 +3,57 @@ name: Cold-build compatibility
 on:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
 jobs:
-  compatibility:
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cold_build: ${{ steps.scope.outputs.cold_build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select changes that need the cold-build regression
+        id: scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Only this narrow, current set is known not to affect execution. A new
+          # path therefore runs the regression until somebody classifies it here.
+          changed_paths="$RUNNER_TEMP/palomar-compatibility-changed-paths"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "cold_build=true" >> "$GITHUB_OUTPUT"
+          elif ! git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" -- > "$changed_paths"; then
+            echo "cold_build=true" >> "$GITHUB_OUTPUT"
+          elif [ ! -s "$changed_paths" ]; then
+            echo "cold_build=true" >> "$GITHUB_OUTPUT"
+          else
+            cold_build=false
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                README.md|SECURITY.md|LICENSE|docs/comparator-declaration-closure.md|docs/launch-security-review.md|docs/mathlib-cache-trust.md|taxonomies/README.md|taxonomies/LICENSE.md)
+                  ;;
+                *)
+                  cold_build=true
+                  break
+                  ;;
+              esac
+            done < "$changed_paths"
+            echo "cold_build=$cold_build" >> "$GITHUB_OUTPUT"
+          fi
+
+  cold_build:
+    needs: scope
+    if: needs.scope.outputs.cold_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
@@ -84,3 +129,39 @@ jobs:
             --nanoda "$PWD/nanoda/target/release/nanoda_bin" \
             --adapter "$PWD/pipeline/scripts/landrun_passthrough.py" \
             --work-dir "$RUNNER_TEMP/palomar-compatibility"
+
+  compatibility:
+    needs: [scope, cold_build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the selected compatibility evidence
+        id: gate
+        shell: bash
+        env:
+          COLD_BUILD_REQUESTED: ${{ needs.scope.outputs.cold_build }}
+          COLD_BUILD_RESULT: ${{ needs.cold_build.result }}
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::Compatibility scope finished with $SCOPE_RESULT"
+            exit 1
+          fi
+          if [ "$COLD_BUILD_REQUESTED" = "false" ]; then
+            if [ "$COLD_BUILD_RESULT" != "skipped" ]; then
+              echo "::error::Prose-only change unexpectedly produced cold-build result $COLD_BUILD_RESULT"
+              exit 1
+            fi
+            echo "Compatibility passed: the change is confined to reviewed prose paths."
+            exit 0
+          fi
+          if [ "$COLD_BUILD_REQUESTED" != "true" ]; then
+            echo "::error::Compatibility scope produced no valid decision"
+            exit 1
+          fi
+          if [ "$COLD_BUILD_RESULT" != "success" ]; then
+            echo "::error::Required cold build finished with $COLD_BUILD_RESULT"
+            exit 1
+          fi
+          echo "Compatibility passed: the required cold build succeeded."
