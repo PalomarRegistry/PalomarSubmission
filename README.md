@@ -142,3 +142,19 @@ permissions and no credential in its environment, and its only output is a
 bounded JSON artifact, so there is no second job holding a write token to
 compromise. See [`SECURITY.md`](SECURITY.md) before changing the workflow or
 verifier.
+
+## Development checks
+
+Repository Python files use the `E`, `F`, `I`, `UP`, and `B` Ruff rule families declared
+in [`pyproject.toml`](pyproject.toml). Install the single locked lint dependency
+and run the same check as CI with:
+
+```sh
+python -m pip install --disable-pip-version-check --require-hashes \
+  --no-deps --only-binary=:all: -r requirements-lint.txt
+python -m ruff check .
+```
+
+The verifier runtime dependency remains separately locked in
+[`requirements.txt`](requirements.txt); Ruff is not installed in verification
+or cold-build jobs.
