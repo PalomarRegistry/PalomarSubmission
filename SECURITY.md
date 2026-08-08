@@ -258,6 +258,27 @@ same trusted workflow on a worker with the required lifetime; lack of such a
 worker leaves verification inconclusive rather than changing what Palomar
 accepts.
 
+The registry database is inside that boundary too, and two of its controls are
+weaker than the phrase "CI checks it" suggests. `PalomarDatabase` validates
+every record and checks the append-only invariant on each pull request, but for
+a `pull_request` event GitHub runs the workflow as the pull request would have
+it, so "the checks passed" is a statement about that pull request's own copy of
+the workflow rather than an independent verdict on it. Reading the checker from
+the base revision closes the case where a pull request rewrites the checker and
+leaves the workflow alone; a pull request that rewrites the workflow can decline
+to read it at all. Closing that needs a required check whose implementation the
+pull request cannot reach, which means one originating outside the repository,
+and there is none. A force push to `main` cannot be reliably detected from
+inside either: the direct before-and-after comparison runs only while the
+previous tip is still fetchable, and a rewritten history is otherwise internally
+consistent. The repository's activity view and GitHub's audit log are the record
+for that, subject to their own retention. The append-only invariant also does
+not bind at all until the launch marker is committed, which is a deliberate
+pre-launch state and is announced by every CI run that finds the marker absent.
+`PalomarDatabase/docs/append-only.md` states the full position and what would
+close it; it is repeated here because this is the document a reader arrives at
+first.
+
 This document describes the boundary as it stands. The component review of July
 2026, its adversarial evidence, repository controls, and accepted residual risks
 are recorded in
