@@ -145,9 +145,9 @@ verifier.
 
 ## Development checks
 
-Python linting uses the `E`, `F`, `I`, `UP`, and `B` Ruff rule families declared
+Repository Python files use the `E`, `F`, `I`, `UP`, and `B` Ruff rule families declared
 in [`pyproject.toml`](pyproject.toml). Install the single locked lint dependency
-and run the same required check as CI with:
+and run the same check as CI with:
 
 ```sh
 python -m pip install --disable-pip-version-check --require-hashes \

@@ -1,5 +1,6 @@
-# Ruff is the complete lint environment. CI installs only binary wheels and
-# verifies the selected distribution against this lock.
+# Ruff is the complete lint environment. The hashes are the complete 0.16.2
+# wheel set recorded by uv; CI installs only wheels and verifies the selected
+# distribution against this lock. Regenerate the published wheel set on a bump.
 ruff==0.16.2 \
     --hash=sha256:20e66910f2c37cc753f9ef6580c914a621b80c4fa3549d3e3521e29d0f5bfc3f \
     --hash=sha256:335c621622c4650330be50842561c6586ac6971bb8ab5407fe34dcc9efb16bbe \

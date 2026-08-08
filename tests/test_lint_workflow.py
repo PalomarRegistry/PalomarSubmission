@@ -17,16 +17,23 @@ class LintWorkflowTests(unittest.TestCase):
 
     def test_rule_set_is_explicit(self):
         configuration = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        ruff = configuration["tool"]["ruff"]
+        self.assertNotIn("exclude", ruff)
+        self.assertNotIn("extend-exclude", ruff)
         self.assertEqual(
-            configuration["tool"]["ruff"]["lint"]["select"],
-            ["E", "F", "I", "UP", "B"],
+            ruff["lint"], {"select": ["E", "F", "I", "UP", "B"]}
         )
 
     def test_lint_dependency_is_one_exact_hash_locked_package(self):
         lock = (ROOT / "requirements-lint.txt").read_text()
+        top_level = [
+            line for line in lock.splitlines()
+            if line and not line[0].isspace() and not line.startswith("#")
+        ]
+        self.assertEqual(top_level, ["ruff==0.16.2 \\"])
         requirements = re.findall(r"^(?!\s|#)([A-Za-z0-9_-]+)==([^\s\\]+)", lock, re.M)
         self.assertEqual(requirements, [("ruff", "0.16.2")])
-        self.assertGreaterEqual(lock.count("--hash=sha256:"), 1)
+        self.assertEqual(lock.count("--hash=sha256:"), 17)
 
     def test_required_job_has_only_the_lint_authority_and_dependencies(self):
         self.assertEqual(self.job["permissions"], {"contents": "read"})
