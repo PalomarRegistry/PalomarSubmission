@@ -156,10 +156,12 @@ trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
-solution, export, and NanoDa replay operations. The runner, following the same
-pattern as Comparator Live and `lean-eval`, writes a protected copy of the
-submitted Comparator configuration with `enable_nanoda` forced to `true`.
-The submitted flag therefore cannot disable the independent-kernel check.
+solution, export, and NanoDa replay operations. Intake requires the submitted
+Comparator configuration to contain the exact JSON boolean
+`"enable_nanoda": true`; false, missing, or non-boolean values fail. The runner
+copies those validated bytes unchanged to a protected path before executing
+candidate code. There is no compatibility rewrite that can conceal a disabled
+independent-kernel check.
 Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
 The pinned Landrun binary is built without cgo so its pre-Landlock-v8
@@ -176,7 +178,7 @@ Landrun probe. If a positive operation is denied, a negative operation succeeds,
 or either confinement layer cannot be established, verification fails closed.
 
 Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
-enforced Comparator configuration, and the verifier script are outside the
+protected Comparator configuration, and the verifier script are outside the
 writable allowlist. Their hashes are captured before any project configuration
 executes and checked before and after sandboxed phases.
 The mechanical report is outside every sandbox-writable directory and is

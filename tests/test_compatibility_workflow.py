@@ -252,16 +252,29 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         pinned_step = next(
             step
             for step in ci["jobs"]["test"]["steps"]
-            if step.get("name") == "Match the current PalomarTemplate metadata contract"
+            if step.get("name") == "Match the current PalomarTemplate authoring contracts"
         )
         template_commit = "d720f59dbe2edd29e0b9273c113139cdb1f24d2b"
         self.assertIn(f"/{template_commit}/formalization.yaml", pinned_step["run"])
+        self.assertIn(f"/{template_commit}/comparator.json", pinned_step["run"])
+        self.assertIn("load_comparator_config", pinned_step["run"])
         self.assertNotIn("/main/formalization.yaml", pinned_step["run"])
+        self.assertNotIn("/main/comparator.json", pinned_step["run"])
 
         drift_step = self.step("scope", "template")
         self.assertEqual(drift_step["if"], "github.event_name != 'pull_request'")
         self.assertIn("/main/formalization.yaml", drift_step["run"])
+        self.assertIn("/main/comparator.json", drift_step["run"])
+        self.assertIn("load_comparator_config", drift_step["run"])
         self.assertIn("cmp tests/fixtures/palomar-template-formalization.yaml", drift_step["run"])
+
+        fixture_step = next(
+            step
+            for step in self.workflow["jobs"]["cold_build"]["steps"]
+            if step.get("name") == "Clone the exact current PalomarTemplate fixture"
+        )
+        self.assertIn("PalomarRegistry/PalomarTemplate.git", fixture_step["run"])
+        self.assertIn(template_commit, fixture_step["run"])
 
     def test_required_gate_passes_only_the_two_valid_outcomes(self):
         prose = self.run_gate("success", "false", "skipped")
