@@ -51,6 +51,81 @@ jobs:
           python -m json.tool toolchains.json >/dev/null
           python -c 'import sys; sys.path.insert(0, "."); from scripts.verify_submission import supported_toolchain; import json; m = json.load(open("toolchains.json"))["minimum"]; supported_toolchain(f"leanprover/lean4:{m}")' 
           python -m json.tool allowed-challenge-repositories.json >/dev/null
+      - name: Check the repository paths the documentation names
+        # `tests/test_report_issue.py` stayed in docs/launch-security-review.md
+        # for a week after it was deleted, because nothing reads prose.
+        #
+        # A Markdown link target is a path. A backticked token is one when its
+        # first segment is a real top-level entry, which is the test that
+        # catches a deleted file under a directory that still exists. It does
+        # not catch a deleted top-level file, because `formalization.yaml` and
+        # `lakefile.toml` are things a submitter brings rather than things this
+        # repository has, and a rule with false positives is one people learn
+        # to suppress. To name a path that is deliberately gone, write it
+        # without backticks.
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          roots = {entry.name for entry in pathlib.Path(".").iterdir()}
+          quoted = re.compile(r"`([^`\n]+)`")
+          linked = re.compile(r"\]\(([^)\s]+)\)")
+          pathish = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._/-]*")
+          documents = [pathlib.Path("SECURITY.md"), pathlib.Path("README.md")]
+          documents += sorted(pathlib.Path("docs").rglob("*.md"))
+          failed = False
+          for document in documents:
+              for number, line in enumerate(document.read_text().splitlines(), 1):
+                  named = [match.group(1) for match in quoted.finditer(line)]
+                  claimed = [
+                      target.partition("#")[0]
+                      for target in (match.group(1) for match in linked.finditer(line))
+                      if "://" not in target and not target.startswith("#")
+                  ]
+                  for candidate in named + claimed:
+                      if not candidate or not pathish.fullmatch(candidate):
+                          continue
+                      if candidate.split("/")[0] not in roots:
+                          continue
+                      if pathlib.Path(candidate).exists():
+                          continue
+                      print(f"{document}:{number}: names a path that does not exist: {candidate}")
+                      failed = True
+          raise SystemExit(failed)
+          PY
+
+      - name: Reject retired intake wording
+        # Not the bare word "issue": reporting one privately is still the right
+        # thing to do, and the tracker still has issues. These are collocations
+        # only the retired issue-based intake produced, so a match means a
+        # document has drifted back to describing a pipeline that is gone.
+        #
+        # docs/launch-security-review.md is a historical record and is scanned
+        # anyway, because a reader who arrives at a stale sentence cannot tell
+        # which kind of document they are in. Describing the July design in
+        # words that are not these ones costs a sentence and reads better.
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          retired = re.compile(
+              r"issue-form|issue field|issue number|issue-triggered|issue-write"
+              r"|issue-reporting|triggering issue|reporting job|report_issue|issues/new",
+              re.IGNORECASE,
+          )
+          documents = [pathlib.Path("SECURITY.md"), pathlib.Path("README.md")]
+          documents += sorted(pathlib.Path("docs").rglob("*.md"))
+          failed = False
+          for document in documents:
+              for number, line in enumerate(document.read_text().splitlines(), 1):
+                  for match in retired.finditer(line):
+                      print(f"{document}:{number}: retired intake wording: {match.group(0)}")
+                      failed = True
+          raise SystemExit(failed)
+          PY
+
       - name: Reject mutable action selectors
         run: |
           python - <<'PY'

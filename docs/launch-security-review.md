@@ -1,24 +1,27 @@
-# Pre-launch security review record
+# Pre-launch security review record, 2026-07-31
 
-Date: 2026-07-31
+## Superseded facts, as of 2026-08-08
 
-Current-infrastructure update: 2026-08-08. The security review remains the
-record of the launch-hardening work, and several things it describes have since
-been replaced. Intake is no longer a GitHub issue: submissions are dispatched
-here by the submission server, and the reporting job that bound a result to an
-issue is gone along with the write token it held. The database publication
-boundary changed too: `PalomarDatabase` is private, its active-only projection
-is published to private R2, and `data.palomar-registry.org` is a read-only
-Worker serving one document per question, with no whole-registry index. Review
-scores were moved out of the record into a private `scores/` file, which is why
-there is one record schema again rather than a canonical and a public one. The
-private repository is on GitHub Free and therefore no longer has enforced
-branch protection; its append-only controls are CI plus maintainer procedure
-until the organization upgrades to GitHub Team.
+This is the record of the launch-hardening work as it was reviewed on
+2026-07-31. It is not a description of what runs now. `SECURITY.md` is that, and
+where the two disagree `SECURITY.md` is right. Four things have changed since:
 
-Where the sections below describe the issue-based intake or the reporting job,
-read them as a record of what was reviewed in July, not as a description of what
-runs now.
+- **Intake.** Submissions no longer arrive as GitHub issues. The submission
+  server at <https://submit.palomar-registry.org> dispatches the verification
+  workflow, and the second job that bound a result back to an issue is gone
+  along with the write token it held.
+- **Publication.** `PalomarDatabase` is private, its active-only projection is
+  published to private R2, and `data.palomar-registry.org` is a read-only Worker
+  serving one document per question, with no whole-registry index.
+- **Scores.** Review scores were moved out of the record into a private
+  `scores/` file, which is why there is one record schema again rather than a
+  canonical and a public one.
+- **Branch protection.** The private repository is on GitHub Free and therefore
+  no longer has enforced branch protection; its append-only controls are CI plus
+  maintainer procedure until the organization upgrades to GitHub Team.
+
+Where the sections below describe the issue-based intake or the second job that
+reported into it, read them as a record of what was reviewed in July.
 
 This record covers the launch hardening tracked by
 [`PalomarSubmission#5`](https://github.com/PalomarRegistry/PalomarSubmission/issues/5).
