@@ -78,6 +78,14 @@ AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
 }
+SOURCE_TYPES = {
+    "paper",
+    "book",
+    "web discussion",
+    "folklore",
+    "original-proof",
+    "other",
+}
 ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
 SOURCE_RELATIONSHIPS = {
@@ -698,55 +706,68 @@ def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | Non
     return text
 
 
-def normalized_provenance(
-    data: dict[str, Any], *, warnings: list[str] | None = None
-) -> dict[str, Any]:
-    """Best-effort canonicalization of editorial provenance metadata.
+def reject_obsolete_provenance_fields(data: dict[str, Any]) -> None:
+    """Name every known pre-launch provenance spelling in one migration error."""
 
-    Provenance is useful during review, but incomplete or legacy provenance must
-    not prevent the mechanical verifier from reaching Lean and NanoDa.
-    """
+    obsolete: list[str] = []
+    project = data.get("project")
+    if isinstance(project, dict) and "responsible_maintainer" in project:
+        obsolete.append(
+            "project.responsible_maintainer (use project.responsible_maintainers as a "
+            "nonempty list)"
+        )
+    if "provenance" in data:
+        obsolete.append(
+            "top-level provenance (remove it; use project.responsible_maintainers, "
+            "repository, and sources with required relationships)"
+        )
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        for index, source in enumerate(sources):
+            if isinstance(source, dict) and "author" in source:
+                obsolete.append(
+                    f"sources[{index}].author (use sources[{index}].authors as a list)"
+                )
+    if obsolete:
+        raise VerificationError(
+            "formalization.yaml uses obsolete provenance fields: " + "; ".join(obsolete)
+        )
 
-    warning_set = set(warnings or [])
 
-    def warn(message: str) -> None:
-        if warnings is not None and message not in warning_set and len(warnings) < 100:
-            warnings.append(message)
-            warning_set.add(message)
+def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and canonicalize the current Palomar provenance contract."""
 
+    reject_obsolete_provenance_fields(data)
     project = _required_mapping(data.get("project"), "project")
-    maintainers_value = project.get("responsible_maintainers")
-    if maintainers_value is None and project.get("responsible_maintainer") is not None:
-        singular = project["responsible_maintainer"]
-        maintainers_value = singular if isinstance(singular, list) else [singular]
-    maintainers_declared = maintainers_value is not None
-    if maintainers_declared:
-        maintainers = _person_records(
-            maintainers_value,
-            "project.responsible_maintainers",
-            required=False,
-        )
-    else:
-        maintainers = []
-        warn("No responsible maintainer was declared; recorded as unspecified")
+    maintainers = _person_records(
+        project.get("responsible_maintainers"),
+        "project.responsible_maintainers",
+        required=True,
+    )
 
-    provenance_value = data.get("provenance")
-    provenance = provenance_value if isinstance(provenance_value, dict) else {}
-    legacy_result_origin = provenance.get("result_origin")
-
-    repository_value = data.get("repository")
-    repository = repository_value if isinstance(repository_value, dict) else {}
-    repository_role = repository.get("role")
-    repository_role_declared = repository_role in REPOSITORY_ROLES
+    repository = _required_mapping(data.get("repository"), "repository")
+    repository_role = _required_text(repository.get("role"), "repository.role").strip()
     if repository_role not in REPOSITORY_ROLES:
-        repository_role = "unspecified"
-        warn("No recognized repository.role was declared; recorded as unspecified")
-    substantive: dict[str, str] | None = None
-    if repository_role == "thin-wrapper":
-        item = _required_mapping(
-            repository.get("substantive_formalization"),
-            "repository.substantive_formalization",
+        allowed = ", ".join(sorted(REPOSITORY_ROLES))
+        raise VerificationError(
+            f"formalization.yaml field repository.role must be one of: {allowed}"
         )
+    substantive: dict[str, str] | None = None
+    if (
+        repository_role == "substantive-development"
+        and "substantive_formalization" in repository
+    ):
+        raise VerificationError(
+            "formalization.yaml field repository.substantive_formalization is valid only "
+            "when repository.role is thin-wrapper; remove it for substantive-development"
+        )
+    if repository_role == "thin-wrapper":
+        if not isinstance(repository.get("substantive_formalization"), dict):
+            raise VerificationError(
+                "formalization.yaml field repository.substantive_formalization is a required "
+                "mapping when repository.role is thin-wrapper"
+            )
+        item = repository["substantive_formalization"]
         repository_id = _required_text(
             item.get("id"), "repository.substantive_formalization.id"
         )
@@ -768,35 +789,44 @@ def normalized_provenance(
             "tree_url": f"{url}/tree/{revision}",
         }
 
-    raw_sources = data.get("sources", [])
-    if not isinstance(raw_sources, list):
-        warn("Ignoring sources because the field is not a list")
-        raw_sources = []
+    raw_sources = data.get("sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise VerificationError(
+            "formalization.yaml field sources must be a nonempty list; use an entry with "
+            "type: original-proof when the formalization first presents the result"
+        )
     sources: list[dict[str, Any]] = []
     for index, source in enumerate(raw_sources):
         path = f"sources[{index}]"
-        if not isinstance(source, dict):
-            warn(f"Ignoring {path} because it is not a mapping")
-            continue
-        item = source
+        item = _required_mapping(source, path)
         raw_relationship = item.get("relationship")
-        relationship = raw_relationship
+        if not isinstance(raw_relationship, str) or not raw_relationship.strip():
+            raise VerificationError(
+                f"formalization.yaml field {path}.relationship must be a nonempty string; "
+                "every source needs a relationship, including original-proof entries, which "
+                "must use other"
+            )
+        relationship = raw_relationship.strip()
         if relationship not in SOURCE_RELATIONSHIPS:
-            relationship = "other"
-            rendered = repr(raw_relationship)[:100]
-            warn(f"Treating unrecognized {path}.relationship {rendered} as 'other'")
-        authors = item.get("authors")
-        if authors is None and item.get("author") is not None:
-            singular = item["author"]
-            authors = singular if isinstance(singular, list) else [singular]
+            allowed = ", ".join(sorted(SOURCE_RELATIONSHIPS))
+            raise VerificationError(
+                f"formalization.yaml field {path}.relationship must be one of: {allowed}"
+            )
+        source_type = _optional_text(item.get("type"), f"{path}.type", maximum=200)
+        if source_type is not None and source_type not in SOURCE_TYPES:
+            allowed = ", ".join(sorted(SOURCE_TYPES))
+            raise VerificationError(
+                f"formalization.yaml field {path}.type must be one of: {allowed}"
+            )
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
-            "authors": _person_records(authors, f"{path}.authors", required=False),
+            "authors": _person_records(
+                item.get("authors"), f"{path}.authors", required=False
+            ),
             "relationship": relationship,
         }
         for source_key, record_key, maximum in (
             ("id", "identifier", 2_048),
-            ("type", "type", 200),
             ("location", "location", 1_000),
             ("license", "license", 500),
             ("author_endorsement", "author_endorsement", 100),
@@ -805,10 +835,14 @@ def normalized_provenance(
             value = _optional_text(raw_value, f"{path}.{source_key}", maximum=maximum)
             if value is not None:
                 record[record_key] = value
+        if source_type is not None:
+            record["type"] = source_type
         endorsement = record.get("author_endorsement")
         if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
-            del record["author_endorsement"]
-            warn(f"Ignoring unrecognized {path}.author_endorsement")
+            allowed = ", ".join(sorted(SOURCE_ENDORSEMENTS))
+            raise VerificationError(
+                f"formalization.yaml field {path}.author_endorsement must be one of: {allowed}"
+            )
         sources.append(record)
 
     has_original_proof = any(
@@ -816,52 +850,35 @@ def normalized_provenance(
     )
     if has_original_proof:
         result_origin = "original"
-        result_origin_declared = True
-        if legacy_result_origin == "source-based":
-            warn(
-                "Ignoring legacy provenance.result_origin because it conflicts with sources"
-            )
-    elif legacy_result_origin == "original":
-        # Older v0.3 metadata could declare an original result and still list
-        # background sources. Keep it readable while asking new submissions to
-        # use the original-proof source type.
-        result_origin = "original"
-        result_origin_declared = True
-        warn(
-            "Using legacy provenance.result_origin because no original-proof source was declared"
-        )
-    elif sources:
-        result_origin = "source-based"
-        result_origin_declared = True
-    elif legacy_result_origin == "source-based":
-        # Preserve already-submitted v0.3 metadata while the ecosystem moves to
-        # the required sources/original-proof convention.
-        result_origin = "source-based"
-        result_origin_declared = True
-        warn(
-            "Using legacy provenance.result_origin because no source entry declares origin"
-        )
     else:
-        result_origin = "unspecified"
-        result_origin_declared = False
-        warn("No source entry declared result origin; recorded as unspecified")
+        result_origin = "source-based"
 
     substantive_relationships = {"formalizes", "adapts", "independently-proves"}
     if result_origin == "source-based" and not any(
         source["relationship"] in substantive_relationships for source in sources
     ):
-        warn(
-            "Source-based provenance has no source explicitly marked formalizes, adapts, "
-            "or independently-proves"
+        raise VerificationError(
+            "formalization.yaml sources for a source-based result must include a "
+            "formalizes, adapts, or independently-proves relationship"
+        )
+    if result_origin == "original" and any(
+        source.get("type") == ORIGINAL_PROOF_TYPE and source["relationship"] != "other"
+        for source in sources
+    ):
+        raise VerificationError(
+            "formalization.yaml type: original-proof declares that this formalization first "
+            "presents the result and must use relationship: other. If the source is a prior "
+            "publication of the result, use its actual type (such as paper or book) and keep "
+            "the substantive relationship instead"
         )
     if result_origin == "original" and any(
         source["relationship"] in substantive_relationships for source in sources
     ):
-        result_origin = "unspecified"
-        result_origin_declared = False
-        warn(
-            "Declared original provenance conflicts with a substantive source relationship; "
-            "recorded as unspecified"
+        raise VerificationError(
+            "formalization.yaml declares an original-proof, so every source must use "
+            "relationship background or other; formalizes, adapts, and independently-proves "
+            "declare a source-based result. Remove type: original-proof when the named source "
+            "is a prior presentation of the result"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -875,8 +892,9 @@ def normalized_provenance(
         item = _required_mapping(related_item, path)
         relationship = _required_text(item.get("relationship"), f"{path}.relationship").strip()
         if relationship not in RELATED_FORMALIZATION_RELATIONSHIPS:
+            allowed = ", ".join(sorted(RELATED_FORMALIZATION_RELATIONSHIPS))
             raise VerificationError(
-                f"formalization.yaml field {path}.relationship is not recognized"
+                f"formalization.yaml field {path}.relationship must be one of: {allowed}"
             )
         record = {
             "identifier": _required_text(item.get("id"), f"{path}.id").strip(),
@@ -893,11 +911,6 @@ def normalized_provenance(
         "responsible_maintainers": maintainers,
         "mathematical_sources": sources,
         "related_formalizations": related,
-        "declared": {
-            "result_origin": result_origin_declared,
-            "repository_role": repository_role_declared,
-            "responsible_maintainers": maintainers_declared,
-        },
     }
     if substantive is not None:
         result["substantive_formalization"] = substantive
@@ -944,17 +957,22 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
     # resubmit, wait, learn the next one.
     missing = [
         name
-        for name in ("project", "classification", "automation", "review")
+        for name in ("project", "repository", "classification", "automation", "review")
         if not isinstance(data.get(name), dict)
     ]
+    if not isinstance(data.get("sources"), list) or not data["sources"]:
+        missing.append("sources (nonempty list)")
     if missing:
         raise VerificationError(
             "formalization.yaml is missing the sections Palomar requires: "
             + ", ".join(missing)
-            + ". Palomar follows the mathlib-initiative formalization.yaml v0.3 format "
-            "(https://github.com/mathlib-initiative/formalization.yaml); a file written "
-            "before it, or in a project's own shape, needs those sections adding."
+            + ". Palomar uses the mathlib-initiative formalization.yaml v0.3 format as a "
+            "base (https://github.com/mathlib-initiative/formalization.yaml) plus Palomar's "
+            "current repository and provenance additions; a plain v0.3 file, an older file, "
+            "or a project-specific shape needs those sections adding."
         )
+
+    reject_obsolete_provenance_fields(data)
 
     project = _required_mapping(data.get("project"), "project")
     _required_text(project.get("name"), "project.name")
@@ -1369,7 +1387,7 @@ def prepare(args: argparse.Namespace) -> int:
             source, metadata_relative, "Formalization metadata path", kind="file"
         )
         formalization = load_formalization_metadata(metadata_path)
-        provenance = normalized_provenance(formalization, warnings=report["warnings"])
+        provenance = normalized_provenance(formalization)
         substantive = provenance.get("substantive_formalization")
         if isinstance(substantive, dict):
             validate_preservable_remote_source(
@@ -1466,9 +1484,6 @@ def prepare(args: argparse.Namespace) -> int:
                     ],
                 },
                 "provenance": provenance,
-                # Retained for report-schema compatibility with already published tooling.
-                "formalization_sha256": sha256(metadata_path),
-                "comparator_config_sha256": sha256(config_path),
                 "lakefile": {
                     "path": lakefile_relative,
                     "sha256": sha256(lakefile),

@@ -246,6 +246,23 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             "cold_build=true",
         )
 
+    def test_template_contract_is_pinned_on_prs_and_live_drift_is_scheduled(self):
+        ci_path = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+        ci = yaml.load(ci_path.read_text(), Loader=yaml.BaseLoader)
+        pinned_step = next(
+            step
+            for step in ci["jobs"]["test"]["steps"]
+            if step.get("name") == "Match the current PalomarTemplate metadata contract"
+        )
+        template_commit = "d720f59dbe2edd29e0b9273c113139cdb1f24d2b"
+        self.assertIn(f"/{template_commit}/formalization.yaml", pinned_step["run"])
+        self.assertNotIn("/main/formalization.yaml", pinned_step["run"])
+
+        drift_step = self.step("scope", "template")
+        self.assertEqual(drift_step["if"], "github.event_name != 'pull_request'")
+        self.assertIn("/main/formalization.yaml", drift_step["run"])
+        self.assertIn("cmp tests/fixtures/palomar-template-formalization.yaml", drift_step["run"])
+
     def test_required_gate_passes_only_the_two_valid_outcomes(self):
         prose = self.run_gate("success", "false", "skipped")
         built = self.run_gate("success", "true", "success")

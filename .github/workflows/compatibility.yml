@@ -20,6 +20,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Detect drift from the current PalomarTemplate metadata contract
+        id: template
+        if: github.event_name != 'pull_request'
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/palomar-template-formalization.yaml" \
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/formalization.yaml
+          cmp tests/fixtures/palomar-template-formalization.yaml \
+            "$RUNNER_TEMP/palomar-template-formalization.yaml"
       - name: Select changes that need the cold-build regression
         id: scope
         shell: bash
