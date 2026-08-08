@@ -78,6 +78,9 @@ The maintained test surfaces are:
   and network probes plus direct canonical Challenge compilation;
 - `tests/test_render_challenge.py` and `tests/test_landrun_passthrough.py`:
   the pinned Verso rendering path and the sandbox flags it is given;
+- `tests/test_compatibility_workflow.py`: the merge-base scope decision and the
+  required final gate, including renames, deletions, unusual paths, and failed
+  classification or build jobs;
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
   accepted `erdos-unit-distance-comparator` fixture at commit
   `8d9b8319a4ed2dd094655978e905512dee6394b6`, including its Mathlib, Tau Ceti,
@@ -87,12 +90,24 @@ The maintained test surfaces are:
   350-minute job, so setup time and candidate execution consume one allowance.
   The verifier's trusted default supports twelve hours on a suitably configured
   worker; hosted-tier exhaustion is retryable infrastructure, not rejection.
+  Pull requests first classify their merge-base diff. Only changes confined to
+  `README.md`, `SECURITY.md`, `LICENSE`,
+  `docs/comparator-declaration-closure.md`,
+  `docs/launch-security-review.md`, `docs/mathlib-cache-trust.md`,
+  `taxonomies/README.md`, and `taxonomies/LICENSE.md` skip the cold build. A new
+  documentation path is not implicitly trusted. Every non-pull-request event
+  runs the cold build, including manual dispatch and the weekly compatibility
+  canary. The required `compatibility` gate passes only when classification
+  succeeds and either the selected cold build succeeds or the change is
+  explicitly confined to that exact prose set.
 
 The cold fixture passed locally with Lean `v4.31.0-rc2`, Landrun, 16 pinned
 project dependencies, canonical Challenge compilation, source provenance
 audit, the complete confinement probe set, and candidate Challenge/Solution
 builds and comparison. The pull-request workflow must reproduce that result on
-the supported GitHub-hosted runner before merge.
+the supported GitHub-hosted runner before merging any execution-affecting
+change. The explicit prose-only gate is sufficient for the documentation paths
+described above.
 
 ## Component review
 
