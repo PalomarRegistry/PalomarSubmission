@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m py_compile scripts/*.py tests/*.py
           PALOMAR_TEST_LICENSEE="$(command -v bundle)" python -m unittest discover -v
-      - name: Match the current PalomarTemplate metadata contract
+      - name: Match the current PalomarTemplate authoring contracts
         run: |
           curl --fail --location --retry 3 --retry-all-errors \
             --proto '=https' --tlsv1.2 \
@@ -39,6 +39,21 @@ jobs:
             https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/d720f59dbe2edd29e0b9273c113139cdb1f24d2b/formalization.yaml
           cmp tests/fixtures/palomar-template-formalization.yaml \
             "$RUNNER_TEMP/palomar-template-formalization.yaml"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/palomar-template-comparator.json" \
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/d720f59dbe2edd29e0b9273c113139cdb1f24d2b/comparator.json
+          cmp tests/fixtures/palomar-template-comparator.json \
+            "$RUNNER_TEMP/palomar-template-comparator.json"
+          python - "$RUNNER_TEMP/palomar-template-comparator.json" <<'PY'
+          import pathlib
+          import sys
+
+          sys.path.insert(0, ".")
+          from scripts.verify_submission import load_comparator_config
+
+          load_comparator_config(pathlib.Path(sys.argv[1]))
+          PY
       - name: Exercise the real Landrun and systemd boundary
         run: |
           CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4

@@ -28,7 +28,6 @@ from scripts.verify_submission import (
     compile_canonical_challenge,
     detect_spdx_identifier,
     direct_imports,
-    enforced_comparator_config,
     ensure_lake_manifest,
     execute,
     github_repository,
@@ -41,6 +40,7 @@ from scripts.verify_submission import (
     normalized_repository_path,
     package_allowlist,
     project_tree_url,
+    protected_comparator_config,
     protected_lean_path,
     reject_committed_build_artifacts,
     reject_untrusted_package_artifacts,
@@ -735,32 +735,53 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
     def test_comparator_config(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "comparator.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "challenge_module": "Challenge",
-                        "solution_module": "Solution",
-                        "theorem_names": ["headline"],
-                        "definition_names": [],
-                        "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
-                        "enable_nanoda": False,
-                    }
-                )
-            )
+            config = {
+                "challenge_module": "Challenge",
+                "solution_module": "Solution",
+                "theorem_names": ["headline"],
+                "definition_names": [],
+                "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
+                "enable_nanoda": True,
+            }
+            path.write_text(json.dumps(config, indent=2) + "\n")
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
-            enforced = Path(directory) / "enforced.json"
-            enforced_comparator_config(path, enforced)
-            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
-            self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
+            protected = Path(directory) / "protected.json"
+            protected_comparator_config(path, protected)
+            self.assertEqual(protected.read_bytes(), path.read_bytes())
 
-            config = json.loads(path.read_text())
+            protected.unlink()
+            valid_json = json.dumps(config)
+            for key, value in (
+                ("enable_nanoda", "false"),
+                ("permitted_axioms", '["sorryAx"]'),
+            ):
+                with self.subTest(duplicate=key):
+                    path.write_text(valid_json[:-1] + f', "{key}": {value}' + "}")
+                    with self.assertRaisesRegex(
+                        VerificationError, f"duplicate keys: {key}"
+                    ):
+                        protected_comparator_config(path, protected)
+                    self.assertFalse(protected.exists())
+
+            path.write_text("{")
+            with self.assertRaisesRegex(VerificationError, "valid UTF-8 JSON"):
+                load_comparator_config(path)
+            path.write_bytes(b"\xff")
+            with self.assertRaisesRegex(VerificationError, "valid UTF-8 JSON"):
+                load_comparator_config(path)
+
+            for value in (False, None, 0, 1, "true", [], {}):
+                with self.subTest(enable_nanoda=value):
+                    config["enable_nanoda"] = value
+                    path.write_text(json.dumps(config))
+                    with self.assertRaisesRegex(
+                        VerificationError, "enable_nanoda must be exactly true"
+                    ):
+                        load_comparator_config(path)
+
             config["enable_nanoda"] = True
-            path.write_text(json.dumps(config))
-            enforced_comparator_config(path, enforced)
-            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
 
-            config = json.loads(path.read_text())
             config["future_relaxation"] = True
             path.write_text(json.dumps(config))
             with self.assertRaisesRegex(VerificationError, "unknown keys"):
@@ -768,18 +789,53 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
 
             config.pop("future_relaxation")
             config.pop("enable_nanoda")
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(VerificationError, "missing: enable_nanoda"):
+                load_comparator_config(path)
+
+            config["enable_nanoda"] = True
             config["challenge_module"] = "Audit.PeriodicGeneral.Challenge"
             config["solution_module"] = "Audit.PeriodicGeneral.Solution"
             path.write_text(json.dumps(config))
             loaded = load_comparator_config(path)
             self.assertEqual(loaded["challenge_module"], config["challenge_module"])
-            enforced_comparator_config(path, enforced)
-            self.assertTrue(json.loads(enforced.read_text())["enable_nanoda"])
+            self.assertEqual(loaded["solution_module"], config["solution_module"])
 
             config["solution_module"] = config["challenge_module"]
             path.write_text(json.dumps(config))
             with self.assertRaisesRegex(VerificationError, "must be distinct"):
                 load_comparator_config(path)
+
+    def test_toolchain_policy_has_only_the_consumed_minimum(self):
+        settings = json.loads((REPOSITORY_ROOT / "toolchains.json").read_text())
+        self.assertEqual(settings, {"schema_version": 2, "minimum": "v4.28.0"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid_shapes = (
+                {"schema_version": 2, "minimum": "v4.28.0", "unknown": True},
+                {"minimum": "v4.28.0"},
+                {"schema_version": 2},
+            )
+            for settings in invalid_shapes:
+                with self.subTest(settings=settings):
+                    (root / "toolchains.json").write_text(json.dumps(settings))
+                    with mock.patch.object(verifier, "ROOT", root):
+                        with self.assertRaisesRegex(
+                            VerificationError, "exactly schema_version and minimum"
+                        ):
+                            verifier.supported_toolchain("leanprover/lean4:v4.32.0")
+
+            for schema_version in (True, 2.0, 3):
+                with self.subTest(schema_version=schema_version):
+                    (root / "toolchains.json").write_text(
+                        json.dumps(
+                            {"schema_version": schema_version, "minimum": "v4.28.0"}
+                        )
+                    )
+                    with mock.patch.object(verifier, "ROOT", root):
+                        with self.assertRaisesRegex(VerificationError, "schema version 2"):
+                            verifier.supported_toolchain("leanprover/lean4:v4.32.0")
 
     def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -982,6 +1038,7 @@ review:
                         "solution_module": "Solution",
                         "theorem_names": ["example"],
                         "permitted_axioms": [],
+                        "enable_nanoda": True,
                     }
                 )
             )

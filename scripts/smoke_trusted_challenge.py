@@ -16,7 +16,6 @@ from verify_submission import (
     audit_challenge_sources,
     build_allowlisted_roots,
     compile_canonical_challenge,
-    enforced_comparator_config,
     get_mathlib_cache,
     install_execution_deadline,
     lake_environment_value,
@@ -24,6 +23,7 @@ from verify_submission import (
     materialize_packages,
     package_allowlist,
     package_lake_directories,
+    protected_comparator_config,
     protected_lean_path,
     reject_untrusted_package_artifacts,
     require_protected_paths,
@@ -120,8 +120,8 @@ def main() -> int:
         if path.exists():
             executable_paths.append(path.resolve())
     executable_paths = sorted(set(executable_paths))
-    comparator_config = enforced_comparator_config(
-        source / "comparator.json", work / "enforced-comparator.json"
+    comparator_config = protected_comparator_config(
+        source / "comparator.json", work / "protected-comparator.json"
     )
     readable_paths = sorted({source, comparator_config, *system_readable_paths()})
     tools = tool_snapshot(

@@ -1,8 +1,4 @@
 {
   "schema_version": 2,
-  "minimum": "v4.28.0",
-  "tooling": {
-    "lean4export": "leanprover/lean4export",
-    "verso": "leanprover/verso"
-  }
+  "minimum": "v4.28.0"
 }

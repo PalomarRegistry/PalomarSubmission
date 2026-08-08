@@ -20,7 +20,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Detect drift from the current PalomarTemplate metadata contract
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: template-python
+        if: github.event_name != 'pull_request'
+        with:
+          python-version: "3.11.10"
+      - name: Install Template contract dependencies
+        id: template-dependencies
+        if: github.event_name != 'pull_request'
+        run: >-
+          python -m pip install --disable-pip-version-check --require-hashes
+          --no-deps -r requirements.txt
+      - name: Detect drift from the current PalomarTemplate authoring contracts
         id: template
         if: github.event_name != 'pull_request'
         run: |
@@ -30,6 +41,21 @@ jobs:
             https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/formalization.yaml
           cmp tests/fixtures/palomar-template-formalization.yaml \
             "$RUNNER_TEMP/palomar-template-formalization.yaml"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/palomar-template-comparator.json" \
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/comparator.json
+          cmp tests/fixtures/palomar-template-comparator.json \
+            "$RUNNER_TEMP/palomar-template-comparator.json"
+          python - "$RUNNER_TEMP/palomar-template-comparator.json" <<'PY'
+          import pathlib
+          import sys
+
+          sys.path.insert(0, ".")
+          from scripts.verify_submission import load_comparator_config
+
+          load_comparator_config(pathlib.Path(sys.argv[1]))
+          PY
       - name: Select changes that need the cold-build regression
         id: scope
         shell: bash
@@ -102,7 +128,7 @@ jobs:
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.31.0-rc2
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.0
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.33.0-rc1
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -113,22 +139,23 @@ jobs:
           test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.33.0-rc1"
           (cd comparator && lake build comparator)
           git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export
-          LEAN4EXPORT_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import resolve_release_commit, supported_toolchain; print(resolve_release_commit("leanprover/lean4export", supported_toolchain("leanprover/lean4:v4.31.0-rc2")))')"
+          LEAN4EXPORT_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import resolve_release_commit, supported_toolchain; print(resolve_release_commit("leanprover/lean4export", supported_toolchain("leanprover/lean4:v4.32.0")))')"
           git -C lean4export checkout "$LEAN4EXPORT_COMMIT"
-          test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
+          test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.32.0"
           (cd lean4export && lake build lean4export)
           git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git nanoda
           git -C nanoda checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
           cargo build --release --locked --manifest-path nanoda/Cargo.toml
-      - name: Clone the accepted compatibility fixture
+      - name: Clone the exact current PalomarTemplate fixture
         run: |
           git clone --filter=blob:none --no-checkout \
-            https://github.com/kim-em/erdos-unit-distance-comparator.git fixture
-          git -C fixture fetch --depth=1 origin 8d9b8319a4ed2dd094655978e905512dee6394b6
-          git -C fixture checkout --detach 8d9b8319a4ed2dd094655978e905512dee6394b6
+            https://github.com/PalomarRegistry/PalomarTemplate.git fixture
+          git -C fixture fetch --depth=1 origin d720f59dbe2edd29e0b9273c113139cdb1f24d2b
+          git -C fixture checkout --detach d720f59dbe2edd29e0b9273c113139cdb1f24d2b
+          test "$(tr -d '\r\n' < fixture/lean-toolchain)" = "leanprover/lean4:v4.32.0"
       - name: Exercise cold trusted and candidate builds
         env:
-          ELAN_TOOLCHAIN: leanprover/lean4:v4.31.0-rc2
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.32.0
           PALOMAR_EXECUTION_BUDGET_SECONDS: "19800"
         run: |
           python pipeline/scripts/smoke_trusted_challenge.py \
