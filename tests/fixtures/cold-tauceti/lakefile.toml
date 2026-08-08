@@ -1,0 +1,15 @@
+name = "PalomarColdTauCetiFixture"
+defaultTargets = ["Challenge", "Solution"]
+
+[[require]]
+name = "TauCeti"
+git = "https://github.com/FormalFrontier/TauCeti"
+rev = "221bb56a017bb794421eac4fa543d7a5e85add75"
+
+[[lean_lib]]
+name = "Challenge"
+roots = ["Challenge"]
+
+[[lean_lib]]
+name = "Solution"
+roots = ["Solution"]
