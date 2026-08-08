@@ -1,0 +1,95 @@
+# formalization.yaml v0.3. Replace every TEMPLATE value before submitting.
+# A placeholder list may be replaced with [] when the honest answer is none.
+version: "v0.3"
+
+project:
+  name: "TEMPLATE: name of the formalization"
+  authors:
+    - "TEMPLATE: formalizer name"
+  # Required root licence. Keep this in sync with the Apache-2.0 LICENSE file.
+  license: "Apache-2.0"
+  responsible_maintainers:
+    - "TEMPLATE: person responsible for this formalization"
+
+repository:
+  # Use thin-wrapper only when this repository merely exposes another pinned
+  # formalization repository to Comparator; then add substantive_formalization.
+  role: "TEMPLATE: substantive-development or thin-wrapper"
+  # substantive_formalization:
+  #   id: "TEMPLATE: owner/repository"
+  #   revision: "TEMPLATE: full lowercase commit SHA"
+
+classification:
+  # Use 1–2 official arXiv identifiers such as math.LO and 1–8 five-character
+  # MSC 2020 identifiers such as 03B35.
+  arxiv: ["TEMPLATE: official arXiv identifier such as math.LO"]
+  msc2020: ["TEMPLATE: five-character MSC 2020 identifier such as 03B35"]
+
+sources:
+  # Sources are required. For a theorem first presented by this formalization,
+  # use a descriptive title and set type to original-proof.
+  - title: "TEMPLATE: title of the mathematical source"
+    authors:
+      - "TEMPLATE: source author"
+    id: "TEMPLATE: stable identifier or versioned URL"
+    type: "TEMPLATE: paper, book, web discussion, folklore, original-proof, or other"
+    location: "TEMPLATE: stable URL or bibliographic location, if available"
+    relationship: "TEMPLATE: formalizes, adapts, independently-proves, background, or other"
+    license: "TEMPLATE: source license or unknown"
+    author_endorsement: "TEMPLATE: participated, endorsed, no-response, not-contacted, declined, or n/a"
+
+related_formalizations:
+  - id: "TEMPLATE: stable URL or identifier for earlier formalization"
+    relationship: "TEMPLATE: builds-on, adapts, independent, supersedes, or other"
+    note: "TEMPLATE: explain the relationship"
+
+status:
+  scope: >-
+    TEMPLATE: state exactly what is and is not formalized, including any weaker
+    theorem, changed hypotheses, or omitted material.
+  # Count the proof development, excluding Challenge.lean's deliberate sorry.
+  # Replace each count with an unquoted nonnegative integer, for example 0.
+  sorry_count: "TEMPLATE: unquoted nonnegative integer"
+  sorry_in_definitions: "TEMPLATE: unquoted nonnegative integer"
+  axioms: ["TEMPLATE: declaration names, or replace this list with []"]
+  main_results:
+    - declaration: "TEMPLATE: fully qualified Lean declaration"
+      file: "TEMPLATE: source file containing the proved declaration"
+      sorry_count: "TEMPLATE: unquoted nonnegative integer"
+      axioms: ["TEMPLATE: declaration names, or replace this list with []"]
+      comparator_config: "TEMPLATE: path to the Comparator configuration"
+      literature_dependencies: ["TEMPLATE: source identifiers, or replace this list with []"]
+
+automation:
+  methods:
+    - method: "TEMPLATE: manual, AI-assisted, or other honest description"
+      models: ["TEMPLATE: model names, or replace this list with []"]
+      framework: "TEMPLATE: framework name, or n/a"
+      tool_setup: "TEMPLATE: editors, tactics, agents, or other tools used"
+      cost:
+        wall_time: "TEMPLATE: approximate elapsed effort"
+        spend_usd: "TEMPLATE: amount, subscription-based, or not tracked"
+        hardware: "TEMPLATE: local machine, API-only, or other"
+      prompting_notes: "TEMPLATE: representative prompting notes, or n/a"
+  spend_usd: "TEMPLATE: total amount, subscription-based, or not tracked"
+  notes: "TEMPLATE: describe the overall human and automation workflow"
+
+fidelity:
+  divergences: "TEMPLATE: all known divergences from the cited source, or none known"
+
+review:
+  status: "TEMPLATE: honest review status, for example self-assessed"
+  reviewers:
+    - "TEMPLATE: reviewer name, or none"
+  notes: "TEMPLATE: describe statement audits and mathematical review performed"
+
+alignment:
+  namespace: "TEMPLATE: project namespace"
+  statements:
+    - source: "TEMPLATE: source theorem or section"
+      lean: "TEMPLATE: fully qualified Lean declaration"
+      module: "TEMPLATE: Lean module containing the declaration"
+      status: "TEMPLATE: proved, partial, adapted, or other honest description"
+      note: "TEMPLATE: explain the correspondence and any qualifications"
+
+acknowledgements: "TEMPLATE: libraries, tools, and people to credit"

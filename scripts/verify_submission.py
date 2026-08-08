@@ -78,6 +78,14 @@ AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
 }
+SOURCE_TYPES = {
+    "paper",
+    "book",
+    "web discussion",
+    "folklore",
+    "original-proof",
+    "other",
+}
 ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
 SOURCE_RELATIONSHIPS = {
@@ -713,12 +721,13 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         required=True,
     )
 
-    provenance_value = data.get("provenance")
-    if isinstance(provenance_value, dict) and "result_origin" in provenance_value:
+    if "provenance" in data:
         raise VerificationError(
-            "formalization.yaml field provenance.result_origin is obsolete; declare an "
-            "original result with sources[].type: original-proof, or declare the result's "
-            "source with a formalizes, adapts, or independently-proves relationship"
+            "formalization.yaml top-level field provenance is obsolete; declare provenance "
+            "through project.responsible_maintainers, repository, and sources. Every source "
+            "needs relationship; use type: original-proof with only background or other "
+            "relationships for an original result, or use formalizes, adapts, or "
+            "independently-proves for a source-based result"
         )
 
     repository = _required_mapping(data.get("repository"), "repository")
@@ -770,13 +779,24 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
                 f"formalization.yaml field {path}.author is obsolete; use {path}.authors "
                 "as a list"
             )
-        relationship = _required_text(
-            item.get("relationship"), f"{path}.relationship"
-        ).strip()
+        raw_relationship = item.get("relationship")
+        if not isinstance(raw_relationship, str) or not raw_relationship.strip():
+            raise VerificationError(
+                f"formalization.yaml field {path}.relationship must be a nonempty string; "
+                "every source needs a relationship, including original-proof entries, which "
+                "must use background or other"
+            )
+        relationship = raw_relationship.strip()
         if relationship not in SOURCE_RELATIONSHIPS:
             allowed = ", ".join(sorted(SOURCE_RELATIONSHIPS))
             raise VerificationError(
                 f"formalization.yaml field {path}.relationship must be one of: {allowed}"
+            )
+        source_type = _optional_text(item.get("type"), f"{path}.type", maximum=200)
+        if source_type is not None and source_type not in SOURCE_TYPES:
+            allowed = ", ".join(sorted(SOURCE_TYPES))
+            raise VerificationError(
+                f"formalization.yaml field {path}.type must be one of: {allowed}"
             )
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
@@ -787,7 +807,6 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         }
         for source_key, record_key, maximum in (
             ("id", "identifier", 2_048),
-            ("type", "type", 200),
             ("location", "location", 1_000),
             ("license", "license", 500),
             ("author_endorsement", "author_endorsement", 100),
@@ -796,6 +815,8 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             value = _optional_text(raw_value, f"{path}.{source_key}", maximum=maximum)
             if value is not None:
                 record[record_key] = value
+        if source_type is not None:
+            record["type"] = source_type
         endorsement = record.get("author_endorsement")
         if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
             allowed = ", ".join(sorted(SOURCE_ENDORSEMENTS))
@@ -824,8 +845,9 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         source["relationship"] in substantive_relationships for source in sources
     ):
         raise VerificationError(
-            "formalization.yaml sources declare both an original-proof and a source that "
-            "the result formalizes, adapts, or independently proves; choose one result origin"
+            "formalization.yaml declares an original-proof, so every source must use "
+            "relationship background or other; formalizes, adapts, and independently-proves "
+            "declare a source-based result"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -857,11 +879,6 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         "responsible_maintainers": maintainers,
         "mathematical_sources": sources,
         "related_formalizations": related,
-        "declared": {
-            "result_origin": True,
-            "repository_role": True,
-            "responsible_maintainers": True,
-        },
     }
     if substantive is not None:
         result["substantive_formalization"] = substantive
@@ -908,16 +925,19 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
     # resubmit, wait, learn the next one.
     missing = [
         name
-        for name in ("project", "classification", "automation", "review")
+        for name in ("project", "repository", "classification", "automation", "review")
         if not isinstance(data.get(name), dict)
     ]
+    if not isinstance(data.get("sources"), list) or not data["sources"]:
+        missing.append("sources (nonempty list)")
     if missing:
         raise VerificationError(
             "formalization.yaml is missing the sections Palomar requires: "
             + ", ".join(missing)
-            + ". Palomar follows the mathlib-initiative formalization.yaml v0.3 format "
-            "(https://github.com/mathlib-initiative/formalization.yaml); a file written "
-            "before it, or in a project's own shape, needs those sections adding."
+            + ". Palomar uses the mathlib-initiative formalization.yaml v0.3 format as a "
+            "base (https://github.com/mathlib-initiative/formalization.yaml) plus Palomar's "
+            "current repository and provenance additions; a plain v0.3 file, an older file, "
+            "or a project-specific shape needs those sections adding."
         )
 
     project = _required_mapping(data.get("project"), "project")

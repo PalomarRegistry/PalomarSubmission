@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -903,6 +904,46 @@ review:
             self.assertEqual(metadata["project"]["name"], "Example result")
             self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
 
+    def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
+        # Exact snapshot of PalomarTemplate@c6a85fcc7727eed77ed8d2d5b3eeb989e20f8704.
+        # Pinning the bytes makes a cross-repository contract change deliberate rather
+        # than silently turning this into a hand-written approximation of the template.
+        fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
+        raw = fixture.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            "71bd73c62a11e97df65ef5bc9f691ec33b2ece665ae1acb99687d6ed96fad516",
+        )
+        template = yaml.load(raw, Loader=verifier.UniqueKeySafeLoader)
+        self.assertEqual(
+            template["sources"][0]["type"],
+            "TEMPLATE: paper, book, web discussion, folklore, original-proof, or other",
+        )
+
+        template["project"]["name"] = "Example result"
+        template["project"]["authors"] = ["Ada Lovelace"]
+        template["project"]["responsible_maintainers"] = ["Ada Lovelace"]
+        template["repository"]["role"] = "substantive-development"
+        template["classification"] = {"arxiv": ["math.LO"], "msc2020": ["03B35"]}
+        template["sources"][0].update(
+            {
+                "title": "A source theorem",
+                "type": "paper",
+                "relationship": "formalizes",
+                "author_endorsement": "n/a",
+            }
+        )
+        template["related_formalizations"] = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(json.dumps(template), encoding="utf-8")
+            metadata = load_formalization_metadata(path)
+        provenance = verifier.normalized_provenance(metadata)
+        self.assertEqual(provenance["result_origin"], "source-based")
+        self.assertEqual(provenance["mathematical_sources"][0]["type"], "paper")
+        self.assertNotIn("declared", provenance)
+
     def test_prepared_report_uses_only_nested_artifact_digests(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -994,6 +1035,8 @@ review:
 
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "pending", report["errors"])
+            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["warnings"], [])
             self.assertEqual(
                 report["formalization"]["sha256"],
                 verifier.sha256(fixture / "formalization.yaml"),
@@ -1004,6 +1047,7 @@ review:
             )
             self.assertNotIn("formalization_sha256", report)
             self.assertNotIn("comparator_config_sha256", report)
+            self.assertNotIn("declared", report["provenance"])
 
     def test_formalization_metadata_rejects_unknown_or_too_many_classifications(self):
         valid = """\
@@ -1058,25 +1102,33 @@ review:
             }
         )
         self.assertEqual(provenance["result_origin"], "original")
-        self.assertTrue(provenance["declared"]["result_origin"])
+        self.assertNotIn("declared", provenance)
 
-    def test_result_origin_must_be_declared_by_current_source_fields(self):
-        with self.assertRaisesRegex(
-            VerificationError, r"provenance\.result_origin is obsolete.*original-proof"
-        ):
-            verifier.normalized_provenance(
+    def test_obsolete_top_level_provenance_is_always_rejected(self):
+        current = {
+            "project": {"responsible_maintainers": ["Ada Lovelace"]},
+            "repository": {"role": "substantive-development"},
+            "sources": [
                 {
-                    "project": {"responsible_maintainers": ["Ada Lovelace"]},
-                    "provenance": {"result_origin": "original"},
-                    "repository": {"role": "substantive-development"},
-                    "sources": [
-                        {
-                            "title": "Background textbook",
-                            "relationship": "background",
-                        }
-                    ],
+                    "title": "Background textbook",
+                    "type": "original-proof",
+                    "relationship": "background",
                 }
-            )
+            ],
+        }
+        for obsolete in (
+            {"result_origin": "original"},
+            {"notes": "free-form provenance does not belong here"},
+            {},
+            "original",
+            None,
+        ):
+            with self.subTest(obsolete=obsolete):
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    r"top-level field provenance is obsolete.*Every source needs relationship",
+                ):
+                    verifier.normalized_provenance({**current, "provenance": obsolete})
 
     def test_source_based_provenance_requires_a_substantive_relationship(self):
         data = {
@@ -1164,6 +1216,15 @@ review:
         ):
             verifier.normalized_provenance(invalid_relationship)
 
+        invalid_type = json.loads(json.dumps(current))
+        invalid_type["sources"][0]["type"] = "web-discussion"
+        with self.assertRaisesRegex(
+            VerificationError,
+            r"sources\[0\]\.type must be one of: book, folklore, original-proof, other, "
+            r"paper, web discussion",
+        ):
+            verifier.normalized_provenance(invalid_type)
+
         invalid_endorsement = json.loads(json.dumps(current))
         invalid_endorsement["sources"][0]["author_endorsement"] = "unknown"
         with self.assertRaisesRegex(
@@ -1171,8 +1232,39 @@ review:
         ):
             verifier.normalized_provenance(invalid_endorsement)
 
+    def test_source_types_exactly_match_the_current_template_vocabulary(self):
+        expected = {
+            "paper",
+            "book",
+            "web discussion",
+            "folklore",
+            "original-proof",
+            "other",
+        }
+        self.assertEqual(verifier.SOURCE_TYPES, expected)
+        for source_type in sorted(expected):
+            with self.subTest(source_type=source_type):
+                source = {
+                    "title": "A mathematical source",
+                    "type": source_type,
+                    "relationship": (
+                        "background" if source_type == "original-proof" else "formalizes"
+                    ),
+                }
+                provenance = verifier.normalized_provenance(
+                    {
+                        "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                        "repository": {"role": "substantive-development"},
+                        "sources": [source],
+                    }
+                )
+                self.assertEqual(provenance["mathematical_sources"][0]["type"], source_type)
+
     def test_original_proof_cannot_also_claim_a_source_based_origin(self):
-        with self.assertRaisesRegex(VerificationError, "choose one result origin"):
+        with self.assertRaisesRegex(
+            VerificationError,
+            "every source must use relationship background or other",
+        ):
             verifier.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
@@ -1187,6 +1279,43 @@ review:
                             "title": "A source theorem",
                             "relationship": "formalizes",
                         },
+                    ],
+                }
+            )
+
+    def test_original_proof_source_itself_needs_a_non_substantive_relationship(self):
+        with self.assertRaisesRegex(
+            VerificationError,
+            "every source must use relationship background or other",
+        ):
+            verifier.normalized_provenance(
+                {
+                    "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                    "repository": {"role": "substantive-development"},
+                    "sources": [
+                        {
+                            "title": "Original proof",
+                            "type": "original-proof",
+                            "relationship": "formalizes",
+                        }
+                    ],
+                }
+            )
+
+    def test_original_proof_source_still_requires_relationship(self):
+        with self.assertRaisesRegex(
+            VerificationError,
+            r"sources\[0\]\.relationship.*every source needs a relationship.*original-proof",
+        ):
+            verifier.normalized_provenance(
+                {
+                    "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                    "repository": {"role": "substantive-development"},
+                    "sources": [
+                        {
+                            "title": "Original proof",
+                            "type": "original-proof",
+                        }
                     ],
                 }
             )
@@ -1248,7 +1377,9 @@ review:
             path = Path(directory) / "formalization.yaml"
             path.write_text("{}\n")
             with self.assertRaisesRegex(
-                VerificationError, "missing the sections Palomar requires: project"
+                VerificationError,
+                r"missing the sections Palomar requires: project, repository, "
+                r"classification, automation, review, sources \(nonempty list\)",
             ):
                 load_formalization_metadata(path)
 
@@ -1261,10 +1392,15 @@ project:
   name: ""
   authors: []
   license: ""
+  responsible_maintainers: [Ada Lovelace]
+repository:
+  role: substantive-development
 classification:
   arxiv: []
   msc2020: []
-sources: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
 automation:
   methods: []
 review:
@@ -2036,15 +2172,25 @@ class MetadataShapeTests(unittest.TestCase):
         with self.assertRaises(verifier.VerificationError) as caught:
             self.load("result:\n  name: x\nartifacts:\n  challenge: Challenge.lean\n")
         message = str(caught.exception)
-        for section in ("project", "classification", "automation", "review"):
+        for section in (
+            "project",
+            "repository",
+            "classification",
+            "automation",
+            "review",
+            "sources (nonempty list)",
+        ):
             self.assertIn(section, message, f"{section} was not named")
         self.assertIn("mathlib-initiative/formalization.yaml", message)
+        self.assertIn("plus Palomar's current repository and provenance additions", message)
 
     def test_a_file_with_the_sections_gets_the_specific_complaint(self):
         # And once the shape is right, the detailed checks speak again.
         with self.assertRaisesRegex(verifier.VerificationError, "project.name"):
             self.load(
-                "project: {}\nclassification: {}\nautomation: {}\nreview: {}\n"
+                "project: {}\nrepository: {}\nclassification: {}\n"
+                "sources: [{title: source, relationship: formalizes}]\n"
+                "automation: {}\nreview: {}\n"
             )
 
 
