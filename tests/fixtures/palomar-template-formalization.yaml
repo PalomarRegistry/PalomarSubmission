@@ -1,23 +1,30 @@
 # formalization.yaml v0.3. Replace every TEMPLATE value before submitting.
-# A placeholder list may be replaced with [] when the honest answer is none.
+# Replace a placeholder list with [] only when its adjacent comment permits it;
+# lists described as required must remain nonempty.
 version: "v0.3"
 
 project:
   name: "TEMPLATE: name of the formalization"
+  # Required nonempty list of name strings or mappings with a nonempty name.
   authors:
     - "TEMPLATE: formalizer name"
   # Required root licence. Keep this in sync with the Apache-2.0 LICENSE file.
   license: "Apache-2.0"
+  # Required nonempty list of name strings or mappings with a nonempty name.
+  # For a thin wrapper, name people responsible for this submitted wrapper;
+  # submission authorization separately covers the underlying formalization.
   responsible_maintainers:
     - "TEMPLATE: person responsible for this formalization"
 
 repository:
-  # Use thin-wrapper only when this repository merely exposes another pinned
-  # formalization repository to Comparator; then add substantive_formalization.
+  # Use substantive-development and omit substantive_formalization when this is
+  # the substantive repository. Use thin-wrapper only when this repository
+  # merely exposes another pinned formalization repository to Comparator; then
+  # add substantive_formalization in the exact shape below.
   role: "TEMPLATE: substantive-development or thin-wrapper"
   # substantive_formalization:
-  #   id: "TEMPLATE: owner/repository"
-  #   revision: "TEMPLATE: full lowercase commit SHA"
+  #   id: "TEMPLATE: owner/repository or https://github.com/owner/repository"
+  #   revision: "TEMPLATE: full 40-character lowercase commit SHA"
 
 classification:
   # Use 1–2 official arXiv identifiers such as math.LO and 1–8 five-character
@@ -26,8 +33,24 @@ classification:
   msc2020: ["TEMPLATE: five-character MSC 2020 identifier such as 03B35"]
 
 sources:
-  # Sources are required. For a theorem first presented by this formalization,
-  # use a descriptive title and set type to original-proof.
+  # Sources must be nonempty. Every source needs a title and relationship; the
+  # relationship must be exactly formalizes, adapts, independently-proves,
+  # background, or other.
+  # Choose one result origin:
+  # - For a theorem first presented by this formalization, set one source to
+  #   type: original-proof and relationship: other. All additional source
+  #   relationships must be background or other.
+  # - Otherwise, omit type: original-proof and give at least one source a
+  #   formalizes, adapts, or independently-proves relationship. A new proof of
+  #   a known published result is source-based and uses independently-proves.
+  # Type, authors, id, location, license, and author_endorsement are optional;
+  # remove them when genuinely inapplicable. A supplied type must be paper,
+  # book, web discussion, folklore, original-proof, or other. In the current
+  # v0.3 Palomar contract, web discussion is spelled with a space.
+  # Original-result example:
+  # - title: "TEMPLATE: describe the result first presented here"
+  #   type: original-proof
+  #   relationship: other
   - title: "TEMPLATE: title of the mathematical source"
     authors:
       - "TEMPLATE: source author"
@@ -39,6 +62,7 @@ sources:
     author_endorsement: "TEMPLATE: participated, endorsed, no-response, not-contacted, declined, or n/a"
 
 related_formalizations:
+  # Remove this field or use [] when none are known.
   - id: "TEMPLATE: stable URL or identifier for earlier formalization"
     relationship: "TEMPLATE: builds-on, adapts, independent, supersedes, or other"
     note: "TEMPLATE: explain the relationship"

@@ -905,14 +905,14 @@ review:
             self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@c6a85fcc7727eed77ed8d2d5b3eeb989e20f8704.
+        # Exact snapshot of PalomarTemplate@d720f59dbe2edd29e0b9273c113139cdb1f24d2b.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "71bd73c62a11e97df65ef5bc9f691ec33b2ece665ae1acb99687d6ed96fad516",
+            "e4c6ab90c0439205cb41cf18b7b0e81397dd74a4a57ebdfe847c4eda719c21aa",
         )
         template = yaml.load(raw, Loader=verifier.UniqueKeySafeLoader)
         self.assertEqual(
