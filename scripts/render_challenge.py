@@ -763,7 +763,16 @@ def prepare_workspace(
         if project_value
         else None
     )
-    source_project = source.joinpath(*project_relative.parts) if project_relative else source
+    source_project = (
+        resolve_repository_path(
+            source,
+            project_relative,
+            "render project_path",
+            kind="directory",
+        )
+        if project_relative
+        else source.resolve()
+    )
     ensure_lake_manifest(source_project, source)
     source_manifest = load_json_object(source_project / "lake-manifest.json")
     challenge_relative = normalized_repository_path(
@@ -811,7 +820,16 @@ def prepare_workspace(
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", ".lake"),
     )
-    workspace_project = workspace.joinpath(*project_relative.parts) if project_relative else workspace
+    workspace_project = (
+        resolve_repository_path(
+            workspace,
+            project_relative,
+            "render workspace project_path",
+            kind="directory",
+        )
+        if project_relative
+        else workspace.resolve()
+    )
     for lakefile_name in ("lakefile.lean", "lakefile.toml"):
         submitted_lakefile = workspace_project / lakefile_name
         if submitted_lakefile.exists() or submitted_lakefile.is_symlink():

@@ -152,6 +152,27 @@ class RenderChallengeTests(unittest.TestCase):
                 (workspace_project / "comparator.json").read_bytes(), b'{"accepted": true}'
             )
 
+    def test_workspace_revalidates_nested_project_symlink_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            real_project = source / "real" / "project"
+            real_project.mkdir(parents=True)
+            (source / "linked").symlink_to(source / "real", target_is_directory=True)
+            work = root / "work"
+            work.mkdir()
+
+            with self.assertRaisesRegex(
+                VerificationError, "render project_path contains a symlinked path component"
+            ):
+                prepare_workspace(
+                    source,
+                    root / "workspace",
+                    "3" * 40,
+                    work,
+                    {"project_path": "linked/project"},
+                )
+
     def test_prepare_binds_a_nested_project_and_configured_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

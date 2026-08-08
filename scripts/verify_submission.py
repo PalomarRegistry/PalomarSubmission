@@ -524,16 +524,6 @@ def repository_relative_path(checkout: Path, path: Path) -> str:
         raise VerificationError("resolved project file escapes the pinned repository checkout") from error
 
 
-def repository_checkout_root(path: Path) -> Path:
-    """Find Git-owned checkout metadata, never a marker from submitted files."""
-    resolved = path.resolve()
-    for candidate in (resolved, *resolved.parents):
-        metadata = candidate / ".git"
-        if metadata.is_dir() or (metadata.is_file() and not metadata.is_symlink()):
-            return candidate
-    return resolved
-
-
 def reject_reserved_checkout_markers(checkout: Path) -> None:
     """Reject the former internal boundary marker anywhere in hostile source."""
     def fail_closed(error: OSError) -> None:
@@ -1711,7 +1701,7 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
         target_packages = target_data.get("packages") if isinstance(target_data, dict) else None
         if not isinstance(target_packages, list):
             raise VerificationError(f"path package {name!r} has an invalid manifest")
-        target_packages_dir = manifest_packages_directory(target, boundary)
+        target_packages_dir = manifest_packages_directory(target, checkout=boundary)
         packages_directories.add(target_packages_dir)
         add(
             {
@@ -1749,8 +1739,8 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
     return True
 
 
-def manifest_packages_directory(source: Path, checkout: Path | None = None) -> Path:
-    """Resolve Lake's packages directory while containing it to the checkout."""
+def manifest_packages_directory(source: Path, *, checkout: Path) -> Path:
+    """Resolve Lake's packages directory within the verifier-owned checkout."""
     manifest = source / "lake-manifest.json"
     directory = ".lake/packages"
     if manifest.is_file() and not manifest.is_symlink():
@@ -1764,7 +1754,7 @@ def manifest_packages_directory(source: Path, checkout: Path | None = None) -> P
     ):
         raise VerificationError("Lake manifest packagesDir must be a safe relative path")
     resolved = (source / raw).resolve()
-    boundary = checkout.resolve() if checkout is not None else repository_checkout_root(source)
+    boundary = checkout.resolve()
     try:
         resolved.relative_to(boundary)
     except ValueError as error:
@@ -1906,6 +1896,7 @@ def package_allowlist(
     source: Path,
     packages: list[dict[str, str]],
     *,
+    checkout: Path,
     base_env: dict[str, str],
 ) -> dict[str, tuple[str, str]]:
     """Verify roots and their exact official manifest closures, then map trusted package names."""
@@ -1930,7 +1921,7 @@ def package_allowlist(
             if canonical_repository(str(package["repository"]), aliases).lower() == display.lower()
         ]
         for root_package in matching:
-            package_dir = package_checkout(source, root_package)
+            package_dir = package_checkout(source, root_package, checkout=checkout)
             verify_official_revision(
                 package_dir,
                 repository=display,
@@ -1963,13 +1954,18 @@ def package_allowlist(
     return allowed
 
 
-def package_checkout(
-    source: Path, package: dict[str, str], checkout: Path | None = None
-) -> Path:
+def package_checkout(source: Path, package: dict[str, str], *, checkout: Path) -> Path:
     """Return the already-materialized checkout for one manifest package."""
     if package["url"].startswith("path:"):
-        return (source / package["url"].removeprefix("path:")).resolve()
-    return (manifest_packages_directory(source, checkout) / package["name"]).resolve()
+        return contained_path_dependency(
+            source,
+            package["url"].removeprefix("path:"),
+            checkout,
+            package["name"],
+        )
+    return (
+        manifest_packages_directory(source, checkout=checkout) / package["name"]
+    ).resolve()
 
 
 def trusted_package_url_map(
@@ -2019,18 +2015,25 @@ def trusted_package_url_map(
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
 
-def package_lake_directories(source: Path, name: str) -> tuple[Path, Path]:
+def package_lake_directories(
+    source: Path, name: str, *, checkout: Path
+) -> tuple[Path, Path]:
     package = next((item for item in manifest_packages(source) if item["name"] == name), None)
     if package is None:
         raise VerificationError(f"trusted package {name!r} is absent from the manifest")
-    checkout = package_checkout(source, package)
-    return (checkout / ".lake" / "build").resolve(), (checkout / ".lake" / "config").resolve()
+    package_dir = package_checkout(source, package, checkout=checkout)
+    return (
+        (package_dir / ".lake" / "build").resolve(),
+        (package_dir / ".lake" / "config").resolve(),
+    )
 
 
-def trusted_lake_directories(source: Path, names: Any) -> list[Path]:
+def trusted_lake_directories(
+    source: Path, names: Any, *, checkout: Path
+) -> list[Path]:
     result: list[Path] = []
     for name in names:
-        for directory in package_lake_directories(source, name):
+        for directory in package_lake_directories(source, name, checkout=checkout):
             if not directory.is_dir():
                 raise VerificationError(f"trusted package Lake directory is missing: {directory}")
             result.append(directory)
@@ -2041,6 +2044,7 @@ def nested_package_links(
     source: Path,
     root_package: Path,
     *,
+    checkout: Path,
     allowed_names: set[str],
 ) -> Path:
     """Give a trusted root its exact flattened closure without running Lake update."""
@@ -2065,7 +2069,7 @@ def nested_package_links(
             raise VerificationError(
                 f"trusted root dependency {name!r} does not match its pinned manifest"
             )
-        target = package_checkout(source, actual)
+        target = package_checkout(source, actual, checkout=checkout)
         if not target.is_dir() or target.is_symlink():
             raise VerificationError(f"trusted root dependency is not a real checkout: {target}")
         (nested / name).symlink_to(target, target_is_directory=True)
@@ -2075,6 +2079,7 @@ def nested_package_links(
 def build_allowlisted_roots(
     source: Path,
     *,
+    checkout: Path,
     packages: list[dict[str, str]],
     allowlist: dict[str, tuple[str, str]],
     base_env: dict[str, str],
@@ -2102,14 +2107,16 @@ def build_allowlisted_roots(
         )
         if root_package is None:
             continue
-        root_dir = package_checkout(source, root_package)
+        root_dir = package_checkout(source, root_package, checkout=checkout)
         closure = {
             root_package["name"],
             *(dependency["name"] for dependency in manifest_packages(root_dir)),
         }
         if not closure <= allowlist.keys() or not closure <= by_name.keys():
             raise VerificationError(f"trusted root {repository} has an incomplete closure")
-        nested = nested_package_links(source, root_dir, allowed_names=closure)
+        nested = nested_package_links(
+            source, root_dir, checkout=checkout, allowed_names=closure
+        )
         build_env = base_env.copy()
         build_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(
             packages, manifest_packages(root_dir)
@@ -2123,9 +2130,15 @@ def build_allowlisted_roots(
         )
         owned_names = {name for name, (owner, _level) in allowlist.items() if owner == repository}
         writable = validate_writable_directories(
-            source,
+            checkout,
             [
-                *(directory for name in owned_names for directory in package_lake_directories(source, name)),
+                *(
+                    directory
+                    for name in owned_names
+                    for directory in package_lake_directories(
+                        source, name, checkout=checkout
+                    )
+                ),
                 nested,
             ],
         )
@@ -2147,8 +2160,8 @@ def build_allowlisted_roots(
 
 
 
-def source_package(path: Path, source: Path) -> str | None:
-    packages = manifest_packages_directory(source)
+def source_package(path: Path, source: Path, *, checkout: Path) -> str | None:
+    packages = manifest_packages_directory(source, checkout=checkout)
     try:
         relative = path.resolve().relative_to(packages)
     except ValueError:
@@ -2200,10 +2213,10 @@ def purge_untrusted_lake_state(checkout: Path) -> None:
 
 
 def validate_writable_directories(
-    source: Path, directories: list[Path], *, boundary: Path | None = None
+    checkout: Path, directories: list[Path]
 ) -> list[Path]:
-    """Validate sandbox writes against an explicit boundary when one is known."""
-    root = boundary.resolve() if boundary is not None else repository_checkout_root(source)
+    """Validate sandbox writes against the verifier-owned checkout boundary."""
+    root = checkout.resolve()
     result: list[Path] = []
     for directory in directories:
         if directory.is_symlink() or not directory.is_dir():
@@ -2810,7 +2823,7 @@ def verify_filesystem_confinement(
 
 
 def materialize_packages(
-    source: Path, *, checkout: Path | None = None, base_env: dict[str, str]
+    source: Path, *, checkout: Path, base_env: dict[str, str]
 ) -> list[Path]:
     """Materialize the exact Git revisions in the submitted Lake manifest.
 
@@ -2818,7 +2831,7 @@ def materialize_packages(
     post-update hooks, which are unnecessary for fetching and expand the
     pre-verification execution surface.
     """
-    boundary = (checkout or source).resolve()
+    boundary = checkout.resolve()
     packages = manifest_packages(source)
     path_directories: dict[str, Path] = {}
     for package in packages:
@@ -2831,7 +2844,7 @@ def materialize_packages(
 
     purge_untrusted_lake_state(boundary)
     reject_committed_build_artifacts(boundary)
-    packages_dir = manifest_packages_directory(source, boundary)
+    packages_dir = manifest_packages_directory(source, checkout=boundary)
     packages_owner = packages_dir.parent.parent
     permitted_owners = {source.resolve(), *path_directories.values()}
     if packages_owner not in permitted_owners:
@@ -2889,23 +2902,28 @@ def materialize_packages(
             allow_inert_submodules=True,
         )
         writable.extend(remove_untrusted_lake_state(package_dir))
-    return validate_writable_directories(boundary, writable, boundary=boundary)
+    return validate_writable_directories(boundary, writable)
 
 
 def reject_untrusted_package_artifacts(
     source: Path,
     packages: list[dict[str, str]],
     allowlist: dict[str, tuple[str, str]],
+    *,
+    checkout: Path,
 ) -> None:
     """Scan candidate-controlled packages after official closure verification."""
     for package in packages:
         if package["name"] not in allowlist:
-            reject_committed_build_artifacts(package_checkout(source, package))
+            reject_committed_build_artifacts(
+                package_checkout(source, package, checkout=checkout)
+            )
 
 
 def get_mathlib_cache(
     source: Path,
     *,
+    checkout: Path,
     base_env: dict[str, str],
     allowlist: dict[str, tuple[str, str]],
     lake: Path,
@@ -2927,7 +2945,7 @@ def get_mathlib_cache(
     )
     if mathlib is None:
         return
-    package_dir = package_checkout(source, mathlib)
+    package_dir = package_checkout(source, mathlib, checkout=checkout)
     if not (package_dir / ".git").is_dir():
         raise VerificationError("official Mathlib dependency is not a Git checkout")
     git_env = git_environment(source, base_env)
@@ -2978,18 +2996,28 @@ def get_mathlib_cache(
     }
     if not closure <= allowlist.keys():
         raise VerificationError("Mathlib cache closure is outside the verified allowlist")
-    nested_packages = nested_package_links(source, package_dir, allowed_names=closure)
+    nested_packages = nested_package_links(
+        source, package_dir, checkout=checkout, allowed_names=closure
+    )
     trusted_directories = [
-        directory for name in closure for directory in package_lake_directories(source, name)
+        directory
+        for name in closure
+        for directory in package_lake_directories(source, name, checkout=checkout)
     ]
-    cache_writable = validate_writable_directories(source, [*trusted_directories, nested_packages])
+    cache_writable = validate_writable_directories(
+        checkout, [*trusted_directories, nested_packages]
+    )
     replay_writable_files: list[Path] = []
     proofwidgets = next((package for package in packages if package["name"] == "proofwidgets"), None)
     if proofwidgets and proofwidgets["name"] in closure:
         # ProofWidgets' official Lake target records this generated replay
         # marker beside the pinned lockfile. Grant only this exact file; a
         # qualified root must never write its source tree or compiled output.
-        lock_hash = package_checkout(source, proofwidgets) / "widget" / "package-lock.json.hash"
+        lock_hash = (
+            package_checkout(source, proofwidgets, checkout=checkout)
+            / "widget"
+            / "package-lock.json.hash"
+        )
         lock_hash.touch(exist_ok=True)
         if lock_hash.is_symlink() or not lock_hash.is_file():
             raise VerificationError("ProofWidgets replay marker is not a regular file")
@@ -3115,6 +3143,7 @@ def lean_source_dependencies(
 def audit_challenge_sources(
     source: Path,
     *,
+    checkout: Path,
     dependency_sources: list[Path],
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
@@ -3136,7 +3165,7 @@ def audit_challenge_sources(
         if path_is_within(resolved, writable_directories):
             untrusted.append(str(resolved))
             continue
-        package_name = source_package(resolved, source)
+        package_name = source_package(resolved, source, checkout=checkout)
         if package_name is None:
             # Any candidate-local helper import expands the unaudited statement
             # surface and is forbidden in v1.
@@ -3146,7 +3175,7 @@ def audit_challenge_sources(
         if not package:
             untrusted.append(str(resolved))
             continue
-        package_dir = package_checkout(source, package)
+        package_dir = package_checkout(source, package, checkout=checkout)
         if not source_matches_checkout(resolved, package_dir):
             untrusted.append(str(resolved))
             continue
@@ -3252,6 +3281,7 @@ def compile_canonical_challenge(
     work: Path,
     source: Path,
     *,
+    checkout: Path,
     challenge_source: Path | None = None,
     challenge_module: str = "Challenge",
     lean: Path,
@@ -3286,7 +3316,10 @@ def compile_canonical_challenge(
         allowlist,
         key=lambda name: (allowlist[name][1] != "high", name.lower()),
     )
-    trusted_packages = {name: package_checkout(source, packages_by_name[name]) for name in trusted_names}
+    trusted_packages = {
+        name: package_checkout(source, packages_by_name[name], checkout=checkout)
+        for name in trusted_names
+    }
     lean_paths: list[Path] = []
     core_path = lean_prefix / "lib" / "lean"
     if core_path.is_dir():
@@ -3419,16 +3452,16 @@ def execute(args: argparse.Namespace) -> int:
         write_json(output, report)
 
     try:
+        install_execution_deadline(
+            os.environ.get("PALOMAR_JOB_STARTED_AT"),
+            getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
+        )
         reject_reserved_checkout_markers(checkout)
         if metrics_path.is_symlink() or (metrics_path.exists() and not metrics_path.is_file()):
             raise VerificationError("resource metrics path is not a regular file")
         metrics_path.unlink(missing_ok=True)
         _RESOURCE_METRICS_PATH = metrics_path
         _RESOURCE_DISK_PATH = checkout
-        install_execution_deadline(
-            os.environ.get("PALOMAR_JOB_STARTED_AT"),
-            getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
-        )
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()
@@ -3647,11 +3680,16 @@ def execute(args: argparse.Namespace) -> int:
         )
         report["stage"] = "dependency-provenance"
         packages = manifest_packages(source)
-        allowlist = package_allowlist(source, packages, base_env=env)
-        reject_untrusted_package_artifacts(source, packages, allowlist)
+        allowlist = package_allowlist(
+            source, packages, checkout=checkout, base_env=env
+        )
+        reject_untrusted_package_artifacts(
+            source, packages, allowlist, checkout=checkout
+        )
         report["stage"] = "trusted-cache"
         get_mathlib_cache(
             source,
+            checkout=checkout,
             base_env=env,
             allowlist=allowlist,
             lake=lake,
@@ -3663,6 +3701,7 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "trusted-roots"
         build_allowlisted_roots(
             source,
+            checkout=checkout,
             packages=packages,
             allowlist=allowlist,
             base_env=env,
@@ -3674,9 +3713,12 @@ def execute(args: argparse.Namespace) -> int:
         )
 
         trusted_names = set(allowlist)
-        trusted_directories = set(trusted_lake_directories(source, trusted_names))
+        trusted_directories = set(
+            trusted_lake_directories(source, trusted_names, checkout=checkout)
+        )
         trusted_build_directories = {
-            package_lake_directories(source, name)[0] for name in trusted_names
+            package_lake_directories(source, name, checkout=checkout)[0]
+            for name in trusted_names
         }
         candidate_writable = [
             directory for directory in writable_directories if directory not in trusted_directories
@@ -3686,6 +3728,7 @@ def execute(args: argparse.Namespace) -> int:
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
             source,
+            checkout=checkout,
             challenge_source=challenge_source,
             challenge_module=report["comparator"]["challenge_module"],
             lean=lean,
@@ -3703,6 +3746,7 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
             source,
+            checkout=checkout,
             dependency_sources=dependency_sources,
             lean_prefix=lean_prefix,
             allowlist=allowlist,

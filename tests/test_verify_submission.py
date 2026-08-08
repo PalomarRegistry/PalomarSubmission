@@ -45,7 +45,6 @@ from scripts.verify_submission import (
     reject_reserved_checkout_markers,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
-    repository_checkout_root,
     repository_license_file,
     require_protected_paths,
     resolve_module_source,
@@ -112,16 +111,42 @@ class VerifySubmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(VerificationError, "could not inspect"):
                 reject_reserved_checkout_markers(Path("/submitted"))
 
-    def test_submitted_markers_do_not_define_a_checkout_boundary(self):
+    def test_manifest_packages_directory_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / "project"
-            project.mkdir()
-            (root / ".git").mkdir()
-            (root / ".palomar-checkout-root").write_bytes(b"")
-            (project / ".palomar-checkout-root").write_bytes(b"")
+            ancestor = Path(directory)
+            (ancestor / ".git").mkdir()
+            checkout = ancestor / "workspace"
+            source = checkout / "project"
+            source.mkdir(parents=True)
+            outside = ancestor / "outside" / ".lake" / "packages"
+            outside.mkdir(parents=True)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packagesDir": "../../outside/.lake/packages",
+                        "packages": [],
+                    }
+                )
+            )
 
-            self.assertEqual(repository_checkout_root(project), root.resolve())
+            with self.assertRaisesRegex(VerificationError, "escapes the repository checkout"):
+                verifier.manifest_packages_directory(source, checkout=checkout)
+
+    def test_manifest_packages_directory_accepts_an_explicit_worktree_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / "worktree"
+            source = checkout / "project"
+            source.mkdir(parents=True)
+            (checkout / ".git").write_text("gitdir: /tmp/example\n")
+            (source / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+
+            self.assertEqual(
+                verifier.manifest_packages_directory(source, checkout=checkout),
+                (source / ".lake" / "packages").resolve(),
+            )
 
     def test_explicit_writable_boundary_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -137,7 +162,7 @@ class VerifySubmissionTests(unittest.TestCase):
             outside.mkdir()
 
             with self.assertRaisesRegex(VerificationError, "escapes the source tree"):
-                validate_writable_directories(source, [outside], boundary=checkout)
+                validate_writable_directories(checkout, [outside])
 
             with mock.patch(
                 "scripts.verify_submission.validate_writable_directories",
@@ -147,9 +172,59 @@ class VerifySubmissionTests(unittest.TestCase):
                     source, checkout=checkout, base_env={"PATH": "/usr/bin"}
                 )
 
-            self.assertEqual(validate.call_args.kwargs["boundary"], checkout.resolve())
+            self.assertEqual(validate.call_args.args[0], checkout.resolve())
             self.assertTrue(writable)
             self.assertTrue(all(path.is_relative_to(checkout) for path in writable))
+
+    def test_boundary_sensitive_production_calls_supply_an_explicit_checkout(self):
+        import ast
+        import inspect
+
+        from scripts import verify_submission
+
+        helper_names = {
+            "audit_challenge_sources",
+            "build_allowlisted_roots",
+            "compile_canonical_challenge",
+            "get_mathlib_cache",
+            "manifest_packages_directory",
+            "materialize_packages",
+            "package_allowlist",
+            "package_checkout",
+            "package_lake_directories",
+            "source_package",
+            "trusted_lake_directories",
+            "validate_writable_directories",
+        }
+        checked = 0
+        modules = (
+            (verify_submission.__name__, Path(inspect.getfile(verify_submission))),
+            (
+                "scripts.smoke_trusted_challenge",
+                REPOSITORY_ROOT / "scripts" / "smoke_trusted_challenge.py",
+            ),
+        )
+        for module_name, module_path in modules:
+            source_text = module_path.read_text(encoding="utf-8")
+            for node in ast.walk(ast.parse(source_text)):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                if node.func.id not in helper_names:
+                    continue
+                target = getattr(verify_submission, node.func.id)
+                names = [keyword.arg for keyword in node.keywords]
+                try:
+                    inspect.signature(target).bind(
+                        *[mock.ANY] * len(node.args),
+                        **{name: mock.ANY for name in names},
+                    )
+                except TypeError as error:
+                    self.fail(
+                        f"{module_name} line {node.lineno} calls "
+                        f"{target.__name__}() without its explicit checkout: {error}"
+                    )
+                checked += 1
+        self.assertGreater(checked, 30, "no boundary-sensitive calls were checked")
 
     def test_non_github_git_dependency_is_not_preservable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -354,6 +429,45 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertRaises(subprocess.TimeoutExpired),
         ):
             _deadline_timeout(600, ["probe"])
+
+    def test_execute_arms_deadline_before_scanning_reserved_markers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "work" / "source").mkdir(parents=True)
+            report_path = root / "report.json"
+            report_path.write_text(
+                json.dumps({"status": "pending", "errors": [], "source": {}})
+            )
+            args = Namespace(
+                output=report_path,
+                work_dir=root / "work",
+                comparator_commit="a" * 40,
+                landrun_commit="b" * 40,
+                nanoda_commit="c" * 40,
+                workflow_url="https://github.com/example/project/actions/runs/1",
+            )
+            order: list[str] = []
+
+            def install(*_args, **_kwargs):
+                order.append("deadline")
+
+            def scan(_checkout):
+                order.append("scan")
+                raise VerificationError("stop after ordering check")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.install_execution_deadline",
+                    side_effect=install,
+                ),
+                mock.patch(
+                    "scripts.verify_submission.reject_reserved_checkout_markers",
+                    side_effect=scan,
+                ),
+            ):
+                self.assertEqual(execute(args), 0)
+
+            self.assertEqual(order, ["deadline", "scan"])
 
     def test_expired_job_deadline_is_reported_and_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1132,6 +1246,7 @@ review:
                 canonical, dependencies, trusted_paths = compile_canonical_challenge(
                     work,
                     source,
+                    checkout=source,
                     lean=Path("/tools/lean"),
                     lean_prefix=lean_prefix,
                     allowlist={},
@@ -1164,7 +1279,9 @@ review:
             artifact.parent.mkdir(parents=True)
             artifact.write_bytes(b"not a trusted build")
             with self.assertRaisesRegex(VerificationError, "committed build artifact"):
-                materialize_packages(package, base_env={"PATH": "/usr/bin"})
+                materialize_packages(
+                    package, checkout=package, base_env={"PATH": "/usr/bin"}
+                )
 
     def test_fresh_lake_artifacts_are_removed_not_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1191,9 +1308,16 @@ review:
                     "revision": "1" * 40,
                 }
             ]
-            reject_untrusted_package_artifacts(source, packages, {"trusted": ("official/trusted", "high")})
+            reject_untrusted_package_artifacts(
+                source,
+                packages,
+                {"trusted": ("official/trusted", "high")},
+                checkout=source,
+            )
             with self.assertRaisesRegex(VerificationError, "committed build artifact"):
-                reject_untrusted_package_artifacts(source, packages, {})
+                reject_untrusted_package_artifacts(
+                    source, packages, {}, checkout=source
+                )
 
     def test_path_dependency_with_custom_prebuilt_output_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1216,7 +1340,9 @@ review:
                 )
             )
             with self.assertRaisesRegex(VerificationError, "committed build artifact"):
-                materialize_packages(source, base_env={"PATH": "/usr/bin"})
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
 
     def test_path_dependency_lake_state_is_removed_before_artifact_scan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1238,7 +1364,9 @@ review:
                     }
                 )
             )
-            materialize_packages(source, base_env={"PATH": "/usr/bin"})
+            materialize_packages(
+                source, checkout=source, base_env={"PATH": "/usr/bin"}
+            )
             self.assertFalse(stale.exists())
 
     def test_report_and_tools_must_not_be_writable(self):
@@ -1309,6 +1437,7 @@ review:
             )
             audit = audit_challenge_sources(
                 source,
+                checkout=source,
                 dependency_sources=[injected],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={"mathlib": ("leanprover-community/mathlib4", "high")},
@@ -1364,6 +1493,7 @@ review:
             )
             audit = audit_challenge_sources(
                 source,
+                checkout=source,
                 dependency_sources=[dependency],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={},
@@ -1394,6 +1524,7 @@ review:
             )
             audit = audit_challenge_sources(
                 source,
+                checkout=source,
                 dependency_sources=[],
                 lean_prefix=Path(directory) / "toolchain",
                 allowlist={},
@@ -1419,7 +1550,9 @@ review:
                 )
             )
             with self.assertRaisesRegex(VerificationError, "may not live under .lake"):
-                materialize_packages(source, base_env={"PATH": "/usr/bin"})
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
 
     def test_trusted_package_url_map_uses_verified_manifest_urls(self):
         packages = [
@@ -1617,7 +1750,12 @@ review:
             ]
             with mock.patch("scripts.verify_submission.verify_official_revision"):
                 with self.assertRaisesRegex(VerificationError, "substitutes"):
-                    package_allowlist(source, packages, base_env={"PATH": "/usr/bin"})
+                    package_allowlist(
+                        source,
+                        packages,
+                        checkout=source,
+                        base_env={"PATH": "/usr/bin"},
+                    )
 
 
 if __name__ == "__main__":
