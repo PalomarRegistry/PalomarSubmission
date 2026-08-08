@@ -24,6 +24,25 @@ class RenderReportError(ValueError):
     """A render report does not satisfy the one supported contract."""
 
 
+def _require_exact_keys(
+    value: Mapping[object, object], expected: set[str], subject: str
+) -> None:
+    """Reject missing and unexpected fields with a useful contract error."""
+    actual = set(value)
+    if actual == expected:
+        return
+    missing = sorted(str(field) for field in expected - actual)
+    unexpected = sorted(str(field) for field in actual - expected)
+    details = []
+    if missing:
+        details.append("missing " + ", ".join(missing))
+    if unexpected:
+        details.append("unexpected " + ", ".join(unexpected))
+    raise RenderReportError(
+        f"{subject} must contain exactly the current contract: " + "; ".join(details)
+    )
+
+
 def _text(value: object, field: str, *, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not allow_empty and not value):
         qualifier = "a string" if allow_empty else "a nonempty string"
@@ -114,18 +133,7 @@ class RenderSource:
             "challenge_sha256",
             *PATH_FIELDS,
         }
-        if set(value) != expected:
-            missing = sorted(expected - set(value))
-            unexpected = sorted(set(value) - expected)
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise RenderReportError(
-                "render report source must contain exactly the current accepted path set: "
-                + "; ".join(details)
-            )
+        _require_exact_keys(value, expected, "render report source")
         return cls(
             repository=_text(value.get("repository"), "source.repository"),
             repository_url=_text(value.get("repository_url"), "source.repository_url"),
@@ -203,8 +211,7 @@ def parse_prepared_report(value: object) -> PreparedRenderReport:
         "lean_toolchain",
         "verso_commit",
     }
-    if set(value) != expected:
-        raise RenderReportError("prepared render report has fields outside the current contract")
+    _require_exact_keys(value, expected, "prepared render report")
     if value.get("status") != "pending" or value.get("stage") != "prepared":
         raise RenderReportError("prepared render report is not pending at the prepared stage")
     if value.get("errors") != []:

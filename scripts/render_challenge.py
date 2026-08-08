@@ -1483,17 +1483,17 @@ def execute(args: argparse.Namespace) -> int:
         prepared = parse_prepared_report(report)
     except RenderReportError as error:
         previous_errors = report.get("errors")
-        report.update(
-            {
-                "status": "error",
-                "stage": "contract",
-                "errors": [
-                    *(previous_errors if isinstance(previous_errors, list) else []),
-                    str(error),
-                ],
-            }
-        )
-        write_json(output, report)
+        failure = intake_report(now())
+        failure["stage"] = "contract"
+        failure["errors"] = [
+            *(
+                item
+                for item in (previous_errors if isinstance(previous_errors, list) else [])
+                if isinstance(item, str)
+            ),
+            str(error),
+        ]
+        write_json(output, failure)
         return 1
     report = prepared.as_dict()
     report.update(

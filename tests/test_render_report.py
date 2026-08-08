@@ -43,6 +43,15 @@ class RenderReportTests(unittest.TestCase):
         self.assertEqual(parsed.as_dict(), report)
         self.assertEqual(parsed.source.paths.challenge_path, report["source"]["challenge_path"])
 
+    def test_root_project_round_trips_as_a_present_empty_field(self):
+        report = self.report()
+        report["source"]["project_path"] = ""
+
+        parsed = parse_prepared_report(report)
+
+        self.assertIn("project_path", parsed.as_dict()["source"])
+        self.assertEqual(parsed.source.paths.project_path, "")
+
     def test_legacy_schema_is_rejected_instead_of_defaulting_paths(self):
         report = self.report()
         report["schema_version"] = 1
@@ -88,6 +97,28 @@ class RenderReportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RenderReportError, "unexpected legacy_path"):
             parse_prepared_report(report)
+
+    def test_top_level_contract_reports_missing_and_unexpected_fields(self):
+        missing = self.report()
+        missing.pop("verso_commit")
+        with self.assertRaisesRegex(RenderReportError, "missing verso_commit"):
+            parse_prepared_report(missing)
+
+        unexpected = self.report()
+        unexpected["legacy"] = True
+        with self.assertRaisesRegex(RenderReportError, "unexpected legacy"):
+            parse_prepared_report(unexpected)
+
+    def test_only_a_clean_pending_prepared_report_is_accepted(self):
+        wrong_stage = self.report()
+        wrong_stage["stage"] = "workspace"
+        with self.assertRaisesRegex(RenderReportError, "not pending at the prepared stage"):
+            parse_prepared_report(wrong_stage)
+
+        with_errors = self.report()
+        with_errors["errors"] = ["output setup failed"]
+        with self.assertRaisesRegex(RenderReportError, "carries intake errors"):
+            parse_prepared_report(with_errors)
 
     def test_intake_failures_use_the_current_schema(self):
         self.assertEqual(intake_report("2026-08-08T00:00:00Z")["schema_version"], 2)

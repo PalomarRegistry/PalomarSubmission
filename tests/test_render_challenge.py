@@ -17,6 +17,7 @@ from scripts.render_challenge import (
     extract_module_doc,
     merge_renderer_manifest,
     parsed_challenge_metadata,
+    parser,
     prepare,
     prepare_workspace,
     sanitize_bundle,
@@ -289,6 +290,86 @@ class RenderChallengeTests(unittest.TestCase):
                 report["errors"],
             )
 
+    def test_prepare_preserves_an_explicit_root_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template"
+            template.mkdir()
+            challenge = template / "Challenge.lean"
+            challenge.write_text("theorem headline : True := by trivial\n", encoding="utf-8")
+            (template / "Solution.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (template / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (template / "lakefile.toml").write_text(
+                'name = "headline"\n[[lean_lib]]\nname = "Headline"\n', encoding="utf-8"
+            )
+            (template / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.31.0-rc2\n", encoding="utf-8"
+            )
+            output = root / "report.json"
+            args = argparse.Namespace(
+                repository="example/project",
+                commit="1" * 40,
+                challenge_sha256=hashlib.sha256(challenge.read_bytes()).hexdigest(),
+                project_path="",
+                challenge_path="Challenge.lean",
+                solution_path="Solution.lean",
+                comparator_config_path="comparator.json",
+                lakefile_path="lakefile.toml",
+                lean_toolchain_path="lean-toolchain",
+                work_dir=str(root / "work"),
+                output=str(output),
+            )
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.clone_commit",
+                    side_effect=lambda _url, _commit, destination: shutil.copytree(
+                        template, destination
+                    ),
+                ),
+                mock.patch(
+                    "scripts.render_challenge.toolchain_verso_commit",
+                    return_value="3" * 40,
+                ),
+            ):
+                self.assertEqual(prepare(args), 0)
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "pending")
+            self.assertIn("project_path", report["source"])
+            self.assertEqual(report["source"]["project_path"], "")
+
+    def test_prepare_parser_requires_the_complete_path_set(self):
+        command = next(
+            action
+            for action in parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ).choices["prepare"]
+        required = {action.dest for action in command._actions if action.required}
+        self.assertTrue(
+            {
+                "project_path",
+                "challenge_path",
+                "solution_path",
+                "comparator_config_path",
+                "lakefile_path",
+                "lean_toolchain_path",
+            }.issubset(required)
+        )
+
     def test_execute_marks_a_legacy_report_as_a_contract_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -311,8 +392,13 @@ class RenderChallengeTests(unittest.TestCase):
 
             self.assertEqual(result, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 2)
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["stage"], "contract")
+            self.assertEqual(
+                set(report),
+                {"schema_version", "status", "stage", "errors", "prepared_at"},
+            )
             self.assertIn("schema_version 2", report["errors"][0])
 
     def test_runtime_script_digests_match_database_contract(self):
