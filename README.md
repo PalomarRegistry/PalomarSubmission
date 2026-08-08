@@ -92,13 +92,19 @@ classes and between one and eight distinct MSC2020 codes. The current provenance
 contract also requires a nonempty `project.responsible_maintainers` list, a
 `repository.role` of `substantive-development` or `thin-wrapper`, and a nonempty
 `sources` list. Every source, including an `original-proof` entry, needs a
-`relationship`: use `background` or `other` for an original result and any
-accompanying material. A `formalizes`, `adapts`, or `independently-proves`
-relationship instead declares the result source-based and therefore conflicts
-with `type: original-proof` anywhere in the list. A supplied source `type` must
-be exactly `paper`, `book`, `web discussion`, `folklore`, `original-proof`, or
-`other`; it may be omitted for source-based entries. Invalid or missing
-provenance fails mechanical verification with the field that needs changing.
+`relationship`. An `original-proof` entry must use `relationship: other`;
+additional sources accompanying an original result may use `background` or
+`other`. A `formalizes`, `adapts`, or `independently-proves` relationship instead
+declares the result source-based and therefore conflicts with `type:
+original-proof` anywhere in the list. Thus a result is original exactly when at
+least one entry is `original-proof`, every such entry uses `other`, and every
+other relationship is `background` or `other`; it is source-based exactly when
+there is no `original-proof` entry and at least one relationship is
+`formalizes`, `adapts`, or `independently-proves`. All other combinations fail.
+A supplied source `type` must be exactly `paper`, `book`, `web discussion`,
+`folklore`, `original-proof`, or `other`; it may be omitted for source-based
+entries. Invalid or missing provenance fails mechanical verification with the
+field that needs changing.
 Do not add a top-level `provenance` block: put maintainers under `project`, the
 repository role under `repository`, and result origin in the source entries as
 above. The exact mechanical minimum is enforced here; the fields' intended

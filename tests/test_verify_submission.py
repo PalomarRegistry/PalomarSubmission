@@ -1048,6 +1048,7 @@ review:
             self.assertNotIn("formalization_sha256", report)
             self.assertNotIn("comparator_config_sha256", report)
             self.assertNotIn("declared", report["provenance"])
+            self.assertIn(report["provenance"]["result_origin"], {"original", "source-based"})
 
     def test_formalization_metadata_rejects_unknown_or_too_many_classifications(self):
         valid = """\
@@ -1112,7 +1113,7 @@ review:
                 {
                     "title": "Background textbook",
                     "type": "original-proof",
-                    "relationship": "background",
+                    "relationship": "other",
                 }
             ],
         }
@@ -1248,7 +1249,7 @@ review:
                     "title": "A mathematical source",
                     "type": source_type,
                     "relationship": (
-                        "background" if source_type == "original-proof" else "formalizes"
+                        "other" if source_type == "original-proof" else "formalizes"
                     ),
                 }
                 provenance = verifier.normalized_provenance(
@@ -1301,6 +1302,44 @@ review:
                     ],
                 }
             )
+
+    def test_original_proof_entry_uses_other_while_accompanying_sources_may_be_background(self):
+        provenance = verifier.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "repository": {"role": "substantive-development"},
+                "sources": [
+                    {
+                        "title": "Original proof",
+                        "type": "original-proof",
+                        "relationship": "other",
+                    },
+                    {
+                        "title": "Background textbook",
+                        "type": "book",
+                        "relationship": "background",
+                    },
+                ],
+            }
+        )
+        self.assertEqual(provenance["result_origin"], "original")
+
+        invalid = {
+            "project": {"responsible_maintainers": ["Ada Lovelace"]},
+            "repository": {"role": "substantive-development"},
+            "sources": [
+                {
+                    "title": "Original proof",
+                    "type": "original-proof",
+                    "relationship": "background",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(
+            VerificationError,
+            r"type: original-proof must use relationship: other.*additional sources",
+        ):
+            verifier.normalized_provenance(invalid)
 
     def test_original_proof_source_still_requires_relationship(self):
         with self.assertRaisesRegex(
@@ -1364,6 +1403,27 @@ review:
             provenance["substantive_formalization"]["tree_url"],
             f"https://github.com/example/substantive/tree/{revision}",
         )
+
+    def test_substantive_repository_rejects_a_thin_wrapper_target(self):
+        with self.assertRaisesRegex(
+            VerificationError,
+            r"repository\.substantive_formalization is valid only.*thin-wrapper.*remove it",
+        ):
+            verifier.normalized_provenance(
+                {
+                    "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                    "repository": {
+                        "role": "substantive-development",
+                        "substantive_formalization": {
+                            "id": "example/ignored",
+                            "revision": "a" * 40,
+                        },
+                    },
+                    "sources": [
+                        {"title": "A source theorem", "relationship": "formalizes"}
+                    ],
+                }
+            )
 
     def test_formalization_metadata_must_be_valid_yaml(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -725,9 +725,9 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         raise VerificationError(
             "formalization.yaml top-level field provenance is obsolete; declare provenance "
             "through project.responsible_maintainers, repository, and sources. Every source "
-            "needs relationship; use type: original-proof with only background or other "
-            "relationships for an original result, or use formalizes, adapts, or "
-            "independently-proves for a source-based result"
+            "needs relationship; an original-proof entry must use relationship: other and "
+            "additional sources may use background or other, while formalizes, adapts, or "
+            "independently-proves declares a source-based result"
         )
 
     repository = _required_mapping(data.get("repository"), "repository")
@@ -738,6 +738,14 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             f"formalization.yaml field repository.role must be one of: {allowed}"
         )
     substantive: dict[str, str] | None = None
+    if (
+        repository_role == "substantive-development"
+        and "substantive_formalization" in repository
+    ):
+        raise VerificationError(
+            "formalization.yaml field repository.substantive_formalization is valid only "
+            "when repository.role is thin-wrapper; remove it for substantive-development"
+        )
     if repository_role == "thin-wrapper":
         item = _required_mapping(
             repository.get("substantive_formalization"),
@@ -784,7 +792,7 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             raise VerificationError(
                 f"formalization.yaml field {path}.relationship must be a nonempty string; "
                 "every source needs a relationship, including original-proof entries, which "
-                "must use background or other"
+                "must use other"
             )
         relationship = raw_relationship.strip()
         if relationship not in SOURCE_RELATIONSHIPS:
@@ -848,6 +856,14 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             "formalization.yaml declares an original-proof, so every source must use "
             "relationship background or other; formalizes, adapts, and independently-proves "
             "declare a source-based result"
+        )
+    if result_origin == "original" and any(
+        source.get("type") == ORIGINAL_PROOF_TYPE and source["relationship"] != "other"
+        for source in sources
+    ):
+        raise VerificationError(
+            "formalization.yaml entries with type: original-proof must use relationship: "
+            "other; background is only for additional sources accompanying an original result"
         )
 
     raw_related = data.get("related_formalizations", [])
