@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the production statement boundary on a freshly cloned fixture."""
+"""Exercise the production statement boundary on a clean Git fixture."""
 
 from __future__ import annotations
 
