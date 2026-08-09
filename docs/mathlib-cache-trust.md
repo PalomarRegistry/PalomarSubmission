@@ -104,9 +104,11 @@ Mathlib client chooses its configured official download backend. After
 download, the verifier builds the
 official closure with network disabled before it grants the submitted project
 access to those compiled outputs. The checked cold-build route plants
-executable ignored payloads after materialization and requires neither payload
-to survive the real cache and trusted build phases; the focused regression
-also asserts both paths are clean at the network-enabled invocation.
+cache executables in Mathlib and one closure dependency after materialization,
+requires neither payload to survive the real cache and replay phases, and
+asserts both paths are clean at the network-enabled invocation. The same route
+separately plants executable and compiled output in its qualified root, as
+described in [`launch-security-review.md`](launch-security-review.md).
 
 ### Accepted-Challenge rendering
 

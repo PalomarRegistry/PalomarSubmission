@@ -131,9 +131,9 @@ when the flattened submission manifest names the same canonical GitHub
 repository. Immediately before each qualified-root build, the verifier likewise
 deletes and recreates every `.lake` tree owned by that root. Mathlib-owned cache
 output and the verifier-created flattened closure links remain read-only. The
-root build can write only its freshly recreated `build` and `config`
-directories and runs with network disabled. Trusted build directories are then
-frozen read/execute-only. The verifier compiles `Challenge.lean`
+root build can write only the freshly recreated `build` and `config`
+directories of every package it owns, and runs with network disabled. Trusted
+build directories are then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
 copies only that one module into a fresh protected directory. Comparator's

@@ -227,16 +227,19 @@ def main() -> int:
     )
     if qualified is None:
         raise VerificationError("cold-build fixture has no qualified trusted root")
-    hostile_qualified_state = (
+    qualified_build = (
         package_checkout(source, qualified, checkout=source)
         / ".lake"
         / "build"
-        / "bin"
-        / "palomar-hostile-qualified-root"
     )
-    hostile_qualified_state.parent.mkdir(parents=True, exist_ok=True)
-    hostile_qualified_state.write_bytes(b"#!/bin/sh\nexit 97\n")
-    hostile_qualified_state.chmod(0o755)
+    hostile_qualified_states = [
+        qualified_build / "bin" / "palomar-hostile-qualified-root",
+        qualified_build / "lib" / "lean" / "PalomarHostile.olean",
+    ]
+    for path in hostile_qualified_states:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"candidate compiled or executable output")
+    hostile_qualified_states[0].chmod(0o755)
     build_allowlisted_roots(
         source,
         checkout=source,
@@ -249,9 +252,9 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
-    if os.path.lexists(hostile_qualified_state):
+    if any(os.path.lexists(path) for path in hostile_qualified_states):
         raise VerificationError(
-            "ignored executable qualified-root state survived the trusted build boundary"
+            "ignored executable or compiled qualified-root state survived the trusted build boundary"
         )
 
     trusted = set(trusted_lake_directories(source, allowlist, checkout=source))

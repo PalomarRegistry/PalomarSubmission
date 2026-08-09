@@ -1724,6 +1724,83 @@ review:
             self.assertEqual(build, (package / ".lake" / "build").resolve())
             self.assertEqual(config, (package / ".lake" / "config").resolve())
 
+    def test_trusted_state_reset_validates_every_target_before_deleting_any(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            packages_dir = source / ".lake" / "packages"
+            first = packages_dir / "first"
+            second = packages_dir / "second"
+            for package in (first, second):
+                (package / ".lake" / "build").mkdir(parents=True)
+                (package / ".lake" / "config").mkdir()
+            protected = first / ".lake" / "build" / "must-survive-refusal"
+            protected.write_text("protected")
+            redirected = source.parent / "redirected"
+            (redirected / "build").mkdir(parents=True)
+            (redirected / "config").mkdir()
+            shutil.rmtree(second / ".lake")
+            (second / ".lake").symlink_to(redirected, target_is_directory=True)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": name,
+                                "type": "git",
+                                "url": f"https://github.com/example/{name}",
+                                "rev": "1" * 40,
+                            }
+                            for name in ("first", "second")
+                        ]
+                    }
+                )
+            )
+            packages = verifier.manifest_packages(source)
+
+            with self.assertRaisesRegex(VerificationError, "symlinked path component"):
+                verifier.reset_trusted_lake_state(
+                    source,
+                    {"first", "second"},
+                    packages=packages,
+                    checkout=source,
+                )
+
+            self.assertEqual(protected.read_text(), "protected")
+
+    def test_dot_package_names_fail_before_materialization(self):
+        for name in (".", ".."):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                (source / "lake-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "packages": [
+                                {
+                                    "name": name,
+                                    "type": "git",
+                                    "url": "https://github.com/example/package",
+                                    "rev": "1" * 40,
+                                }
+                            ]
+                        }
+                    )
+                )
+                with self.assertRaisesRegex(VerificationError, "unsafe package name"):
+                    materialize_packages(
+                        source,
+                        checkout=source,
+                        base_env={"PATH": "/usr/bin"},
+                    )
+                with self.assertRaisesRegex(
+                    VerificationError, "unsafe trusted package name"
+                ):
+                    verifier.reset_trusted_lake_state(
+                        source,
+                        {name},
+                        packages=verifier.manifest_packages(source),
+                        checkout=source,
+                    )
+
     def test_mathlib_cache_starts_after_discarding_ignored_executable_state(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -1857,11 +1934,52 @@ review:
 
             self.assertEqual(sandbox.call_count, 2)
 
-            protected = mathlib / ".lake" / "config" / "must-survive-refusal"
-            protected.write_text("protected")
             submitted_manifest = json.loads(
                 (source / "lake-manifest.json").read_text()
             )
+            canonical_mathlib_url = submitted_manifest["packages"][0]["url"]
+            submitted_manifest["packages"][0]["url"] = (
+                "https://github.com/example/mathlib4-legacy"
+            )
+            (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
+            for poison in poisons:
+                poison.parent.mkdir(parents=True, exist_ok=True)
+                poison.write_text("#!/bin/sh\nexit 97\n")
+            mathlib_root = {"repository": "leanprover-community/mathlib4"}
+            aliases = {
+                "leanprover-community/mathlib4": mathlib_root,
+                "example/mathlib4-legacy": mathlib_root,
+            }
+            with (
+                mock.patch(
+                    "scripts.verify_submission.allowed_roots",
+                    return_value=([mathlib_root], aliases),
+                ),
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=cache_phase,
+                ) as alias_sandbox,
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(alias_sandbox.call_count, 2)
+            submitted_manifest["packages"][0]["url"] = canonical_mathlib_url
+            (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
+
+            protected = mathlib / ".lake" / "config" / "must-survive-refusal"
+            protected.write_text("protected")
             git_dependency = submitted_manifest["packages"][1]
             submitted_manifest["packages"][1] = {
                 "name": "batteries",

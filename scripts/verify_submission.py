@@ -2128,7 +2128,7 @@ def reset_trusted_lake_state(
         selected.add(name)
         if package["url"].startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
             raise VerificationError(f"unsafe trusted package name: {name!r}")
         package_dir = (packages_directory / name).resolve()
         # Validate every target before deleting any state. A redirected or
@@ -2963,7 +2963,7 @@ def materialize_packages(
     Path(git_env["HOME"]).mkdir(parents=True)
     for package in packages:
         name = package["name"]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
             raise VerificationError(f"unsafe package name in Lake manifest: {name!r}")
         repository_url = package["url"]
         if repository_url.startswith("path:"):
@@ -3039,11 +3039,13 @@ def get_mathlib_cache(
 ) -> None:
     """Run the cache client only from a clean, pinned official Mathlib checkout."""
     packages = manifest_packages(source)
+    _roots, aliases = allowed_roots()
     mathlib = next(
         (
             package
             for package in packages
-            if str(package["repository"]).lower() == "leanprover-community/mathlib4"
+            if canonical_repository(str(package["repository"]), aliases).lower()
+            == "leanprover-community/mathlib4"
         ),
         None,
     )
