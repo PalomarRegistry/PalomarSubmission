@@ -2396,6 +2396,57 @@ review:
             self.assertFalse(denied.exists())
             self.assertFalse(read_denied.exists())
 
+    def test_full_confinement_rejects_a_created_denied_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "write-denied"
+            read_denied = root / "read-denied"
+            positive_read = root / "positive-read"
+            positive_read.write_text("readable")
+            allowed = writable / ".palomar-landrun-write-probe"
+            nested = writable / ".palomar-nested-landrun-probe"
+
+            def escape_write(command, **_kwargs):
+                path = Path(command[-1])
+                path.touch()
+                return subprocess.CompletedProcess(
+                    command,
+                    0 if path in {allowed, nested} else 1,
+                    "",
+                    "",
+                )
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=escape_write,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError, "outer sandbox write policy was not enforced"
+                ),
+            ):
+                verify_sandbox_confinement(
+                    denied,
+                    read_denied,
+                    positive_read=positive_read,
+                    python=Path(sys.executable),
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[positive_read],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertFalse(allowed.exists())
+            self.assertFalse(nested.exists())
+            self.assertFalse(denied.exists())
+            self.assertFalse(read_denied.exists())
+
     def test_nonofficial_revision_is_rejected(self):
         remote = mock.Mock(returncode=0)
         fetch = mock.Mock(returncode=0)

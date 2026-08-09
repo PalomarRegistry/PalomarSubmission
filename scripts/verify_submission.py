@@ -2217,7 +2217,6 @@ def verify_sandbox_confinement(
     def verify_nested_confinement() -> None:
         nested_probe = writable_directories[0] / ".palomar-nested-landrun-probe"
         if nested_probe.exists():
-            read_probe.unlink(missing_ok=True)
             raise VerificationError(
                 f"nested confinement probe path already exists: {nested_probe}"
             )
@@ -2246,7 +2245,6 @@ def verify_sandbox_confinement(
         finally:
             nested_probe.unlink(missing_ok=True)
         if nested.returncode or not nested_created:
-            read_probe.unlink(missing_ok=True)
             raise VerificationError(
                 "nested Landrun confinement is unavailable" + detail(nested)
             )
@@ -2276,6 +2274,7 @@ def verify_sandbox_confinement(
         )
 
     if result.denied is None:
+        read_probe.unlink(missing_ok=True)
         raise VerificationError("outer sandbox confinement probe omitted its negative control")
     if result.denied_created or result.denied.returncode == 0:
         read_probe.unlink(missing_ok=True)
