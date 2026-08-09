@@ -20,7 +20,7 @@ where the two disagree `SECURITY.md` is right. Four things have changed since:
   no longer has enforced branch protection; its append-only controls are CI plus
   maintainer procedure until the organization upgrades to GitHub Team.
 
-Where the sections below describe the issue-based intake or the second job that
+Where the sections below describe the retired intake or the second job that
 reported into it, read them as a record of what was reviewed in July.
 
 This record covers the launch hardening tracked by

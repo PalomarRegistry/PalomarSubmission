@@ -318,8 +318,8 @@ This document describes the boundary as it stands. The component review of July
 2026, its adversarial evidence, repository controls, and accepted residual risks
 are recorded in
 [`docs/launch-security-review.md`](docs/launch-security-review.md), which is a
-record of what was reviewed then and still describes the issue-based intake that
-has since been replaced. Read it for the evidence, not for the current shape.
+record of what was reviewed then and still describes the retired intake that has
+since been replaced. Read it for the evidence, not for the current shape.
 
 ## Reporting a vulnerability
 

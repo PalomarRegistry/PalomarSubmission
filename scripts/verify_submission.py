@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and mechanically verify one issue-based Palomar submission."""
+"""Prepare and mechanically verify one Palomar submission."""
 
 from __future__ import annotations
 
