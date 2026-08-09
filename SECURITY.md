@@ -60,8 +60,9 @@ If the file and this paragraph disagree, the file is right.
   `formalization.yaml` at 256 KiB and parses it in the credential-free intake
   job with PyYAML's safe loader, duplicate-key rejection, and explicit
   rejection of YAML merge keys before they can be expanded. The same module
-  owns the dispatch-field and provenance contract; the verifier orchestrator
-  consumes its validated values without a fallback parser.
+  owns the closed dispatch envelope and provenance contract; the verifier
+  orchestrator applies the commit, existing-id, and authorization field rules
+  and consumes the metadata without a fallback parser.
 - Git dependencies are materialized directly at the full commits recorded in
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier

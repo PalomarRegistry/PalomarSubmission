@@ -143,13 +143,17 @@ bounded JSON artifact, so there is no second job holding a write token to
 compromise. See [`SECURITY.md`](SECURITY.md) before changing the workflow or
 verifier.
 
-## Development checks
+## Code boundaries
 
-[`scripts/submission_contract.py`](scripts/submission_contract.py) owns dispatch
-input validation, GitHub repository normalization, and the complete
-`formalization.yaml` contract. [`scripts/verify_submission.py`](scripts/verify_submission.py)
-orchestrates checkout and verification using that one contract; it does not
-carry a second parser or compatibility entry point.
+[`scripts/submission_contract.py`](scripts/submission_contract.py) owns the
+dispatch-input allowlist and envelope validation, GitHub repository
+normalization, and the complete `formalization.yaml` contract.
+[`scripts/verify_submission.py`](scripts/verify_submission.py) applies the
+remaining per-field dispatch rules for the commit, existing id, and
+authorization while it orchestrates checkout and verification. It does not
+carry a second request or metadata parser or a compatibility entry point.
+
+## Development checks
 
 Repository Python files use the `E`, `F`, `I`, `UP`, and `B` Ruff rule families declared
 in [`pyproject.toml`](pyproject.toml). Install the single locked lint dependency

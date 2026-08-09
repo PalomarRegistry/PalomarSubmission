@@ -49,7 +49,6 @@ COMPILED_ARTIFACT_SUFFIXES = {
     ".so",
     ".trace",
 }
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # A Lean toolchain, as a comparable version. Release candidates sort before the
 # release they lead to, so v4.31.0-rc2 < v4.31.0, and anything that does not
 # parse is refused rather than guessed at.
@@ -127,7 +126,7 @@ def resolve_release_commit(repository: str, tag: str) -> str:
     commits = {}
     for line in proc.stdout.splitlines():
         parts = line.split()
-        if len(parts) == 2 and SHA_RE.fullmatch(parts[0]):
+        if len(parts) == 2 and submission_contract.SHA_RE.fullmatch(parts[0]):
             commits[parts[1]] = parts[0]
     # An annotated tag resolves through its peeled ref; prefer that.
     commit = commits.get(f"refs/tags/{tag}^{{}}") or commits.get(f"refs/tags/{tag}")
@@ -799,7 +798,7 @@ def prepare(args: argparse.Namespace) -> int:
             values.get("repository_url", "")
         )
         commit = values.get("commit_sha", "").strip().lower()
-        if not SHA_RE.fullmatch(commit):
+        if not submission_contract.SHA_RE.fullmatch(commit):
             raise VerificationError("Commit SHA must be 40 lowercase hexadecimal characters")
         existing_id = values.get("existing_id", "").strip().upper()
         if existing_id and not submission_contract.PALOMAR_ID_RE.fullmatch(existing_id):
@@ -1083,7 +1082,7 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
                     f"Git package {str(package.get('name') or '')!r} must be hosted on GitHub"
                 )
             revision = str(package.get("rev") or package.get("inputRev") or "")
-            if not SHA_RE.fullmatch(revision):
+            if not submission_contract.SHA_RE.fullmatch(revision):
                 raise VerificationError(
                     f"Git package {str(package.get('name') or '')!r} is not pinned to a full commit"
                 )
@@ -1331,7 +1330,9 @@ def allowed_roots() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
             or not OFFICIAL_REF_RE.fullmatch(official_ref)
             or not isinstance(accepted_revisions, list)
             or not all(
-                isinstance(revision, str) and SHA_RE.fullmatch(revision) for revision in accepted_revisions
+                isinstance(revision, str)
+                and submission_contract.SHA_RE.fullmatch(revision)
+                for revision in accepted_revisions
             )
             or len(set(accepted_revisions)) != len(accepted_revisions)
             or trust_level not in {"high", "qualified"}
@@ -2464,7 +2465,7 @@ def materialize_packages(
             or parsed.fragment
         ):
             raise VerificationError(f"Git package {name!r} must use a credential-free HTTPS repository URL")
-        if not SHA_RE.fullmatch(revision):
+        if not submission_contract.SHA_RE.fullmatch(revision):
             raise VerificationError(f"Git package {name!r} is not pinned to a full commit")
         package_dir = packages_dir / name
         package_dir.mkdir()

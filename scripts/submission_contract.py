@@ -11,6 +11,35 @@ import yaml
 
 from scripts.verification_errors import VerificationError
 
+__all__ = (
+    "ARXIV_CATEGORIES",
+    "ARXIV_CATEGORY_NAMES",
+    "AUTHORIZATION_RELATIONSHIPS",
+    "GITHUB_LOGIN_RE",
+    "GITHUB_RE",
+    "MAX_FORMALIZATION_BYTES",
+    "MSC2020_CODES",
+    "MSC2020_NAMES",
+    "OPTIONAL_FIELDS",
+    "ORCID_RE",
+    "ORIGINAL_PROOF_TYPE",
+    "PALOMAR_ID_RE",
+    "RELATED_FORMALIZATION_RELATIONSHIPS",
+    "REPOSITORY_RE",
+    "REPOSITORY_ROLES",
+    "SHA_RE",
+    "SOURCE_ENDORSEMENTS",
+    "SOURCE_RELATIONSHIPS",
+    "SOURCE_TYPES",
+    "SUBMISSION_ID_RE",
+    "UniqueKeySafeLoader",
+    "load_formalization_metadata",
+    "normalize_repository",
+    "normalized_provenance",
+    "reject_obsolete_provenance_fields",
+    "submission_request",
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
 
