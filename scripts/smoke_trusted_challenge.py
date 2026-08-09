@@ -217,6 +217,29 @@ def main() -> int:
         raise VerificationError(
             "ignored executable Mathlib-closure state survived the trusted cache boundary"
         )
+    qualified = next(
+        (
+            package
+            for package in packages
+            if allowlist.get(package["name"], ("", ""))[1] == "qualified"
+        ),
+        None,
+    )
+    if qualified is None:
+        raise VerificationError("cold-build fixture has no qualified trusted root")
+    qualified_build = (
+        package_checkout(source, qualified, checkout=source)
+        / ".lake"
+        / "build"
+    )
+    hostile_qualified_states = [
+        qualified_build / "bin" / "palomar-hostile-qualified-root",
+        qualified_build / "lib" / "lean" / "PalomarHostile.olean",
+    ]
+    for path in hostile_qualified_states:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"candidate compiled or executable output")
+    hostile_qualified_states[0].chmod(0o755)
     build_allowlisted_roots(
         source,
         checkout=source,
@@ -229,6 +252,10 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
+    if any(os.path.lexists(path) for path in hostile_qualified_states):
+        raise VerificationError(
+            "ignored executable or compiled qualified-root state survived the trusted build boundary"
+        )
 
     trusted = set(trusted_lake_directories(source, allowlist, checkout=source))
     trusted_builds = {

@@ -1958,6 +1958,12 @@ def package_allowlist(
             for package in packages
             if canonical_repository(str(package["repository"]), aliases).lower() == display.lower()
         ]
+        if len(matching) > 1:
+            names = ", ".join(repr(package["name"]) for package in matching)
+            raise VerificationError(
+                f"Lake manifest assigns multiple package names to allowlisted "
+                f"repository {display}: {names}"
+            )
         for root_package in matching:
             package_dir = package_checkout(source, root_package, checkout=checkout)
             verify_official_revision(
@@ -2061,6 +2067,13 @@ def package_lake_directories(
         raise VerificationError(f"trusted package {name!r} is absent from the manifest")
     boundary = checkout.resolve()
     package_dir = package_checkout(source, package, checkout=boundary)
+    return _validated_package_lake_directories(package_dir, name, boundary)
+
+
+def _validated_package_lake_directories(
+    package_dir: Path, name: str, boundary: Path
+) -> tuple[Path, Path]:
+    """Resolve one package's writable Lake leaves inside an explicit boundary."""
     result: list[Path] = []
     for leaf in ("build", "config"):
         candidate = package_dir / ".lake" / leaf
@@ -2091,6 +2104,46 @@ def trusted_lake_directories(
                 raise VerificationError(f"trusted package Lake directory is missing: {directory}")
             result.append(directory)
     return sorted(set(result))
+
+
+def reset_trusted_lake_state(
+    source: Path,
+    names: Any,
+    *,
+    packages: list[dict[str, str]],
+    checkout: Path,
+) -> list[Path]:
+    """Validate, then recreate each trusted package's writable Lake state."""
+    requested = set(names)
+    boundary = checkout.resolve()
+    packages_directory = manifest_packages_directory(source, checkout=boundary)
+    package_directories: list[Path] = []
+    selected: set[str] = set()
+    for package in packages:
+        name = package["name"]
+        if name not in requested:
+            continue
+        if name in selected:
+            raise VerificationError(f"duplicate trusted package name: {name!r}")
+        selected.add(name)
+        if package["url"].startswith("path:"):
+            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
+            raise VerificationError(f"unsafe trusted package name: {name!r}")
+        package_dir = (packages_directory / name).resolve()
+        # Validate every target before deleting any state. A redirected or
+        # malformed package therefore fails without touching another package.
+        _validated_package_lake_directories(package_dir, name, boundary)
+        package_directories.append(package_dir)
+    missing = requested - selected
+    if missing:
+        name = min(missing)
+        raise VerificationError(f"trusted package {name!r} is absent from the manifest")
+
+    writable: list[Path] = []
+    for package_dir in package_directories:
+        writable.extend(remove_untrusted_lake_state(package_dir))
+    return writable
 
 
 def nested_package_links(
@@ -2142,7 +2195,7 @@ def build_allowlisted_roots(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> None:
-    """Build non-Mathlib trusted roots before hostile Lake configuration can run."""
+    """Build non-Mathlib trusted roots from freshly reset Lake state."""
     roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     for root in sorted(roots, key=lambda item: item["trust_level"] != "high"):
@@ -2167,6 +2220,17 @@ def build_allowlisted_roots(
         }
         if not closure <= allowlist.keys() or not closure <= by_name.keys():
             raise VerificationError(f"trusted root {repository} has an incomplete closure")
+        owned_names = {
+            name for name, (owner, _level) in allowlist.items() if owner == repository
+        }
+        if root_package["name"] not in owned_names:
+            raise VerificationError(f"trusted root {repository} has no unique package role")
+        trusted_directories = reset_trusted_lake_state(
+            source,
+            owned_names,
+            packages=packages,
+            checkout=checkout,
+        )
         nested = nested_package_links(
             source, root_dir, checkout=checkout, allowed_names=closure
         )
@@ -2181,20 +2245,7 @@ def build_allowlisted_roots(
         build_env.update(
             {"HOME": str(home.resolve()), "TMPDIR": str(temporary.resolve()), "LEAN_ABORT_ON_PANIC": "1"}
         )
-        owned_names = {name for name, (owner, _level) in allowlist.items() if owner == repository}
-        writable = validate_writable_directories(
-            checkout,
-            [
-                *(
-                    directory
-                    for name in owned_names
-                    for directory in package_lake_directories(
-                        source, name, checkout=checkout
-                    )
-                ),
-                nested,
-            ],
-        )
+        writable = validate_writable_directories(checkout, trusted_directories)
         try:
             sandboxed_run(
                 [str(lake), "build"],
@@ -2912,7 +2963,7 @@ def materialize_packages(
     Path(git_env["HOME"]).mkdir(parents=True)
     for package in packages:
         name = package["name"]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
             raise VerificationError(f"unsafe package name in Lake manifest: {name!r}")
         repository_url = package["url"]
         if repository_url.startswith("path:"):
@@ -2988,11 +3039,13 @@ def get_mathlib_cache(
 ) -> None:
     """Run the cache client only from a clean, pinned official Mathlib checkout."""
     packages = manifest_packages(source)
+    _roots, aliases = allowed_roots()
     mathlib = next(
         (
             package
             for package in packages
-            if str(package["repository"]).lower() == "leanprover-community/mathlib4"
+            if canonical_repository(str(package["repository"]), aliases).lower()
+            == "leanprover-community/mathlib4"
         ),
         None,
     )
@@ -3049,25 +3102,15 @@ def get_mathlib_cache(
     }
     if not closure <= allowlist.keys():
         raise VerificationError("Mathlib cache closure is outside the verified allowlist")
-    by_name = {package["name"]: package for package in packages}
-    trusted_directories: list[Path] = []
     # Candidate configuration ran with these directories writable. Recreate
     # every verified package's .lake tree immediately before the first
     # networked Lake command, then expose only fresh build/config directories.
-    for name in sorted(closure):
-        package = by_name.get(name)
-        if package is None:
-            raise VerificationError(f"trusted package {name!r} is absent from the manifest")
-        if package["url"].startswith("path:"):
-            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        # Resolve both writable leaves against the checkout before deleting
-        # this package's state; malformed or redirected paths fail closed.
-        package_lake_directories(source, name, checkout=checkout)
-        trusted_directories.extend(
-            remove_untrusted_lake_state(
-                package_checkout(source, package, checkout=checkout)
-            )
-        )
+    trusted_directories = reset_trusted_lake_state(
+        source,
+        closure,
+        packages=packages,
+        checkout=checkout,
+    )
 
     nested_packages = nested_package_links(
         source, package_dir, checkout=checkout, allowed_names=closure

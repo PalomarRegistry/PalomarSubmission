@@ -90,6 +90,9 @@ If the file and this paragraph disagree, the file is right.
   pinned dependency closure. Every package name, canonical repository, and
   revision in that closure must match the submission's flattened manifest.
   Reusing a trusted package name while substituting a fork or commit is rejected.
+- Each canonical allowlisted repository has exactly one package role in the
+  flattened manifest. A repository alias cannot introduce a second trusted
+  name or a second candidate-writable build directory.
 - The transitive source closure of `Challenge.lean` may contain only Lean core
   or the verified pinned closure of an allowlisted root. Candidate-local helper
   imports remain rejected, and so does every source from a project Palomar has
@@ -125,11 +128,12 @@ read-only. The later network-disabled replay additionally receives write access
 to one exact ProofWidgets replay marker. Trusted-root Lake URL resolution is
 pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
-repository. The official
-Mathlib plan also replays the downloaded cache and receives write access to the
-one exact ProofWidgets replay-marker file it generates; qualified roots receive
-no write access to Mathlib source or build output. Trusted build directories are
-then frozen read/execute-only. The verifier compiles `Challenge.lean`
+repository. Immediately before each qualified-root build, the verifier likewise
+deletes and recreates every `.lake` tree owned by that root. Mathlib-owned cache
+output and the verifier-created flattened closure links remain read-only. The
+root build can write only the freshly recreated `build` and `config`
+directories of every package it owns, and runs with network disabled. Trusted
+build directories are then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
 copies only that one module into a fresh protected directory. Comparator's
