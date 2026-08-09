@@ -732,7 +732,6 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         raise VerificationError("Comparator configuration must contain one JSON object")
     required = {
         "challenge_module",
-        "enable_nanoda",
         "solution_module",
         "theorem_names",
         "permitted_axioms",
@@ -740,7 +739,11 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     missing = required - config.keys()
     if missing:
         raise VerificationError(f"comparator.json missing: {', '.join(sorted(missing))}")
-    allowed = required | {"definition_names"}
+    # Comparator exposes this switch for other callers, but it is not an
+    # authoring requirement here. Palomar always enables the independent
+    # replay in its own protected copy below, regardless of what a repository
+    # says or whether it carries the compatibility field at all.
+    allowed = required | {"definition_names", "enable_nanoda"}
     unknown = config.keys() - allowed
     if unknown:
         raise VerificationError(f"comparator.json has unknown keys: {', '.join(sorted(unknown))}")
@@ -748,10 +751,6 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     module_source_suffix(config["solution_module"])
     if config["challenge_module"] == config["solution_module"]:
         raise VerificationError("Comparator Challenge and Solution modules must be distinct")
-    if config["enable_nanoda"] is not True:
-        raise VerificationError(
-            "comparator enable_nanoda must be exactly true; the NanoDa replay is required"
-        )
     theorem_names = config["theorem_names"]
     definition_names = config.get("definition_names", [])
     if not isinstance(theorem_names, list) or not theorem_names:
@@ -765,16 +764,16 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
 
 
 def protected_comparator_config(source: Path, destination: Path) -> Path:
-    """Copy a validated Comparator config outside the sandbox-writable tree."""
-    load_comparator_config(source)
-    source_sha256 = sha256(source)
-    shutil.copyfile(source, destination)
-    # The digest establishes an exact byte copy. Revalidating the destination
-    # closes the source-mutation/TOCTOU window: the bytes Comparator will read,
-    # rather than only an earlier view of the submitted path, must be valid.
-    if sha256(destination) != source_sha256:
-        raise VerificationError("protected Comparator configuration does not match its source")
-    load_comparator_config(destination)
+    """Write Palomar's trusted config with the independent replay forced on."""
+    config = load_comparator_config(source)
+    config["enable_nanoda"] = True
+    write_json(destination, config)
+    # Validate the bytes Comparator will actually consume, not only the
+    # earlier submitted object. The explicit assertion is defense in depth
+    # against a future serializer or loader change weakening the invariant.
+    protected = load_comparator_config(destination)
+    if protected.get("enable_nanoda") is not True:
+        raise VerificationError("protected Comparator configuration did not enable NanoDa")
     return destination.resolve(strict=True)
 
 

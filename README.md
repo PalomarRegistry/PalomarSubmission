@@ -48,11 +48,13 @@ dependencies remain available to the proof in `Solution.lean`. A Tau Ceti import
 is recorded as a qualified trust surface; no other statement dependency is
 accepted, including one from a project Palomar has already indexed.
 
-NanoDa replay is a registry invariant, not a submitter option. A submitted
-`comparator.json` must contain `"enable_nanoda": true` with the JSON boolean value
-exactly; false, missing, non-boolean, and unknown compatibility fields fail
-intake. The trusted runner copies the validated configuration byte-for-byte to
-a protected path and passes that unchanged copy to Comparator.
+NanoDa replay is a registry invariant, not a submitter option. The optional
+`enable_nanoda` field in a submitted `comparator.json` is retained for upstream
+compatibility but is deliberately non-authoritative: missing, false, or any
+other JSON value does not disable or block verification. The trusted runner
+writes a separate protected configuration with NanoDa enabled and passes that
+copy to Comparator. This avoids making submitters maintain a switch whose value
+Palomar must override for every accepted result.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
