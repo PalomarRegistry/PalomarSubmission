@@ -1723,6 +1723,129 @@ review:
             self.assertEqual(build, (package / ".lake" / "build").resolve())
             self.assertEqual(config, (package / ".lake" / "config").resolve())
 
+    def test_mathlib_cache_starts_after_discarding_ignored_executable_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            mathlib = source / ".lake" / "packages" / "mathlib"
+            mathlib.mkdir(parents=True)
+            (mathlib / ".gitignore").write_text(".lake/\n")
+            dependency_revision = "1" * 40
+            (mathlib / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "batteries",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/batteries",
+                                "rev": dependency_revision,
+                            }
+                        ],
+                    }
+                )
+            )
+            subprocess.run(["git", "init", "--quiet", mathlib], check=True)
+            subprocess.run(
+                ["git", "-C", mathlib, "add", ".gitignore", "lake-manifest.json"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    mathlib,
+                    "-c",
+                    "user.name=Palomar test",
+                    "-c",
+                    "user.email=test@palomar.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+            )
+            revision = subprocess.run(
+                ["git", "-C", mathlib, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    mathlib,
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/leanprover-community/mathlib4",
+                ],
+                check=True,
+            )
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "mathlib",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/mathlib4",
+                                "rev": revision,
+                            },
+                            {
+                                "name": "batteries",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/batteries",
+                                "rev": dependency_revision,
+                            }
+                        ],
+                    }
+                )
+            )
+            batteries = source / ".lake" / "packages" / "batteries"
+            poisons = []
+            for package in (mathlib, batteries):
+                poison = package / ".lake" / "build" / "bin" / "cache"
+                poison.parent.mkdir(parents=True)
+                poison.write_text("#!/bin/sh\nexit 97\n")
+                poison.chmod(0o755)
+                (package / ".lake" / "config").mkdir()
+                poisons.append(poison)
+
+            def cache_phase(command, **kwargs):
+                for package, poison in zip((mathlib, batteries), poisons, strict=True):
+                    self.assertFalse(poison.exists())
+                    self.assertTrue((package / ".lake" / "build").is_dir())
+                    self.assertTrue((package / ".lake" / "config").is_dir())
+                self.assertEqual(
+                    kwargs.get("unrestricted_network", False),
+                    command[-3:] == ["exe", "cache", "get"],
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch(
+                "scripts.verify_submission.sandboxed_run", side_effect=cache_phase
+            ) as sandbox:
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertEqual(sandbox.call_count, 2)
+
     def test_committed_artifacts_outside_lake_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)

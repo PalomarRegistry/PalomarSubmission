@@ -84,7 +84,11 @@ whose origin is exactly `leanprover-community/mathlib4`, and whose Git-visible
 worktree is clean. In ordinary verification, the package allowlist and its
 official revisions were established earlier from the submitted and Mathlib
 manifests; the compatibility fixture exercises the same function against its
-checked repository and manifest.
+checked repository and manifest. After those checks, the verifier deletes and
+recreates `.lake/build` and `.lake/config` for every package in Mathlib's
+verified official closure. This second reset discards ignored files written by
+earlier candidate Lake elaboration and occurs immediately before the verifier
+creates the closure links and enables cache networking.
 
 The verifier then makes the selected Mathlib package, not the submitted
 project, the Lake workspace root and runs `lake exe cache get` inside the
@@ -95,18 +99,9 @@ not include GitHub, Azure, AWS, or Cloudflare credentials, and the workflow
 supplies no cache credential. The selected Mathlib client chooses its
 configured official download backend. After download, the verifier builds the
 official closure with network disabled before it grants the submitted project
-access to those compiled outputs.
-
-That boundary does not currently prove that every ignored file in the selected
-Mathlib checkout was pristine before cache access. Earlier network-disabled
-candidate Lake elaboration can write ignored `.lake/build` or `.lake/config`
-state in official package checkouts, and `git status` does not report those
-ignored paths. The network-enabled command still runs from Mathlib's workspace
-root under the sandbox above, but that state is writable and executable inside
-the sandbox. Candidate-planted Lake output could therefore in principle be
-reused instead of rebuilt during the network-enabled command. Reconstructing or
-independently clearing the ignored Lake state before that command is a
-[separate hardening requirement](https://github.com/PalomarRegistry/PalomarSubmission/issues/57).
+access to those compiled outputs. The checked cold-build route plants an
+executable ignored file after materialization and requires this same reset to
+remove it before the real cache and trusted build phases.
 
 ### Accepted-Challenge rendering
 

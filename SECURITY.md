@@ -114,7 +114,11 @@ Statement integrity instead comes from a separate build path. Mathlib's
 trusted cache is run with official Mathlib as the workspace root and
 with symlinks to the exact independently verified official closure. Other
 allowlisted roots are built from their own pinned configuration. Candidate
-Lake configuration never runs during these operations. Trusted-root Lake URL
+Lake configuration never runs during these operations. Immediately before the
+network-enabled Mathlib cache command, the verifier deletes and recreates the
+ignored `.lake/build` and `.lake/config` state for every verified package in
+Mathlib's closure; candidate work from earlier network-disabled configuration
+therefore cannot cross that boundary. Trusted-root Lake URL
 resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. The official

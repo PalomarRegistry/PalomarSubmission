@@ -22,6 +22,7 @@ from verify_submission import (
     manifest_packages,
     materialize_packages,
     package_allowlist,
+    package_checkout,
     package_lake_directories,
     protected_comparator_config,
     protected_lean_path,
@@ -163,6 +164,21 @@ def main() -> int:
     reject_untrusted_package_artifacts(
         source, packages, allowlist, checkout=source
     )
+    mathlib = next(
+        package
+        for package in packages
+        if package["repository"].lower() == "leanprover-community/mathlib4"
+    )
+    hostile_cache_state = (
+        package_checkout(source, mathlib, checkout=source)
+        / ".lake"
+        / "build"
+        / "bin"
+        / "palomar-hostile-cache-probe"
+    )
+    hostile_cache_state.parent.mkdir(parents=True, exist_ok=True)
+    hostile_cache_state.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    hostile_cache_state.chmod(0o755)
     get_mathlib_cache(
         source,
         checkout=source,
@@ -174,6 +190,10 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
+    if hostile_cache_state.exists():
+        raise VerificationError(
+            "ignored executable Mathlib state survived the trusted cache boundary"
+        )
     build_allowlisted_roots(
         source,
         checkout=source,

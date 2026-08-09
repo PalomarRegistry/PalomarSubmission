@@ -85,9 +85,12 @@ The maintained test surfaces are:
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
   checked multi-dependency fixture in `tests/fixtures/cold-tauceti`, followed by
   the real pinned Comparator, toolchain-matched `lean4export`, and pinned NanoDa
-  under the nested sandbox. The ordinary pull-request check byte-compares the
-  checked `formalization.yaml` and `comparator.json` contracts with Template
-  commit `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks
+  under the nested sandbox. Before the real cache phase, that route plants an
+  ignored executable in Mathlib's writable Lake state and requires the
+  production cache boundary to remove it. The ordinary pull-request check
+  byte-compares the checked `formalization.yaml` and `comparator.json`
+  contracts with Template commit
+  `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks
   reconcile those two files with Template `main`. The cold job
   uses the hosted tier's 330-minute capacity measured from the start of its
   350-minute job, so setup time and candidate execution consume one allowance.
