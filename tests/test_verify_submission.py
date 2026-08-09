@@ -13,14 +13,21 @@ from unittest import mock
 
 import yaml
 
+import scripts.submission_contract as submission_contract
 import scripts.verify_submission as verifier
+from scripts.submission_contract import (
+    OPTIONAL_FIELDS,
+    load_formalization_metadata,
+    normalize_repository,
+    submission_request,
+)
+from scripts.verification_errors import VerificationError
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
     PERMISSIVE_RESOURCE_PROPERTIES,
     LicenseDetectorError,
     LicenseValidationError,
     ResourceExhausted,
-    VerificationError,
     _deadline_timeout,
     allowed_roots,
     audit_challenge_sources,
@@ -34,9 +41,7 @@ from scripts.verify_submission import (
     lake_environment_value,
     landrun_command,
     load_comparator_config,
-    load_formalization_metadata,
     materialize_packages,
-    normalize_repository,
     normalized_repository_path,
     package_allowlist,
     project_tree_url,
@@ -326,7 +331,7 @@ class VerifySubmissionTests(unittest.TestCase):
             project.mkdir()
             (project / "lakefile.lean").write_text("-- arbitrary Lean\n")
             with self.assertRaisesRegex(
-                verifier.VerificationError, "must configure Lake with"
+                VerificationError, "must configure Lake with"
             ):
                 verifier.ensure_lake_manifest(project, Path(directory))
 
@@ -971,7 +976,7 @@ review:
             hashlib.sha256(raw).hexdigest(),
             "e4c6ab90c0439205cb41cf18b7b0e81397dd74a4a57ebdfe847c4eda719c21aa",
         )
-        template = yaml.load(raw, Loader=verifier.UniqueKeySafeLoader)
+        template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(
             template["sources"][0]["type"],
             "TEMPLATE: paper, book, web discussion, folklore, original-proof, or other",
@@ -996,7 +1001,7 @@ review:
             path = Path(directory) / "formalization.yaml"
             path.write_text(json.dumps(template), encoding="utf-8")
             metadata = load_formalization_metadata(path)
-        provenance = verifier.normalized_provenance(metadata)
+        provenance = submission_contract.normalized_provenance(metadata)
         self.assertEqual(provenance["result_origin"], "source-based")
         self.assertEqual(provenance["mathematical_sources"][0]["type"], "paper")
         self.assertNotIn("declared", provenance)
@@ -1147,7 +1152,7 @@ review:
                 load_formalization_metadata(path)
 
     def test_provenance_derives_an_original_result_from_its_source_entry(self):
-        provenance = verifier.normalized_provenance(
+        provenance = submission_contract.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
                 "repository": {"role": "substantive-development"},
@@ -1188,7 +1193,9 @@ review:
                     r"obsolete provenance fields: top-level provenance.*"
                     r"project\.responsible_maintainers.*sources with required relationships",
                 ):
-                    verifier.normalized_provenance({**current, "provenance": obsolete})
+                    submission_contract.normalized_provenance(
+                        {**current, "provenance": obsolete}
+                    )
 
     def test_source_based_provenance_requires_a_substantive_relationship(self):
         data = {
@@ -1204,7 +1211,7 @@ review:
         with self.assertRaisesRegex(
             VerificationError, "must include a formalizes, adapts, or independently-proves"
         ):
-            verifier.normalized_provenance(data)
+            submission_contract.normalized_provenance(data)
 
     def test_obsolete_person_field_names_are_rejected_with_current_replacements(self):
         current = {
@@ -1227,7 +1234,7 @@ review:
             r"obsolete provenance fields: project\.responsible_maintainer.*"
             r"project\.responsible_maintainers",
         ):
-            verifier.normalized_provenance(obsolete_maintainer)
+            submission_contract.normalized_provenance(obsolete_maintainer)
 
         obsolete_author = json.loads(json.dumps(current))
         obsolete_author["sources"][0].pop("authors")
@@ -1236,11 +1243,11 @@ review:
             VerificationError,
             r"obsolete provenance fields: sources\[0\]\.author.*sources\[0\]\.authors",
         ):
-            verifier.normalized_provenance(obsolete_author)
+            submission_contract.normalized_provenance(obsolete_author)
 
     def test_all_known_obsolete_provenance_fields_are_reported_together(self):
         with self.assertRaises(VerificationError) as caught:
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {
                         "responsible_maintainer": "Ada Lovelace",
@@ -1282,7 +1289,7 @@ review:
         for label, data, message in cases:
             with self.subTest(label):
                 with self.assertRaisesRegex(VerificationError, message):
-                    verifier.normalized_provenance(data)
+                    submission_contract.normalized_provenance(data)
 
     def test_unrecognized_enumerated_provenance_values_are_rejected(self):
         current = {
@@ -1297,14 +1304,14 @@ review:
         with self.assertRaisesRegex(
             VerificationError, "repository.role must be one of:"
         ):
-            verifier.normalized_provenance(invalid_role)
+            submission_contract.normalized_provenance(invalid_role)
 
         invalid_relationship = json.loads(json.dumps(current))
         invalid_relationship["sources"][0]["relationship"] = "informal_proof"
         with self.assertRaisesRegex(
             VerificationError, r"sources\[0\]\.relationship must be one of:"
         ):
-            verifier.normalized_provenance(invalid_relationship)
+            submission_contract.normalized_provenance(invalid_relationship)
 
         invalid_type = json.loads(json.dumps(current))
         invalid_type["sources"][0]["type"] = "web-discussion"
@@ -1313,14 +1320,14 @@ review:
             r"sources\[0\]\.type must be one of: book, folklore, original-proof, other, "
             r"paper, web discussion",
         ):
-            verifier.normalized_provenance(invalid_type)
+            submission_contract.normalized_provenance(invalid_type)
 
         invalid_endorsement = json.loads(json.dumps(current))
         invalid_endorsement["sources"][0]["author_endorsement"] = "unknown"
         with self.assertRaisesRegex(
             VerificationError, r"sources\[0\]\.author_endorsement must be one of:"
         ):
-            verifier.normalized_provenance(invalid_endorsement)
+            submission_contract.normalized_provenance(invalid_endorsement)
 
     def test_source_types_exactly_match_the_current_template_vocabulary(self):
         expected = {
@@ -1331,7 +1338,7 @@ review:
             "original-proof",
             "other",
         }
-        self.assertEqual(verifier.SOURCE_TYPES, expected)
+        self.assertEqual(submission_contract.SOURCE_TYPES, expected)
         for source_type in sorted(expected):
             with self.subTest(source_type=source_type):
                 source = {
@@ -1341,7 +1348,7 @@ review:
                         "other" if source_type == "original-proof" else "formalizes"
                     ),
                 }
-                provenance = verifier.normalized_provenance(
+                provenance = submission_contract.normalized_provenance(
                     {
                         "project": {"responsible_maintainers": ["Ada Lovelace"]},
                         "repository": {"role": "substantive-development"},
@@ -1355,7 +1362,7 @@ review:
             VerificationError,
             "every source must use relationship background or other.*Remove type: original-proof",
         ):
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
                     "repository": {"role": "substantive-development"},
@@ -1378,7 +1385,7 @@ review:
             VerificationError,
             r"type: original-proof declares.*must use relationship: other.*prior publication",
         ):
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
                     "repository": {"role": "substantive-development"},
@@ -1393,7 +1400,7 @@ review:
             )
 
     def test_original_proof_entry_uses_other_while_accompanying_sources_may_be_background(self):
-        provenance = verifier.normalized_provenance(
+        provenance = submission_contract.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
                 "repository": {"role": "substantive-development"},
@@ -1428,14 +1435,14 @@ review:
             VerificationError,
             r"type: original-proof declares.*must use relationship: other.*prior publication",
         ):
-            verifier.normalized_provenance(invalid)
+            submission_contract.normalized_provenance(invalid)
 
     def test_original_proof_source_still_requires_relationship(self):
         with self.assertRaisesRegex(
             VerificationError,
             r"sources\[0\]\.relationship.*every source needs a relationship.*original-proof",
         ):
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
                     "repository": {"role": "substantive-development"},
@@ -1449,7 +1456,7 @@ review:
             )
 
     def test_source_author_contact_state_is_carried_by_endorsement(self):
-        provenance = verifier.normalized_provenance(
+        provenance = submission_contract.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
                 "repository": {"role": "substantive-development"},
@@ -1469,7 +1476,7 @@ review:
 
     def test_thin_wrapper_records_the_substantive_repository_at_a_full_commit(self):
         revision = "a" * 40
-        provenance = verifier.normalized_provenance(
+        provenance = submission_contract.normalized_provenance(
             {
                 "project": {"responsible_maintainers": ["Ada Lovelace"]},
                 "repository": {
@@ -1498,7 +1505,7 @@ review:
             VerificationError,
             r"repository\.substantive_formalization is a required mapping.*thin-wrapper",
         ):
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
                     "repository": {"role": "thin-wrapper"},
@@ -1513,7 +1520,7 @@ review:
             VerificationError,
             r"repository\.substantive_formalization is valid only.*thin-wrapper.*remove it",
         ):
-            verifier.normalized_provenance(
+            submission_contract.normalized_provenance(
                 {
                     "project": {"responsible_maintainers": ["Ada Lovelace"]},
                     "repository": {
@@ -2689,7 +2696,7 @@ class SubmissionRequestTests(unittest.TestCase):
         return {"inputs": {**base, **inputs}}
 
     def test_a_dispatch_supplies_the_submission(self):
-        values, submission_id = verifier.submission_request(
+        values, submission_id = submission_request(
             self.dispatch(options=json.dumps({
                 "project_path": "sub",
                 "comparator_config_path": "sub/comparator.json",
@@ -2709,16 +2716,16 @@ class SubmissionRequestTests(unittest.TestCase):
         That is the worse failure: the submitter believes they told us
         something and nobody ever sees it.
         """
-        supplied = {name: "x" for name in verifier.OPTIONAL_FIELDS}
-        values, _ = verifier.submission_request(
+        supplied = {name: "x" for name in OPTIONAL_FIELDS}
+        values, _ = submission_request(
             self.dispatch(options=json.dumps(supplied))
         )
-        for name in verifier.OPTIONAL_FIELDS:
+        for name in OPTIONAL_FIELDS:
             self.assertIn(name, values, f"{name} cannot be submitted")
 
     def test_comparator_configuration_must_be_selected_explicitly(self):
         with self.assertRaisesRegex(VerificationError, "must be supplied explicitly"):
-            verifier.submission_request(self.dispatch(options="{}"))
+            submission_request(self.dispatch(options="{}"))
 
     def test_dispatch_inputs_are_validated_strictly(self):
         for label, event in [
@@ -2733,7 +2740,7 @@ class SubmissionRequestTests(unittest.TestCase):
         ]:
             with self.subTest(label):
                 with self.assertRaises(VerificationError):
-                    verifier.submission_request(event)
+                    submission_request(event)
 
 
 class DispatchWorkflowTests(unittest.TestCase):
@@ -2796,11 +2803,11 @@ class MetadataShapeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"
             path.write_text(text, encoding="utf-8")
-            return verifier.load_formalization_metadata(path)
+            return load_formalization_metadata(path)
 
     def test_every_missing_section_is_named_together(self):
         # The shape a project might reasonably have written before the standard.
-        with self.assertRaises(verifier.VerificationError) as caught:
+        with self.assertRaises(VerificationError) as caught:
             self.load("result:\n  name: x\nartifacts:\n  challenge: Challenge.lean\n")
         message = str(caught.exception)
         for section in (
@@ -2817,7 +2824,7 @@ class MetadataShapeTests(unittest.TestCase):
 
     def test_a_file_with_the_sections_gets_the_specific_complaint(self):
         # And once the shape is right, the detailed checks speak again.
-        with self.assertRaisesRegex(verifier.VerificationError, "project.name"):
+        with self.assertRaisesRegex(VerificationError, "project.name"):
             self.load(
                 "project: {}\nrepository: {}\nclassification: {}\n"
                 "sources: [{title: source, relationship: formalizes}]\n"

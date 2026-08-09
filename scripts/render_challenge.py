@@ -29,11 +29,10 @@ from scripts.render_report import (  # noqa: E402
     intake_report,
     parse_prepared_report,
 )
+from scripts.submission_contract import GITHUB_RE, SHA_RE  # noqa: E402
+from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
-    GITHUB_RE,
     MAX_SOURCE_BYTES,
-    SHA_RE,
-    VerificationError,
     clone_commit,
     direct_imports,
     ensure_lake_manifest,

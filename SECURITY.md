@@ -42,7 +42,7 @@ dispatched it, ordinarily the submission server; no push, comment, or pull
 request starts one. There is one job, `verify`, and its `permissions` block is
 `contents: read`. Its inputs are a repository, a commit, an opaque submission
 id, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
-allowlist in [`scripts/verify_submission.py`](scripts/verify_submission.py):
+allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
 relationship with its optional evidence and free-text context. There is no
 input for the submitter's GitHub identity, and none for an editorial review,
@@ -56,9 +56,13 @@ If the file and this paragraph disagree, the file is right.
   `https://github.com/owner/repository` URL and a full 40-character commit SHA.
   Dynamic request values are read from the workflow event payload and passed as
   files or subprocess arguments, not interpolated into shell programs.
-- `formalization.yaml` is capped at 256 KiB and parsed in the credential-free
-  intake job with PyYAML's safe loader, duplicate-key rejection, and explicit
-  rejection of YAML merge keys before they can be expanded.
+- [`scripts/submission_contract.py`](scripts/submission_contract.py) caps
+  `formalization.yaml` at 256 KiB and parses it in the credential-free intake
+  job with PyYAML's safe loader, duplicate-key rejection, and explicit
+  rejection of YAML merge keys before they can be expanded. The same module
+  owns the closed dispatch envelope and provenance contract; the verifier
+  orchestrator applies the commit, existing-id, and authorization field rules
+  and consumes the metadata without a fallback parser.
 - Git dependencies are materialized directly at the full commits recorded in
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier

@@ -11,7 +11,6 @@ from unittest import mock
 from scripts.render_challenge import (
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
-    VerificationError,
     artifact_manifest,
     execute,
     extract_module_doc,
@@ -26,6 +25,7 @@ from scripts.render_challenge import (
     trusted_lakefile,
 )
 from scripts.render_report import AcceptedRenderPaths
+from scripts.verification_errors import VerificationError
 
 
 class RenderChallengeTests(unittest.TestCase):

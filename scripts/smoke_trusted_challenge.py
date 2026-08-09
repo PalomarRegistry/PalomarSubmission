@@ -10,9 +10,13 @@ import shutil
 import sys
 from pathlib import Path
 
-from verify_submission import (
+ROOT = Path(__file__).resolve().parent.parent
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.verification_errors import VerificationError  # noqa: E402
+from scripts.verify_submission import (  # noqa: E402
     EXECUTION_BUDGET_SECONDS,
-    VerificationError,
     audit_challenge_sources,
     build_allowlisted_roots,
     compile_canonical_challenge,
