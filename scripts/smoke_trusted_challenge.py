@@ -178,16 +178,17 @@ def main() -> int:
     if dependency is None:
         raise VerificationError("cold-build Mathlib closure dependency is absent")
     hostile_cache_states: list[Path] = []
+    hostile_cache_payload = b"#!/bin/sh\nexit 97\n"
     for package in (mathlib, dependency):
         hostile_cache_state = (
             package_checkout(source, package, checkout=source)
             / ".lake"
             / "build"
             / "bin"
-            / "palomar-hostile-cache-probe"
+            / "cache"
         )
         hostile_cache_state.parent.mkdir(parents=True, exist_ok=True)
-        hostile_cache_state.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        hostile_cache_state.write_bytes(hostile_cache_payload)
         hostile_cache_state.chmod(0o755)
         hostile_cache_states.append(hostile_cache_state)
     get_mathlib_cache(
@@ -201,7 +202,11 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
-    if any(path.exists() for path in hostile_cache_states):
+    if any(
+        os.path.lexists(path)
+        and (path.is_symlink() or path.read_bytes() == hostile_cache_payload)
+        for path in hostile_cache_states
+    ):
         raise VerificationError(
             "ignored executable Mathlib-closure state survived the trusted cache boundary"
         )

@@ -119,6 +119,10 @@ network-enabled Mathlib cache command, the verifier deletes and recreates the
 entire ignored `.lake` tree for every verified package in Mathlib's closure,
 leaving only fresh `build` and `config` directories; candidate work from
 earlier network-disabled configuration therefore cannot cross that boundary.
+Those closure `build` and `config` directories are the network-enabled
+command's complete writable-directory set; source and closure-link paths remain
+read-only. The later network-disabled replay additionally receives write access
+to the one exact ProofWidgets replay marker described below.
 Trusted-root Lake URL
 resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub

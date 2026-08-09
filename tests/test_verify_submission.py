@@ -1725,7 +1725,8 @@ review:
 
     def test_mathlib_cache_starts_after_discarding_ignored_executable_state(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory)
+            source = Path(directory) / "source"
+            source.mkdir()
             mathlib = source / ".lake" / "packages" / "mathlib"
             mathlib.mkdir(parents=True)
             (mathlib / ".gitignore").write_text(".lake/\n")
@@ -1819,7 +1820,6 @@ review:
                 for package in (mathlib, batteries)
                 for leaf in ("build", "config")
             }
-            expected_writable.add((mathlib / ".lake" / "packages").resolve())
 
             def cache_phase(command, **kwargs):
                 for package, poison in zip((mathlib, batteries), poisons, strict=True):
@@ -1855,6 +1855,62 @@ review:
                 )
 
             self.assertEqual(sandbox.call_count, 2)
+
+            protected = mathlib / ".lake" / "config" / "must-survive-refusal"
+            protected.write_text("protected")
+            submitted_manifest = json.loads(
+                (source / "lake-manifest.json").read_text()
+            )
+            git_dependency = submitted_manifest["packages"][1]
+            submitted_manifest["packages"][1] = {
+                "name": "batteries",
+                "type": "path",
+                "dir": "vendor/batteries",
+            }
+            (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
+            with self.assertRaisesRegex(
+                VerificationError, "may not use a path dependency"
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(protected.read_text(), "protected")
+
+            submitted_manifest["packages"][1] = git_dependency
+            (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
+            outside_mathlib = source.parent / "redirected-mathlib"
+            mathlib.rename(outside_mathlib)
+            mathlib.symlink_to(outside_mathlib, target_is_directory=True)
+            protected = outside_mathlib / ".lake" / "config" / "must-survive-refusal"
+            with self.assertRaisesRegex(
+                VerificationError, "escapes the repository checkout"
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(protected.read_text(), "protected")
 
     def test_committed_artifacts_outside_lake_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

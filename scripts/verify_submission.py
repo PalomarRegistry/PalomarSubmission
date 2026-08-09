@@ -3072,9 +3072,7 @@ def get_mathlib_cache(
     nested_packages = nested_package_links(
         source, package_dir, checkout=checkout, allowed_names=closure
     )
-    cache_writable = validate_writable_directories(
-        checkout, [*trusted_directories, nested_packages]
-    )
+    cache_writable = validate_writable_directories(checkout, trusted_directories)
     replay_writable_files: list[Path] = []
     proofwidgets = next((package for package in packages if package["name"] == "proofwidgets"), None)
     if proofwidgets and proofwidgets["name"] in closure:
