@@ -3052,8 +3052,8 @@ def get_mathlib_cache(
     by_name = {package["name"]: package for package in packages}
     trusted_directories: list[Path] = []
     # Candidate configuration ran with these directories writable. Recreate
-    # the entire verified closure immediately before the first networked Lake
-    # command, then expose only its fresh build/config directories.
+    # every verified package's .lake tree immediately before the first
+    # networked Lake command, then expose only fresh build/config directories.
     for name in sorted(closure):
         package = by_name.get(name)
         if package is None:

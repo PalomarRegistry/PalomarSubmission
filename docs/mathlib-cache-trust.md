@@ -100,9 +100,10 @@ not include GitHub, Azure, AWS, or Cloudflare credentials, and the workflow
 supplies no cache credential. The selected Mathlib client chooses its
 configured official download backend. After download, the verifier builds the
 official closure with network disabled before it grants the submitted project
-access to those compiled outputs. The checked cold-build route plants an
-executable ignored file after materialization and requires this same reset to
-remove it before the real cache and trusted build phases.
+access to those compiled outputs. The checked cold-build route plants
+executable ignored files after materialization and requires both to be absent
+after the real cache and trusted build phases; the focused regression also
+asserts they are already absent at the network-enabled invocation.
 
 ### Accepted-Challenge rendering
 

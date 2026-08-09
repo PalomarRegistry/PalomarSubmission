@@ -187,6 +187,10 @@ remains append-only for existing versioned record paths.
 
 ## Accepted residual risks and deferred work
 
+- Qualified-root builds remain network-disabled, but currently reuse ignored
+  root-owned Lake state written during earlier candidate configuration. The
+  separate reset needed before those trusted builds is tracked in
+  [issue 59](https://github.com/PalomarRegistry/PalomarSubmission/issues/59).
 - Verification is dispatched automatically by the submission server, so compute
   abuse is bounded there rather than here: a submitter must prove push access to
   the repository being submitted, must wait out an interval between starts, and

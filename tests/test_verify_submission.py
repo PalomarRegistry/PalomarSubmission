@@ -1815,11 +1815,11 @@ review:
                 (package / ".lake" / "config").mkdir()
                 poisons.append(poison)
             expected_writable = {
-                package / ".lake" / leaf
+                (package / ".lake" / leaf).resolve()
                 for package in (mathlib, batteries)
                 for leaf in ("build", "config")
             }
-            expected_writable.add(mathlib / ".lake" / "packages")
+            expected_writable.add((mathlib / ".lake" / "packages").resolve())
 
             def cache_phase(command, **kwargs):
                 for package, poison in zip((mathlib, batteries), poisons, strict=True):
