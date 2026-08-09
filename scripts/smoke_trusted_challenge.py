@@ -22,6 +22,7 @@ from verify_submission import (
     manifest_packages,
     materialize_packages,
     package_allowlist,
+    package_checkout,
     package_lake_directories,
     protected_comparator_config,
     protected_lean_path,
@@ -163,6 +164,36 @@ def main() -> int:
     reject_untrusted_package_artifacts(
         source, packages, allowlist, checkout=source
     )
+    mathlib = next(
+        package
+        for package in packages
+        if package["repository"].lower() == "leanprover-community/mathlib4"
+    )
+    mathlib_dir = package_checkout(source, mathlib, checkout=source)
+    dependency = next(iter(manifest_packages(mathlib_dir)), None)
+    if dependency is None:
+        raise VerificationError("cold-build Mathlib fixture has no closure dependency")
+    by_name = {package["name"]: package for package in packages}
+    dependency = by_name.get(dependency["name"])
+    if dependency is None:
+        raise VerificationError("cold-build Mathlib closure dependency is absent")
+    hostile_cache_states: list[Path] = []
+    hostile_cache_payload = b"#!/bin/sh\nexit 97\n"
+    # Mathlib may legitimately rebuild its cache executable even without the
+    # reset. The otherwise unrelated closure dependency makes survival of the
+    # same payload an unambiguous reset failure.
+    for package in (mathlib, dependency):
+        hostile_cache_state = (
+            package_checkout(source, package, checkout=source)
+            / ".lake"
+            / "build"
+            / "bin"
+            / "cache"
+        )
+        hostile_cache_state.parent.mkdir(parents=True, exist_ok=True)
+        hostile_cache_state.write_bytes(hostile_cache_payload)
+        hostile_cache_state.chmod(0o755)
+        hostile_cache_states.append(hostile_cache_state)
     get_mathlib_cache(
         source,
         checkout=source,
@@ -174,6 +205,18 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
+    if any(
+        os.path.lexists(path)
+        and (
+            path.is_symlink()
+            or not path.is_file()
+            or path.read_bytes() == hostile_cache_payload
+        )
+        for path in hostile_cache_states
+    ):
+        raise VerificationError(
+            "ignored executable Mathlib-closure state survived the trusted cache boundary"
+        )
     build_allowlisted_roots(
         source,
         checkout=source,

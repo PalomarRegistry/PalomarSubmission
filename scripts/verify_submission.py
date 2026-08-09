@@ -3049,17 +3049,30 @@ def get_mathlib_cache(
     }
     if not closure <= allowlist.keys():
         raise VerificationError("Mathlib cache closure is outside the verified allowlist")
+    by_name = {package["name"]: package for package in packages}
+    trusted_directories: list[Path] = []
+    # Candidate configuration ran with these directories writable. Recreate
+    # every verified package's .lake tree immediately before the first
+    # networked Lake command, then expose only fresh build/config directories.
+    for name in sorted(closure):
+        package = by_name.get(name)
+        if package is None:
+            raise VerificationError(f"trusted package {name!r} is absent from the manifest")
+        if package["url"].startswith("path:"):
+            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
+        # Resolve both writable leaves against the checkout before deleting
+        # this package's state; malformed or redirected paths fail closed.
+        package_lake_directories(source, name, checkout=checkout)
+        trusted_directories.extend(
+            remove_untrusted_lake_state(
+                package_checkout(source, package, checkout=checkout)
+            )
+        )
+
     nested_packages = nested_package_links(
         source, package_dir, checkout=checkout, allowed_names=closure
     )
-    trusted_directories = [
-        directory
-        for name in closure
-        for directory in package_lake_directories(source, name, checkout=checkout)
-    ]
-    cache_writable = validate_writable_directories(
-        checkout, [*trusted_directories, nested_packages]
-    )
+    cache_writable = validate_writable_directories(checkout, trusted_directories)
     replay_writable_files: list[Path] = []
     proofwidgets = next((package for package in packages if package["name"] == "proofwidgets"), None)
     if proofwidgets and proofwidgets["name"] in closure:
