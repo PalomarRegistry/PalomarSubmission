@@ -1,6 +1,8 @@
 # Mathlib cache trust note
 
-**Investigated:** 1 August 2026.
+**Investigated:** 1 August 2026. Palomar's two current cache implementations,
+reached from three workflow routes, were reconciled on 9 August 2026 against
+Submission commit `02d4746ba8322af3ff3e2d173b45a9c553072393`.
 
 **Implementation inspected:** `leanprover-community/mathlib4` at
 [`0be66d77ba290828a5260d883ace636f56bce89a`](https://github.com/leanprover-community/mathlib4/tree/0be66d77ba290828a5260d883ace636f56bce89a),
@@ -59,6 +61,92 @@ Azure uploads use `If-None-Match: *`, while explicit overwrite commands are
 supported for authorized publishers. These client-side facts do not establish
 who currently holds credentials, what server-side roles they have, whether
 object versioning is enabled, or how replacement is monitored.
+
+## How Palomar consumes the cache
+
+Palomar has two deliberately different download implementations. Submission
+verification and its checked compatibility fixture share one implementation;
+accepted-Challenge rendering uses the other. All three workflow routes accept
+the cache bytes under the trust decision above; none derives or checks an
+expected archive-content digest from the pinned source.
+
+### Submission verification
+
+The dispatched
+[`submission.yml`](../.github/workflows/submission.yml) workflow and the
+checked fixture in
+[`compatibility.yml`](../.github/workflows/compatibility.yml), through
+[`smoke_trusted_challenge.py`](../scripts/smoke_trusted_challenge.py), call
+[`get_mathlib_cache`](../scripts/verify_submission.py). Before the
+network-enabled phase, that function requires the selected Mathlib package to
+be a real Git checkout whose `HEAD` equals the selected manifest revision,
+whose origin is exactly `leanprover-community/mathlib4`, and whose Git-visible
+worktree is clean. In ordinary verification, the package allowlist and its
+official revisions were established earlier from the submitted and Mathlib
+manifests; the compatibility fixture exercises the same function against its
+checked repository and manifest.
+
+The verifier then makes the selected Mathlib package, not the submitted
+project, the Lake workspace root and runs `lake exe cache get` inside the
+combined Landrun/systemd boundary. The submitted project's Lakefile is not
+elaborated in that network-enabled phase. Landrun and the transient systemd
+unit forward only the named sandbox variables to the payload; those names do
+not include GitHub, Azure, AWS, or Cloudflare credentials, and the workflow
+supplies no cache credential. The selected Mathlib client chooses its
+configured official download backend. After download, the verifier builds the
+official closure with network disabled before it grants the submitted project
+access to those compiled outputs.
+
+That boundary does not currently prove that every ignored file in the selected
+Mathlib checkout was pristine before cache access. Earlier network-disabled
+candidate Lake elaboration can write ignored `.lake/build` or `.lake/config`
+state in official package checkouts, and `git status` does not report those
+ignored paths. The network-enabled command still runs from Mathlib's workspace
+root under the sandbox above, but that state is writable and executable inside
+the sandbox. Candidate-planted Lake output could therefore in principle be
+reused instead of rebuilt during the network-enabled command. Reconstructing or
+independently clearing the ignored Lake state before that command is a
+[separate hardening requirement](https://github.com/PalomarRegistry/PalomarSubmission/issues/57).
+
+### Accepted-Challenge rendering
+
+The dispatched
+[`render-challenge.yml`](../.github/workflows/render-challenge.yml) workflow
+uses the narrower three-stage path in
+[`render_challenge.py`](../scripts/render_challenge.py):
+
+1. Under Landrun/systemd with network disabled, the cache client selected by
+   the accepted dependency checkout is forced to a local empty `file://`
+   backend. Palomar treats its output only as a request-key declaration: it
+   parses the attempted 16-hex archive names and requires the reported count to
+   equal the unique key set, with a hard limit of 10,000 archives.
+2. A verifier-selected `curl`, outside candidate execution but still inside a
+   resource-limited systemd unit, fetches exactly those names from
+   `https://lakecache.blob.core.windows.net/mathlib4/f/`. It runs under
+   `env -i`, invokes `curl --disable` so the preserved `HOME` cannot supply a
+   `.curlrc`, sends no cache credential, and permits only HTTPS. A systemd
+   `LimitFSIZE` makes the 256 MiB per-file limit fail closed even when the
+   server omits a usable length; `curl --max-filesize` also rejects a declared
+   oversize response before transfer where possible. The 8 GiB aggregate is
+   checked after the bounded individual downloads, so it rejects an oversized
+   result but does not prevent those bytes from first crossing the network or
+   consuming the phase's wall-time budget. These resource controls do not
+   authenticate archive meaning.
+3. With network disabled again, the selected cache client unpacks the
+   downloaded files and the renderer performs its Lean/Verso build. On a
+   successful unpack, the download directory is removed immediately afterward.
+
+This split prevents Lake, Lean, submitted code, and cache-client code from
+holding network access during rendering. It does not make the fixed Azure bytes
+cryptographically equivalent to the pinned Mathlib source.
+
+The mechanical-verification artifact records the source/dependency revisions
+and workflow URL. The render artifact additionally records cache archive counts
+and aggregate downloaded bytes. Neither artifact contains the downloaded
+archives or an authenticated per-archive digest. The workflows currently ask
+GitHub Actions for 90-day mechanical-report and 30-day render-artifact
+retention; those are operational artifact settings, not a cache-authentication
+control or an author-facing availability promise.
 
 ## Failure and recovery implications
 
