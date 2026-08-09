@@ -18,6 +18,14 @@ because a reader who arrives at a stale sentence cannot tell which kind of
 document they are in. Describing the July design in words that are not these
 ones costs a sentence and reads better.
 
+Anything the scan cannot read is a failure rather than a file it passes over,
+because a shrinking scan surface is invisible in a passing run. That covers a
+root that is missing or is not a directory, a subdirectory that cannot be
+listed, a file that is not UTF-8, and a subdirectory reached through a symbolic
+link, whose tree this repository does not hold: git stores the link, so the
+files behind it are either scanned under their real path or are not repository
+content at all.
+
 This lives in a file rather than in a workflow heredoc so that the tests can
 run the production code against a planted fixture. Asserting that a glob
 appears in YAML would prove only that a string is present, which is the shape
@@ -27,6 +35,7 @@ of the failure this check exists to catch.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import sys
@@ -41,27 +50,57 @@ RETIRED = re.compile(
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
-def scanned_paths(root: pathlib.Path) -> list[pathlib.Path]:
-    """Every file the check reads, in a fixed order."""
-    return [
-        root / "SECURITY.md",
-        root / "README.md",
-        *sorted((root / "docs").rglob("*.md")),
-        *sorted((root / "scripts").rglob("*.py")),
-    ]
+def _below(directory: pathlib.Path, suffix: str):
+    """Files with this suffix below this directory, and what stopped the walk.
+
+    `os.walk` rather than `Path.rglob`, because `rglob` swallows the errors it
+    meets while walking. A subtree nobody could list would then leave no trace
+    at all: the scan would cover fewer files and still pass.
+    """
+    files: list[pathlib.Path] = []
+    blocked: list[tuple[pathlib.Path, str]] = []
+    if not directory.is_dir():
+        return files, [(directory, "not a directory the scan can enumerate")]
+
+    def stopped(error: OSError) -> None:
+        blocked.append((pathlib.Path(error.filename), str(error)))
+
+    for parent, directories, names in os.walk(directory, onerror=stopped):
+        directories.sort()
+        for name in directories:
+            child = pathlib.Path(parent) / name
+            if child.is_symlink():
+                blocked.append((child, "symbolic link to a directory"))
+        files.extend(
+            pathlib.Path(parent) / name for name in sorted(names) if name.endswith(suffix)
+        )
+    return sorted(files), blocked
+
+
+def scan_surface(root: pathlib.Path):
+    """Every file the check reads, in a fixed order, and what it could not read."""
+    files = [root / "SECURITY.md", root / "README.md"]
+    blocked: list[tuple[pathlib.Path, str]] = []
+    for directory, suffix in ((root / "docs", ".md"), (root / "scripts", ".py")):
+        found, stopped = _below(directory, suffix)
+        files += found
+        blocked += stopped
+    return files, blocked
 
 
 def report(root: pathlib.Path, stream) -> bool:
-    """Print one line per match and say whether anything was found."""
+    """Print one line per match and per unread file, and say whether there were any."""
+    files, blocked = scan_surface(root)
     failed = False
-    for path in scanned_paths(root):
+    for path, reason in blocked:
+        print(f"{path.relative_to(root)}: not scanned: {reason}", file=stream)
+        failed = True
+    for path in files:
         relative = path.relative_to(root)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
-            # A target that cannot be read is a target nobody read. Passing it
-            # over quietly is the same silence this check exists to break.
-            print(f"{relative}: unreadable: {error}", file=stream)
+            print(f"{relative}: not scanned: {error}", file=stream)
             failed = True
             continue
         for number, line in enumerate(text.splitlines(), 1):

@@ -7,6 +7,7 @@ glob appears in the workflow would have passed throughout that drift.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -131,18 +132,113 @@ class PlantedFileTests(TemporaryRootTestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_every_rejected_collocation_still_fails(self):
+        # Written out rather than read from the checker, so that deleting one
+        # from the production regular expression fails here instead of
+        # quietly agreeing with itself.
+        for phrase in (
+            "issue-form",
+            "issue field",
+            "issue number",
+            "issue-triggered",
+            "issue-write",
+            "issue-reporting",
+            "issue-based",
+            "triggering issue",
+            "reporting job",
+            "report_issue",
+            "issues/new",
+        ):
+            with self.subTest(phrase=phrase):
+                root = self.plant({"scripts/example.py": f"# {phrase}\nvalue = 1\n"})
+                result = run(root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(
+                    result.stdout,
+                    f"scripts/example.py:1: retired intake wording: {phrase}\n",
+                )
+
     def test_a_target_that_cannot_be_decoded_fails(self):
         root = self.plant({"scripts/example.py": b"# \xff\xfe not utf-8\n"})
         result = run(root)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("scripts/example.py: unreadable:", result.stdout)
+        self.assertIn("scripts/example.py: not scanned:", result.stdout)
 
     def test_a_missing_prose_target_fails(self):
         root = self.plant({})
         (root / "README.md").unlink()
         result = run(root)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("README.md: unreadable:", result.stdout)
+        self.assertIn("README.md: not scanned:", result.stdout)
+
+
+class IncompleteSurfaceTests(TemporaryRootTestCase):
+    """A scan surface that quietly shrinks is the failure this check exists for,
+    so every way of losing one has to be louder than a passing run."""
+
+    def bare_root(self):
+        root = self.temporary_root()
+        for name in ("SECURITY.md", "README.md"):
+            (root / name).write_text("", encoding="utf-8")
+        (root / "docs").mkdir()
+        (root / "scripts").mkdir()
+        return root
+
+    def test_a_missing_scripts_root_fails(self):
+        root = self.bare_root()
+        (root / "scripts").rmdir()
+        result = run(root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "scripts: not scanned: not a directory the scan can enumerate",
+            result.stdout,
+        )
+
+    def test_a_scripts_root_that_is_a_file_fails(self):
+        root = self.bare_root()
+        (root / "scripts").rmdir()
+        (root / "scripts").write_text("value = 1\n", encoding="utf-8")
+        result = run(root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "scripts: not scanned: not a directory the scan can enumerate",
+            result.stdout,
+        )
+
+    def test_a_missing_docs_root_fails(self):
+        root = self.bare_root()
+        (root / "docs").rmdir()
+        result = run(root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "docs: not scanned: not a directory the scan can enumerate",
+            result.stdout,
+        )
+
+    def test_a_symbolically_linked_subtree_fails(self):
+        # `os.walk` does not descend through one, and this repository does not
+        # hold the tree behind it. Saying so beats scanning nothing quietly.
+        root = self.bare_root()
+        (root / "scripts/package").mkdir()
+        (root / "scripts/package/example.py").write_text("value = 1\n", encoding="utf-8")
+        (root / "scripts/alias").symlink_to(root / "scripts/package")
+        result = run(root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "scripts/alias: not scanned: symbolic link to a directory", result.stdout
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads directories regardless of mode")
+    def test_a_subdirectory_that_cannot_be_listed_fails(self):
+        root = self.bare_root()
+        closed = root / "scripts/closed"
+        closed.mkdir()
+        (closed / "example.py").write_text("value = 1\n", encoding="utf-8")
+        closed.chmod(0o000)
+        self.addCleanup(closed.chmod, 0o700)
+        result = run(root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("scripts/closed: not scanned:", result.stdout)
 
 
 class ScanSurfaceTests(TemporaryRootTestCase):
@@ -162,7 +258,8 @@ class ScanSurfaceTests(TemporaryRootTestCase):
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("", encoding="utf-8")
-        scanned = load_checker().scanned_paths(root)
+        scanned, blocked = load_checker().scan_surface(root)
+        self.assertEqual(blocked, [])
         self.assertEqual(
             [str(path.relative_to(root)) for path in scanned],
             [
