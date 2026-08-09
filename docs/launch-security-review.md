@@ -43,12 +43,14 @@ artifact as hostile. Its security-relevant sequence is:
 3. Verify canonical Mathlib/Tau Ceti ancestry (or an exact, reviewed legacy
    commit) and the root's exact pinned manifest closure.
 4. Fetch and replay Mathlib's trusted cache from the official Mathlib
-   workspace, then freeze the high-trust closure. Build qualified roots without
-   granting them write access to that closure, then freeze their output.
+   workspace, then freeze the high-trust closure. Recreate every root-owned Lake
+   tree before building a qualified root, without granting it write access to
+   the Mathlib-owned closure or its verifier-created links, then freeze its
+   output.
 5. Compile `Challenge.lean` directly with trusted Lean against frozen
    allowlisted output. Snapshot its `Challenge.olean` and audit Lean's source
-   dependency list and source bytes before candidate Lake configuration
-   executes.
+   dependency list and source bytes before candidate Challenge/Solution
+   compilation and comparison.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
    outer Landrun/systemd boundary with a verifier-protected, byte-identical copy
    of a submitted configuration that already requires `"enable_nanoda": true`.
@@ -87,7 +89,9 @@ The maintained test surfaces are:
   the real pinned Comparator, toolchain-matched `lean4export`, and pinned NanoDa
   under the nested sandbox. Before the real cache phase, that route plants an
   ignored executable in Mathlib and one closure dependency, then requires the
-  production cache boundary to remove both. The ordinary pull-request check
+  production cache boundary to remove both. It also plants an executable in the
+  qualified Tau Ceti root and requires the trusted-root boundary to remove it
+  before the real build. The ordinary pull-request check
   byte-compares the checked `formalization.yaml` and `comparator.json`
   contracts with Template commit
   `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks
@@ -119,6 +123,14 @@ confinement probe set, candidate Challenge/Solution builds, and comparison
 through both kernels. CI materializes the checked files as a clean temporary Git
 checkout to mirror the production checkout boundary; it does not rewrite the
 submitted configuration.
+
+Each trusted-state reset indexes the submitted manifest once, validates the
+selected package paths once, and removes each selected Lake-state entry once.
+For `P` manifest packages, `R` packages owned by the boundary, and `S` ignored
+state entries, the extra work is `O(P + R + S)` local filesystem work and
+`O(R)` temporary path storage. It adds no network request, cache archive,
+dependency build, or service. The canonical-role uniqueness check reuses the
+allowlist's existing root/package scan and adds no new asymptotic term.
 
 This fixture does not cold-build Template's current `v4.32.0` project,
 `lakefile.toml`, or `lake-manifest.json`. The Template checks above establish
@@ -187,10 +199,6 @@ remains append-only for existing versioned record paths.
 
 ## Accepted residual risks and deferred work
 
-- Qualified-root builds remain network-disabled, but currently reuse ignored
-  root-owned Lake state written during earlier candidate configuration. The
-  separate reset needed before those trusted builds is tracked in
-  [issue 59](https://github.com/PalomarRegistry/PalomarSubmission/issues/59).
 - Verification is dispatched automatically by the submission server, so compute
   abuse is bounded there rather than here: a submitter must prove push access to
   the repository being submitted, must wait out an interval between starts, and

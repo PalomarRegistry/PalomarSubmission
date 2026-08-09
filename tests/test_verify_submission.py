@@ -197,6 +197,7 @@ class VerifySubmissionTests(unittest.TestCase):
             "package_allowlist",
             "package_checkout",
             "package_lake_directories",
+            "reset_trusted_lake_state",
             "source_package",
             "trusted_lake_directories",
             "validate_writable_directories",
@@ -1912,6 +1913,127 @@ review:
                 )
             self.assertEqual(protected.read_text(), "protected")
 
+    def test_qualified_root_build_discards_only_root_owned_lake_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            packages_dir = source / ".lake" / "packages"
+            trusted = packages_dir / "trusted"
+            shared = packages_dir / "shared"
+            for package in (trusted, shared):
+                (package / ".lake" / "build").mkdir(parents=True)
+                (package / ".lake" / "config").mkdir()
+
+            revision = "1" * 40
+            shared_revision = "2" * 40
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "trusted",
+                                "type": "git",
+                                "url": "https://github.com/example/trusted",
+                                "rev": revision,
+                            },
+                            {
+                                "name": "shared",
+                                "type": "git",
+                                "url": "https://github.com/example/shared",
+                                "rev": shared_revision,
+                            },
+                        ]
+                    }
+                )
+            )
+            (trusted / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "shared",
+                                "type": "git",
+                                "url": "https://github.com/example/shared",
+                                "rev": shared_revision,
+                            }
+                        ]
+                    }
+                )
+            )
+            executable = trusted / ".lake" / "build" / "bin" / "hostile"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\nexit 97\n")
+            executable.chmod(0o755)
+            compiled = (
+                trusted
+                / ".lake"
+                / "build"
+                / "lib"
+                / "lean"
+                / "Trusted"
+                / "Forged.olean"
+            )
+            compiled.parent.mkdir(parents=True)
+            compiled.write_bytes(b"candidate compiled output")
+            candidate_home = trusted / ".lake" / "config" / "home" / ".curlrc"
+            candidate_home.parent.mkdir()
+            candidate_home.write_text("url = https://attacker.invalid")
+            shared_state = shared / ".lake" / "build" / "must-remain"
+            shared_state.write_text("Mathlib-owned")
+
+            packages = verifier.manifest_packages(source)
+            root = {
+                "repository": "example/trusted",
+                "trust_level": "qualified",
+            }
+            aliases = {"example/trusted": root}
+            expected_writable = {
+                (trusted / ".lake" / leaf).resolve()
+                for leaf in ("build", "config")
+            }
+
+            def trusted_build(command, **kwargs):
+                self.assertEqual(command, ["/tools/lake", "build"])
+                self.assertFalse(executable.exists())
+                self.assertFalse(compiled.exists())
+                self.assertFalse(candidate_home.exists())
+                self.assertEqual(shared_state.read_text(), "Mathlib-owned")
+                self.assertEqual(set(kwargs["writable_directories"]), expected_writable)
+                self.assertFalse(kwargs.get("unrestricted_network", False))
+                nested = trusted / ".lake" / "packages"
+                self.assertTrue((nested / "shared").is_symlink())
+                self.assertEqual((nested / "shared").resolve(), shared.resolve())
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.allowed_roots",
+                    return_value=([root], aliases),
+                ),
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=trusted_build,
+                ) as sandbox,
+            ):
+                verifier.build_allowlisted_roots(
+                    source,
+                    checkout=source,
+                    packages=packages,
+                    allowlist={
+                        "trusted": ("example/trusted", "qualified"),
+                        "shared": ("leanprover-community/mathlib4", "high"),
+                    },
+                    base_env={"PATH": "/usr/bin"},
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            sandbox.assert_called_once()
+            self.assertFalse((trusted / ".lake" / "packages").exists())
+            self.assertEqual(shared_state.read_text(), "Mathlib-owned")
+
     def test_committed_artifacts_outside_lake_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)
@@ -2396,6 +2518,45 @@ review:
                         checkout=source,
                         base_env={"PATH": "/usr/bin"},
                     )
+
+    def test_allowlisted_repository_has_one_canonical_package_role(self):
+        root = {
+            "repository": "example/trusted",
+            "repository_aliases": ["example/legacy"],
+            "trust_level": "qualified",
+        }
+        packages = [
+            {
+                "name": "trusted",
+                "repository": "example/trusted",
+                "url": "https://github.com/example/trusted",
+                "revision": "1" * 40,
+            },
+            {
+                "name": "aaatrusted",
+                "repository": "example/legacy",
+                "url": "https://github.com/example/legacy",
+                "revision": "1" * 40,
+            },
+        ]
+        aliases = {"example/trusted": root, "example/legacy": root}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch(
+                "scripts.verify_submission.allowed_roots",
+                return_value=([root], aliases),
+            ),
+            self.assertRaisesRegex(
+                VerificationError,
+                "multiple package names to allowlisted repository example/trusted",
+            ),
+        ):
+            package_allowlist(
+                Path(directory),
+                packages,
+                checkout=Path(directory),
+                base_env={"PATH": "/usr/bin"},
+            )
 
 
 if __name__ == "__main__":
