@@ -28,7 +28,9 @@ from scripts.verify_submission import (
     LicenseDetectorError,
     LicenseValidationError,
     ResourceExhausted,
+    _ConfinementProbeResult,
     _deadline_timeout,
+    _run_filesystem_confinement_probe,
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
@@ -60,6 +62,7 @@ from scripts.verify_submission import (
     validate_preservable_git_checkout,
     validate_writable_directories,
     verify_official_revision,
+    verify_sandbox_confinement,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -2266,6 +2269,183 @@ review:
             [Path("/runner/report.json"), Path("/tools/comparator")],
             [Path("/source/.lake/build")],
         )
+
+    def test_shared_filesystem_probe_returns_evidence_and_cleans_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "denied"
+            allowed = writable / ".palomar-landrun-write-probe"
+            events = []
+
+            def run_probe(command, **_kwargs):
+                path = Path(command[-1])
+                if path == allowed:
+                    events.append("allowed")
+                    path.touch()
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                events.append("denied")
+                return subprocess.CompletedProcess(command, 1, "", "denied")
+
+            with mock.patch(
+                "scripts.verify_submission.sandboxed_run", side_effect=run_probe
+            ):
+                result = _run_filesystem_confinement_probe(
+                    denied,
+                    existing_probe_error="probe already exists",
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                    after_allowed=lambda: events.append("between"),
+                )
+
+            self.assertIsInstance(result, _ConfinementProbeResult)
+            self.assertTrue(result.allowed_created)
+            self.assertIsNotNone(result.denied)
+            self.assertFalse(result.denied_created)
+            self.assertEqual(events, ["allowed", "between", "denied"])
+            self.assertFalse(allowed.exists())
+            self.assertFalse(denied.exists())
+
+    def test_shared_filesystem_probe_stops_after_failed_positive_control(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "denied"
+            after_allowed = mock.Mock()
+
+            failed = subprocess.CompletedProcess(
+                ["touch", str(writable / ".palomar-landrun-write-probe")],
+                1,
+                "",
+                "denied",
+            )
+            with mock.patch(
+                "scripts.verify_submission.sandboxed_run", return_value=failed
+            ) as run:
+                result = _run_filesystem_confinement_probe(
+                    denied,
+                    existing_probe_error="probe already exists",
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                    after_allowed=after_allowed,
+                )
+
+            self.assertEqual(run.call_count, 1)
+            after_allowed.assert_not_called()
+            self.assertFalse(result.allowed_created)
+            self.assertIsNone(result.denied)
+            self.assertFalse(denied.exists())
+
+    def test_full_confinement_cleans_probe_artifacts_on_runner_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "write-denied"
+            read_denied = root / "read-denied"
+            positive_read = root / "positive-read"
+            positive_read.write_text("readable")
+            allowed = writable / ".palomar-landrun-write-probe"
+            nested = writable / ".palomar-nested-landrun-probe"
+
+            def fail_after_creation(command, **_kwargs):
+                path = Path(command[-1])
+                path.touch()
+                if path == allowed:
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                raise VerificationError("probe runner failed")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=fail_after_creation,
+                ),
+                self.assertRaisesRegex(VerificationError, "probe runner failed"),
+            ):
+                verify_sandbox_confinement(
+                    denied,
+                    read_denied,
+                    positive_read=positive_read,
+                    python=Path(sys.executable),
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[positive_read],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertFalse(allowed.exists())
+            self.assertFalse(nested.exists())
+            self.assertFalse(denied.exists())
+            self.assertFalse(read_denied.exists())
+
+    def test_full_confinement_rejects_a_created_denied_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "write-denied"
+            read_denied = root / "read-denied"
+            positive_read = root / "positive-read"
+            positive_read.write_text("readable")
+            allowed = writable / ".palomar-landrun-write-probe"
+            nested = writable / ".palomar-nested-landrun-probe"
+
+            def escape_write(command, **_kwargs):
+                path = Path(command[-1])
+                path.touch()
+                return subprocess.CompletedProcess(
+                    command,
+                    0 if path in {allowed, nested} else 1,
+                    "",
+                    "",
+                )
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=escape_write,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError, "outer sandbox write policy was not enforced"
+                ),
+            ):
+                verify_sandbox_confinement(
+                    denied,
+                    read_denied,
+                    positive_read=positive_read,
+                    python=Path(sys.executable),
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[positive_read],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertFalse(allowed.exists())
+            self.assertFalse(nested.exists())
+            self.assertFalse(denied.exists())
+            self.assertFalse(read_denied.exists())
 
     def test_nonofficial_revision_is_rejected(self):
         remote = mock.Mock(returncode=0)

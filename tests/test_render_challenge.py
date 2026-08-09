@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,12 +24,95 @@ from scripts.render_challenge import (
     static_html_sanitize,
     toolchain_verso_commit,
     trusted_lakefile,
+    verify_filesystem_confinement,
 )
 from scripts.render_report import AcceptedRenderPaths
 from scripts.verification_errors import VerificationError
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_renderer_confinement_cleans_probe_artifacts_on_runner_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "render-write-denied"
+            allowed = writable / ".palomar-landrun-write-probe"
+
+            def fail_after_creation(command, **_kwargs):
+                path = Path(command[-1])
+                path.touch()
+                if path == allowed:
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                raise VerificationError("renderer probe runner failed")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=fail_after_creation,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError, "renderer probe runner failed"
+                ),
+            ):
+                verify_filesystem_confinement(
+                    denied,
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertFalse(allowed.exists())
+            self.assertFalse(denied.exists())
+
+    def test_renderer_confinement_rejects_a_created_denied_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            denied = root / "render-write-denied"
+            allowed = writable / ".palomar-landrun-write-probe"
+
+            def escape_write(command, **_kwargs):
+                path = Path(command[-1])
+                path.touch()
+                return subprocess.CompletedProcess(
+                    command,
+                    0 if path == allowed else 1,
+                    "",
+                    "",
+                )
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=escape_write,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "outer Landrun filesystem policy was not enforced",
+                ),
+            ):
+                verify_filesystem_confinement(
+                    denied,
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    writable_directories=[writable],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertFalse(allowed.exists())
+            self.assertFalse(denied.exists())
+
     def test_workspace_replaces_hostile_fixed_paths_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

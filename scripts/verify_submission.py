@@ -20,6 +20,8 @@ import tempfile
 import threading
 import time
 import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -2100,6 +2102,89 @@ def sandboxed_run(
     return proc
 
 
+@dataclass(frozen=True)
+class _ConfinementProbeResult:
+    """Observed positive and negative controls from one filesystem policy."""
+
+    allowed: subprocess.CompletedProcess[str]
+    allowed_created: bool
+    denied: subprocess.CompletedProcess[str] | None
+    denied_created: bool
+
+
+def _run_filesystem_confinement_probe(
+    denied_probe: Path,
+    *,
+    existing_probe_error: str,
+    touch: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    writable_directories: list[Path],
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+    after_allowed: Callable[[], None] | None = None,
+) -> _ConfinementProbeResult:
+    """Run one writable positive control and one write-denial control.
+
+    A failed positive control returns without attempting the negative control,
+    preserving the security decision order. Every path this function proves
+    absent before use is removed in ``finally``, including when the sandbox
+    runner itself raises.
+    """
+
+    require_protected_paths([denied_probe], writable_directories)
+    if denied_probe.exists():
+        raise VerificationError(f"{existing_probe_error}: {denied_probe}")
+    allowed_probe = writable_directories[0] / ".palomar-landrun-write-probe"
+    if allowed_probe.exists():
+        raise VerificationError(
+            f"filesystem confinement probe path already exists: {allowed_probe}"
+        )
+
+    try:
+        allowed = sandboxed_run(
+            [str(touch), str(allowed_probe)],
+            cwd=cwd,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            check=False,
+        )
+        allowed_created = allowed_probe.is_file()
+        allowed_probe.unlink(missing_ok=True)
+        if allowed.returncode or not allowed_created:
+            return _ConfinementProbeResult(allowed, allowed_created, None, False)
+
+        if after_allowed is not None:
+            after_allowed()
+
+        denied = sandboxed_run(
+            [str(touch), str(denied_probe)],
+            cwd=cwd,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            check=False,
+        )
+        return _ConfinementProbeResult(
+            allowed,
+            allowed_created,
+            denied,
+            denied_probe.exists(),
+        )
+    finally:
+        allowed_probe.unlink(missing_ok=True)
+        denied_probe.unlink(missing_ok=True)
+
+
 def verify_sandbox_confinement(
     write_probe: Path,
     read_probe: Path,
@@ -2128,75 +2213,74 @@ def verify_sandbox_confinement(
             raise VerificationError(f"confinement probe path already exists: {probe}")
 
     read_probe.write_text("palomar confidential read sentinel\n", encoding="utf-8")
-    allowed_probe = writable_directories[0] / ".palomar-landrun-write-probe"
-    if allowed_probe.exists():
-        raise VerificationError(f"filesystem confinement probe path already exists: {allowed_probe}")
-    allowed = sandboxed_run(
-        [str(touch), str(allowed_probe)],
-        cwd=cwd,
-        environment=environment,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-        check=False,
-    )
-    allowed_created = allowed_probe.is_file()
-    if allowed_created:
-        allowed_probe.unlink()
-    if allowed.returncode or not allowed_created:
-        read_probe.unlink(missing_ok=True)
-        raise VerificationError("outer sandbox did not permit its writable directory" + detail(allowed))
 
-    nested_probe = writable_directories[0] / ".palomar-nested-landrun-probe"
-    if nested_probe.exists():
-        read_probe.unlink(missing_ok=True)
-        raise VerificationError(f"nested confinement probe path already exists: {nested_probe}")
-    inner = landrun_command(
-        [str(touch), str(nested_probe)],
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        environment=environment,
-        readable_directories=[cwd],
-    )
-    nested = sandboxed_run(
-        inner,
-        cwd=cwd,
-        environment=environment,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-        check=False,
-    )
-    nested_created = nested_probe.is_file()
-    if nested_created:
-        nested_probe.unlink()
-    if nested.returncode or not nested_created:
-        read_probe.unlink(missing_ok=True)
-        raise VerificationError("nested Landrun confinement is unavailable" + detail(nested))
+    def verify_nested_confinement() -> None:
+        nested_probe = writable_directories[0] / ".palomar-nested-landrun-probe"
+        if nested_probe.exists():
+            raise VerificationError(
+                f"nested confinement probe path already exists: {nested_probe}"
+            )
+        try:
+            inner = landrun_command(
+                [str(touch), str(nested_probe)],
+                landrun=landrun,
+                writable_directories=writable_directories,
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                environment=environment,
+                readable_directories=[cwd],
+            )
+            nested = sandboxed_run(
+                inner,
+                cwd=cwd,
+                environment=environment,
+                landrun=landrun,
+                writable_directories=writable_directories,
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                tools=tools,
+                check=False,
+            )
+            nested_created = nested_probe.is_file()
+        finally:
+            nested_probe.unlink(missing_ok=True)
+        if nested.returncode or not nested_created:
+            raise VerificationError(
+                "nested Landrun confinement is unavailable" + detail(nested)
+            )
 
-    denied = sandboxed_run(
-        [str(touch), str(write_probe)],
-        cwd=cwd,
-        environment=environment,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-        check=False,
-    )
-    escaped = write_probe.exists()
-    if escaped:
-        write_probe.unlink()
-    if escaped or denied.returncode == 0:
+    result: _ConfinementProbeResult | None = None
+    try:
+        result = _run_filesystem_confinement_probe(
+            write_probe,
+            existing_probe_error="confinement probe path already exists",
+            touch=touch,
+            cwd=cwd,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            after_allowed=verify_nested_confinement,
+        )
+    finally:
+        if result is None:
+            read_probe.unlink(missing_ok=True)
+    if result.allowed.returncode or not result.allowed_created:
         read_probe.unlink(missing_ok=True)
-        raise VerificationError("outer sandbox write policy was not enforced" + detail(denied))
+        raise VerificationError(
+            "outer sandbox did not permit its writable directory" + detail(result.allowed)
+        )
+
+    if result.denied is None:
+        read_probe.unlink(missing_ok=True)
+        raise VerificationError("outer sandbox confinement probe omitted its negative control")
+    if result.denied_created or result.denied.returncode == 0:
+        read_probe.unlink(missing_ok=True)
+        raise VerificationError(
+            "outer sandbox write policy was not enforced" + detail(result.denied)
+        )
 
     protected = protected_write_directories or []
     require_protected_paths(protected, writable_directories)
@@ -2367,14 +2451,10 @@ def verify_filesystem_confinement(
             suffix += f": {detail}"
         return f"{suffix})"
 
-    require_protected_paths([probe], writable_directories)
-    if probe.exists():
-        raise VerificationError(f"filesystem confinement probe path already exists: {probe}")
-    allowed_probe = writable_directories[0] / ".palomar-landrun-write-probe"
-    if allowed_probe.exists():
-        raise VerificationError(f"filesystem confinement probe path already exists: {allowed_probe}")
-    allowed = sandboxed_run(
-        [str(touch), str(allowed_probe)],
+    result = _run_filesystem_confinement_probe(
+        probe,
+        existing_probe_error="filesystem confinement probe path already exists",
+        touch=touch,
         cwd=cwd,
         environment=environment,
         landrun=landrun,
@@ -2382,33 +2462,19 @@ def verify_filesystem_confinement(
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
-        check=False,
     )
-    allowed_created = allowed_probe.is_file()
-    if allowed_created:
-        allowed_probe.unlink()
-    if allowed.returncode or not allowed_created:
+    if result.allowed.returncode or not result.allowed_created:
         raise VerificationError(
-            "outer Landrun did not permit its writable directory" + failure_detail(allowed)
+            "outer Landrun did not permit its writable directory"
+            + failure_detail(result.allowed)
         )
 
-    denied = sandboxed_run(
-        [str(touch), str(probe)],
-        cwd=cwd,
-        environment=environment,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-        check=False,
-    )
-    escaped = probe.exists()
-    if escaped:
-        probe.unlink()
-    if escaped or denied.returncode == 0:
+    if result.denied is None:
+        raise VerificationError("filesystem confinement probe omitted its negative control")
+    if result.denied_created or result.denied.returncode == 0:
         raise VerificationError(
-            "outer Landrun filesystem policy was not enforced" + failure_detail(denied)
+            "outer Landrun filesystem policy was not enforced"
+            + failure_detail(result.denied)
         )
 
 
