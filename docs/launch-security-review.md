@@ -91,7 +91,10 @@ The maintained test surfaces are:
   ignored executable in Mathlib and one closure dependency, then requires the
   production cache boundary to remove both. It also plants an executable in the
   qualified Tau Ceti root and requires the trusted-root boundary to remove it
-  before the real build. The ordinary pull-request check
+  before the real build. The same checked fixture gives the Challenge a dotted
+  module path and a private declaration, then runs the production renderer and
+  requires the original-module `.olean` and raw Verso page while retaining the
+  stable public `Challenge/index.html` artifact. The ordinary pull-request check
   byte-compares the checked `formalization.yaml` and `comparator.json`
   contracts with Template commit
   `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks

@@ -23,8 +23,10 @@ from scripts.verify_submission import (  # noqa: E402
     get_mathlib_cache,
     install_execution_deadline,
     lake_environment_value,
+    load_comparator_config,
     manifest_packages,
     materialize_packages,
+    module_source_suffix,
     package_allowlist,
     package_checkout,
     package_lake_directories,
@@ -125,8 +127,22 @@ def main() -> int:
         if path.exists():
             executable_paths.append(path.resolve())
     executable_paths = sorted(set(executable_paths))
+    source_comparator = source / "comparator.json"
+    config = load_comparator_config(source_comparator)
+    challenge_source = source.joinpath(
+        *module_source_suffix(config["challenge_module"]).parts
+    )
+    solution_source = source.joinpath(
+        *module_source_suffix(config["solution_module"]).parts
+    )
+    for path, field in (
+        (challenge_source, "Challenge"),
+        (solution_source, "Solution"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise VerificationError(f"cold-build configured {field} source is missing")
     comparator_config = protected_comparator_config(
-        source / "comparator.json", work / "protected-comparator.json"
+        source_comparator, work / "protected-comparator.json"
     )
     readable_paths = sorted({source, comparator_config, *system_readable_paths()})
     tools = tool_snapshot(
@@ -149,7 +165,7 @@ def main() -> int:
     verify_sandbox_confinement(
         work / "initial-write-denied",
         work / "initial-read-denied",
-        positive_read=source / "Challenge.lean",
+        positive_read=challenge_source,
         python=python,
         touch=touch,
         cwd=source,
@@ -289,6 +305,8 @@ def main() -> int:
         work,
         source,
         checkout=source,
+        challenge_source=challenge_source,
+        challenge_module=config["challenge_module"],
         lean=lean,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
@@ -317,7 +335,7 @@ def main() -> int:
     verify_sandbox_confinement(
         work / "write-denied",
         work / "read-denied",
-        positive_read=source / "Challenge.lean",
+        positive_read=challenge_source,
         python=python,
         touch=touch,
         cwd=source,

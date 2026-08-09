@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from scripts.render_challenge import (
@@ -113,7 +113,7 @@ class RenderChallengeTests(unittest.TestCase):
             self.assertFalse(allowed.exists())
             self.assertFalse(denied.exists())
 
-    def test_workspace_replaces_hostile_fixed_paths_without_following_symlinks(self):
+    def test_workspace_uses_accepted_paths_without_touching_fixed_name_decoys(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
@@ -125,7 +125,18 @@ class RenderChallengeTests(unittest.TestCase):
             comparator = accepted / "settings.json"
             challenge.write_bytes(b"accepted challenge")
             solution.write_bytes(b"accepted solution")
-            comparator.write_bytes(b'{"accepted": true}')
+            comparator.write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "accepted.Task",
+                        "solution_module": "accepted.Answer",
+                        "theorem_names": ["accepted.headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                )
+            )
             (source / "lean-toolchain").write_text("leanprover/lean4:v4.31.0-rc2\n")
             (project / "lake-manifest.json").write_text(
                 json.dumps({"version": "1.2.0", "packages": []})
@@ -163,23 +174,103 @@ class RenderChallengeTests(unittest.TestCase):
                 )
 
             with mock.patch("scripts.render_challenge.clone_commit", side_effect=clone_verso):
-                workspace_project = prepare_workspace(
+                render_workspace = prepare_workspace(
                     source, workspace, "3" * 40, work, accepted_paths
                 )
 
             self.assertEqual(external.read_bytes(), b"do not replace")
             self.assertEqual(external_comparator.read_bytes(), b"also do not replace")
-            self.assertFalse((workspace_project / "Challenge.lean").is_symlink())
+            self.assertTrue((render_workspace.project / "Challenge.lean").is_symlink())
+            self.assertTrue((render_workspace.project / "comparator.json").is_symlink())
+            self.assertTrue((render_workspace.project / "Solution.lean").is_dir())
             self.assertEqual(
-                (workspace_project / "Challenge.lean").read_bytes(), b"accepted challenge"
+                render_workspace.challenge.read_bytes(), b"accepted challenge"
             )
-            self.assertTrue((workspace_project / "Solution.lean").is_file())
+            self.assertEqual(render_workspace.solution.read_bytes(), b"accepted solution")
+            self.assertEqual(render_workspace.comparator.read_bytes(), comparator.read_bytes())
+            self.assertEqual(render_workspace.challenge_module, "accepted.Task")
+
+    def test_workspace_preserves_nested_module_identity_and_private_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            project = source / "project"
+            module_dir = project / "src" / "Audit"
+            module_dir.mkdir(parents=True)
+            challenge = module_dir / "Task.lean"
+            challenge.write_text(
+                """namespace Audit.Task
+private theorem modulePrivate : True := by trivial
+theorem headline : True := modulePrivate
+end Audit.Task
+""",
+                encoding="utf-8",
+            )
+            solution = module_dir / "Answer.lean"
+            solution.write_text(
+                "namespace Audit.Task\ntheorem headline : True := by trivial\nend Audit.Task\n",
+                encoding="utf-8",
+            )
+            comparator = project / "settings.json"
+            comparator.write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Audit.Task",
+                        "solution_module": "Audit.Answer",
+                        "theorem_names": ["Audit.Task.headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (project / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []})
+            )
+            (source / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.31.0-rc2\n"
+            )
+            work = root / "work"
+            work.mkdir()
+
+            def clone_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.31.0-rc2\n"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []})
+                )
+
+            with mock.patch(
+                "scripts.render_challenge.clone_commit", side_effect=clone_verso
+            ):
+                render_workspace = prepare_workspace(
+                    source,
+                    root / "workspace",
+                    "3" * 40,
+                    work,
+                    AcceptedRenderPaths(
+                        project_path="project",
+                        challenge_path="project/src/Audit/Task.lean",
+                        solution_path="project/src/Audit/Answer.lean",
+                        comparator_config_path="project/settings.json",
+                        lakefile_path="project/lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
+                )
+
+            self.assertEqual(render_workspace.challenge_module, "Audit.Task")
             self.assertEqual(
-                (workspace_project / "Solution.lean").read_bytes(), b"accepted solution"
+                render_workspace.challenge.relative_to(render_workspace.project).as_posix(),
+                "src/Audit/Task.lean",
             )
-            self.assertEqual(
-                (workspace_project / "comparator.json").read_bytes(), b'{"accepted": true}'
-            )
+            self.assertIn("private theorem modulePrivate", render_workspace.challenge.read_text())
+            self.assertFalse((render_workspace.project / "Challenge.lean").exists())
+            lakefile = (render_workspace.project / "lakefile.toml").read_text()
+            self.assertIn('srcDir = "src"', lakefile)
+            self.assertIn('roots = ["Audit.Task"]', lakefile)
 
     def test_workspace_revalidates_source_project_symlink_components(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -217,7 +308,18 @@ class RenderChallengeTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "Challenge.lean").write_text("theorem challenge : True := by trivial\n")
             (project / "Solution.lean").write_text("theorem challenge : True := by trivial\n")
-            (project / "comparator.json").write_text("{}")
+            (project / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["challenge"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                )
+            )
             (project / "lake-manifest.json").write_text(
                 json.dumps({"version": "1.2.0", "packages": []})
             )
@@ -456,6 +558,16 @@ class RenderChallengeTests(unittest.TestCase):
             }.issubset(required)
         )
 
+        sanitize = next(
+            action
+            for action in parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ).choices["sanitize"]
+        self.assertIn(
+            "challenge_module",
+            {action.dest for action in sanitize._actions if action.required},
+        )
+
     def test_execute_marks_a_legacy_report_as_a_contract_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -579,11 +691,18 @@ class RenderChallengeTests(unittest.TestCase):
                 },
             ]
         }
-        lakefile = trusted_lakefile(manifest, "3" * 40)
+        lakefile = trusted_lakefile(
+            manifest,
+            "3" * 40,
+            challenge_module="Audit.Task",
+            challenge_source_root=PurePosixPath("src"),
+        )
         self.assertIn('name = "direct"', lakefile)
         self.assertNotIn('name = "transitive"', lakefile)
         self.assertIn('name = "verso"', lakefile)
         self.assertIn('name = "Challenge"', lakefile)
+        self.assertIn('srcDir = "src"', lakefile)
+        self.assertIn('roots = ["Audit.Task"]', lakefile)
 
     def test_static_html_gets_csp_and_runtime_sanitizer(self):
         html = """<!doctype html><html><head><base href="../">
@@ -706,7 +825,12 @@ end Example
                 ),
                 encoding="utf-8",
             )
-            metadata = parsed_challenge_metadata(challenge, solution, comparator)
+            metadata = parsed_challenge_metadata(
+                challenge,
+                solution,
+                comparator,
+                challenge_module="Challenge",
+            )
             self.assertEqual(metadata["schema_version"], 2)
             self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
             self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
@@ -784,7 +908,7 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
             )
             (raw / "marked.js").write_text("window.marked = {parse: x => x};", encoding="utf-8")
             (raw / "code.css").write_text("code { color: black; }", encoding="utf-8")
-            tree_hash = sanitize_bundle(raw, output)
+            tree_hash = sanitize_bundle(raw, output, challenge_module="Challenge")
             manifest = json.loads((output / "artifact-manifest.json").read_text())
             self.assertEqual(manifest["artifact_tree_sha256"], tree_hash)
             self.assertEqual(artifact_manifest(output)[1], tree_hash)
@@ -794,6 +918,64 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
             metadata = json.loads((output / "challenge-metadata.json").read_text())
             self.assertEqual(metadata["declarations"], [])
             self.assertFalse((output / "marked.js").exists())
+
+    def test_bundle_maps_the_original_nested_module_to_the_stable_entrypoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw"
+            output = root / "output"
+            module_output = raw / "Audit" / "Task"
+            module_output.mkdir(parents=True)
+            output.mkdir()
+            (module_output / "index.html").write_text(
+                '''<!doctype html><html><head><base href="../../"></head><body>
+<span data-binding="const-Audit.Task.headline" id="headline">headline</span>
+<a href="code.css">style</a><code>private theorem modulePrivate</code></body></html>''',
+                encoding="utf-8",
+            )
+            (raw / "code.css").write_text("code {}", encoding="utf-8")
+
+            sanitize_bundle(
+                raw,
+                output,
+                challenge_module="Audit.Task",
+                metadata={
+                    "schema_version": 2,
+                    "imports": [],
+                    "module_doc": None,
+                    "declarations": ["Audit.Task.headline"],
+                    "solution_imports": [],
+                },
+            )
+
+            entrypoint = output / "Challenge" / "index.html"
+            self.assertTrue(entrypoint.is_file())
+            rendered = entrypoint.read_text()
+            self.assertIn("Audit.Task.headline", rendered)
+            self.assertIn("private theorem modulePrivate", rendered)
+            self.assertIn('href="../code.css"', rendered)
+            self.assertFalse((output / "Audit" / "Task" / "index.html").exists())
+
+    def test_bundle_does_not_broaden_the_auxiliary_page_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw"
+            output = root / "output"
+            module_output = raw / "Audit" / "Task"
+            nested = module_output / "notes"
+            nested.mkdir(parents=True)
+            output.mkdir()
+            (module_output / "index.html").write_text(
+                '<html><head><base href="../../"></head><body>Task</body></html>',
+                encoding="utf-8",
+            )
+            (nested / "index.html").write_text(
+                '<html><head><base href="../../../"></head><body>Notes</body></html>',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(VerificationError, "unexpected base URL"):
+                sanitize_bundle(raw, output, challenge_module="Audit.Task")
 
     def test_artifact_manifest_rejects_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:

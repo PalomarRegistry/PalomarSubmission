@@ -298,6 +298,15 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         self.assertIn("git -C fixture add --all", fixture_step["run"])
         self.assertIn("commit --quiet", fixture_step["run"])
 
+        renderer_step = next(
+            step
+            for step in self.workflow["jobs"]["cold_build"]["steps"]
+            if step.get("name") == "Exercise the real configured-module renderer"
+        )
+        self.assertIn("scripts/smoke_render_module_identity.py", renderer_step["run"])
+        self.assertIn("--source pipeline/tests/fixtures/cold-tauceti", renderer_step["run"])
+        self.assertIn('--renderer-commit "${{ github.sha }}"', renderer_step["run"])
+
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-comparator.json"
         result = subprocess.run(
             [
@@ -319,7 +328,7 @@ class ColdBuildWorkflowTests(unittest.TestCase):
     def test_checked_cold_fixture_reaches_the_exact_tauceti_closure(self):
         fixture = REPOSITORY_ROOT / "tests/fixtures/cold-tauceti"
         toolchain = (fixture / "lean-toolchain").read_text().strip()
-        for path in sorted(fixture.iterdir()):
+        for path in sorted(path for path in fixture.rglob("*") if path.is_file()):
             with self.subTest(classified_path=path.name):
                 relative = path.relative_to(REPOSITORY_ROOT).as_posix()
                 self.assertEqual(self.run_scope((relative,)), "cold_build=true")
@@ -342,12 +351,21 @@ class ColdBuildWorkflowTests(unittest.TestCase):
 
         config = json.loads((fixture / "comparator.json").read_text())
         self.assertIs(config["enable_nanoda"], True)
-        self.assertEqual(config["challenge_module"], "Challenge")
-        self.assertEqual(config["solution_module"], "Solution")
+        self.assertEqual(config["challenge_module"], "PalomarCold.Challenge")
+        self.assertEqual(config["solution_module"], "PalomarCold.Solution")
         self.assertEqual(
             config["theorem_names"],
             ["PalomarColdTauCetiFixture.dependencyClosure"],
         )
+        challenge = fixture / "PalomarCold" / "Challenge.lean"
+        solution = fixture / "PalomarCold" / "Solution.lean"
+        self.assertTrue(challenge.is_file())
+        self.assertTrue(solution.is_file())
+        self.assertIn("private theorem modulePrivate", challenge.read_text())
+        lakefile = tomllib.loads((fixture / "lakefile.toml").read_text())
+        libraries = {library["name"]: library for library in lakefile["lean_lib"]}
+        self.assertEqual(libraries["Challenge"]["roots"], [config["challenge_module"]])
+        self.assertEqual(libraries["Solution"]["roots"], [config["solution_module"]])
 
         result = subprocess.run(
             [
@@ -401,9 +419,9 @@ class ColdBuildWorkflowTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertNotIn("import TauCeti", (fixture / "Challenge.lean").read_text())
-        self.assertIn("import Mathlib", (fixture / "Challenge.lean").read_text())
-        self.assertIn("import TauCeti", (fixture / "Solution.lean").read_text())
+        self.assertNotIn("import TauCeti", challenge.read_text())
+        self.assertIn("import Mathlib", challenge.read_text())
+        self.assertIn("import TauCeti", solution.read_text())
 
         cold_steps = self.workflow["jobs"]["cold_build"]["steps"]
         install_step = next(

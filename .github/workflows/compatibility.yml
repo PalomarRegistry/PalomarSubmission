@@ -169,6 +169,15 @@ jobs:
             --nanoda "$PWD/nanoda/target/release/nanoda_bin" \
             --adapter "$PWD/pipeline/scripts/landrun_passthrough.py" \
             --work-dir "$RUNNER_TEMP/palomar-compatibility"
+      - name: Exercise the real configured-module renderer
+        run: |
+          python pipeline/scripts/smoke_render_module_identity.py \
+            --source pipeline/tests/fixtures/cold-tauceti \
+            --landrun "$(go env GOPATH)/bin/landrun" \
+            --work-dir "$RUNNER_TEMP/palomar-render-module" \
+            --renderer-commit "${{ github.sha }}" \
+            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
   compatibility:
     needs: [scope, cold_build]

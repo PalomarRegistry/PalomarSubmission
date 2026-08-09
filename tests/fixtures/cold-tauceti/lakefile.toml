@@ -8,8 +8,8 @@ rev = "221bb56a017bb794421eac4fa543d7a5e85add75"
 
 [[lean_lib]]
 name = "Challenge"
-roots = ["Challenge"]
+roots = ["PalomarCold.Challenge"]
 
 [[lean_lib]]
 name = "Solution"
-roots = ["Solution"]
+roots = ["PalomarCold.Solution"]
