@@ -192,6 +192,9 @@ and build-write probes and negative outside-read, outside-write, sibling
 process-environment, and outbound-network probes. It also runs a positive nested
 Landrun probe. If a positive operation is denied, a negative operation succeeds,
 or either confinement layer cannot be established, verification fails closed.
+The verifier and post-acceptance renderer use one positive-build-write and
+negative-outside-write probe contract, which removes its owned probe files even
+when the sandbox runner fails.
 
 Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
 protected Comparator configuration, and the verifier script are outside the
