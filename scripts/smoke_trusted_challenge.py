@@ -179,6 +179,9 @@ def main() -> int:
         raise VerificationError("cold-build Mathlib closure dependency is absent")
     hostile_cache_states: list[Path] = []
     hostile_cache_payload = b"#!/bin/sh\nexit 97\n"
+    # Mathlib may legitimately rebuild its cache executable even without the
+    # reset. The otherwise unrelated closure dependency makes survival of the
+    # same payload an unambiguous reset failure.
     for package in (mathlib, dependency):
         hostile_cache_state = (
             package_checkout(source, package, checkout=source)
@@ -204,7 +207,11 @@ def main() -> int:
     )
     if any(
         os.path.lexists(path)
-        and (path.is_symlink() or path.read_bytes() == hostile_cache_payload)
+        and (
+            path.is_symlink()
+            or not path.is_file()
+            or path.read_bytes() == hostile_cache_payload
+        )
         for path in hostile_cache_states
     ):
         raise VerificationError(
