@@ -85,10 +85,11 @@ worktree is clean. In ordinary verification, the package allowlist and its
 official revisions were established earlier from the submitted and Mathlib
 manifests; the compatibility fixture exercises the same function against its
 checked repository and manifest. After those checks, the verifier deletes and
-recreates `.lake/build` and `.lake/config` for every package in Mathlib's
-verified official closure. This second reset discards ignored files written by
-earlier candidate Lake elaboration and occurs immediately before the verifier
-creates the closure links and enables cache networking.
+recreates each `.lake` tree with only empty `build` and `config` directories
+for every package in Mathlib's verified official closure. This second reset
+discards ignored files written by earlier candidate Lake elaboration and
+occurs immediately before the verifier creates the closure links and enables
+cache networking.
 
 The verifier then makes the selected Mathlib package, not the submitted
 project, the Lake workspace root and runs `lake exe cache get` inside the

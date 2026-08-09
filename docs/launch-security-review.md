@@ -86,8 +86,8 @@ The maintained test surfaces are:
   checked multi-dependency fixture in `tests/fixtures/cold-tauceti`, followed by
   the real pinned Comparator, toolchain-matched `lean4export`, and pinned NanoDa
   under the nested sandbox. Before the real cache phase, that route plants an
-  ignored executable in Mathlib's writable Lake state and requires the
-  production cache boundary to remove it. The ordinary pull-request check
+  ignored executable in Mathlib and one closure dependency, then requires the
+  production cache boundary to remove both. The ordinary pull-request check
   byte-compares the checked `formalization.yaml` and `comparator.json`
   contracts with Template commit
   `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks

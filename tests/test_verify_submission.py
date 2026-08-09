@@ -1814,6 +1814,12 @@ review:
                 poison.chmod(0o755)
                 (package / ".lake" / "config").mkdir()
                 poisons.append(poison)
+            expected_writable = {
+                package / ".lake" / leaf
+                for package in (mathlib, batteries)
+                for leaf in ("build", "config")
+            }
+            expected_writable.add(mathlib / ".lake" / "packages")
 
             def cache_phase(command, **kwargs):
                 for package, poison in zip((mathlib, batteries), poisons, strict=True):
@@ -1824,6 +1830,10 @@ review:
                     kwargs.get("unrestricted_network", False),
                     command[-3:] == ["exe", "cache", "get"],
                 )
+                if kwargs.get("unrestricted_network", False):
+                    self.assertEqual(
+                        set(kwargs["writable_directories"]), expected_writable
+                    )
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             with mock.patch(

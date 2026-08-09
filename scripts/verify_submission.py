@@ -3058,8 +3058,10 @@ def get_mathlib_cache(
         package = by_name.get(name)
         if package is None:
             raise VerificationError(f"trusted package {name!r} is absent from the manifest")
+        if package["url"].startswith("path:"):
+            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
         # Resolve both writable leaves against the checkout before deleting
-        # anything; malformed or redirected Lake state fails closed.
+        # this package's state; malformed or redirected paths fail closed.
         package_lake_directories(source, name, checkout=checkout)
         trusted_directories.extend(
             remove_untrusted_lake_state(

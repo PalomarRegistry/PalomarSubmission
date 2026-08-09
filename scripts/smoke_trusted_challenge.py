@@ -169,16 +169,27 @@ def main() -> int:
         for package in packages
         if package["repository"].lower() == "leanprover-community/mathlib4"
     )
-    hostile_cache_state = (
-        package_checkout(source, mathlib, checkout=source)
-        / ".lake"
-        / "build"
-        / "bin"
-        / "palomar-hostile-cache-probe"
-    )
-    hostile_cache_state.parent.mkdir(parents=True, exist_ok=True)
-    hostile_cache_state.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
-    hostile_cache_state.chmod(0o755)
+    mathlib_dir = package_checkout(source, mathlib, checkout=source)
+    dependency = next(iter(manifest_packages(mathlib_dir)), None)
+    if dependency is None:
+        raise VerificationError("cold-build Mathlib fixture has no closure dependency")
+    by_name = {package["name"]: package for package in packages}
+    dependency = by_name.get(dependency["name"])
+    if dependency is None:
+        raise VerificationError("cold-build Mathlib closure dependency is absent")
+    hostile_cache_states: list[Path] = []
+    for package in (mathlib, dependency):
+        hostile_cache_state = (
+            package_checkout(source, package, checkout=source)
+            / ".lake"
+            / "build"
+            / "bin"
+            / "palomar-hostile-cache-probe"
+        )
+        hostile_cache_state.parent.mkdir(parents=True, exist_ok=True)
+        hostile_cache_state.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        hostile_cache_state.chmod(0o755)
+        hostile_cache_states.append(hostile_cache_state)
     get_mathlib_cache(
         source,
         checkout=source,
@@ -190,9 +201,9 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
-    if hostile_cache_state.exists():
+    if any(path.exists() for path in hostile_cache_states):
         raise VerificationError(
-            "ignored executable Mathlib state survived the trusted cache boundary"
+            "ignored executable Mathlib-closure state survived the trusted cache boundary"
         )
     build_allowlisted_roots(
         source,

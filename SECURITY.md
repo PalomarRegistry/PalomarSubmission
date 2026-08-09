@@ -116,9 +116,10 @@ with symlinks to the exact independently verified official closure. Other
 allowlisted roots are built from their own pinned configuration. Candidate
 Lake configuration never runs during these operations. Immediately before the
 network-enabled Mathlib cache command, the verifier deletes and recreates the
-ignored `.lake/build` and `.lake/config` state for every verified package in
-Mathlib's closure; candidate work from earlier network-disabled configuration
-therefore cannot cross that boundary. Trusted-root Lake URL
+entire ignored `.lake` tree for every verified package in Mathlib's closure,
+leaving only fresh `build` and `config` directories; candidate work from
+earlier network-disabled configuration therefore cannot cross that boundary.
+Trusted-root Lake URL
 resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. The official
