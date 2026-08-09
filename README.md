@@ -145,6 +145,12 @@ verifier.
 
 ## Development checks
 
+[`scripts/submission_contract.py`](scripts/submission_contract.py) owns dispatch
+input validation, GitHub repository normalization, and the complete
+`formalization.yaml` contract. [`scripts/verify_submission.py`](scripts/verify_submission.py)
+orchestrates checkout and verification using that one contract; it does not
+carry a second parser or compatibility entry point.
+
 Repository Python files use the `E`, `F`, `I`, `UP`, and `B` Ruff rule families declared
 in [`pyproject.toml`](pyproject.toml). Install the single locked lint dependency
 and run the same check as CI with:

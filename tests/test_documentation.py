@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.verify_submission import OPTIONAL_FIELDS
+from scripts.submission_contract import OPTIONAL_FIELDS
 
 ROOT = Path(__file__).resolve().parent.parent
 SECURITY = (ROOT / "SECURITY.md").read_text()
