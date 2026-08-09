@@ -750,14 +750,15 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 "theorem_names": ["headline"],
                 "definition_names": [],
                 "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
-                "enable_nanoda": True,
+                "enable_nanoda": False,
             }
             path.write_text(json.dumps(config, indent=2) + "\n")
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
             protected = Path(directory) / "protected.json"
             protected_comparator_config(path, protected)
-            self.assertEqual(protected.read_bytes(), path.read_bytes())
+            self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
+            self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
 
             protected.unlink()
             valid_json = json.dumps(config)
@@ -784,10 +785,9 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
                 with self.subTest(enable_nanoda=value):
                     config["enable_nanoda"] = value
                     path.write_text(json.dumps(config))
-                    with self.assertRaisesRegex(
-                        VerificationError, "enable_nanoda must be exactly true"
-                    ):
-                        load_comparator_config(path)
+                    self.assertEqual(load_comparator_config(path)["enable_nanoda"], value)
+                    protected_comparator_config(path, protected)
+                    self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
 
             config["enable_nanoda"] = True
 
@@ -799,10 +799,10 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             config.pop("future_relaxation")
             config.pop("enable_nanoda")
             path.write_text(json.dumps(config))
-            with self.assertRaisesRegex(VerificationError, "missing: enable_nanoda"):
-                load_comparator_config(path)
+            self.assertNotIn("enable_nanoda", load_comparator_config(path))
+            protected_comparator_config(path, protected)
+            self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
 
-            config["enable_nanoda"] = True
             config["challenge_module"] = "Audit.PeriodicGeneral.Challenge"
             config["solution_module"] = "Audit.PeriodicGeneral.Solution"
             path.write_text(json.dumps(config))
