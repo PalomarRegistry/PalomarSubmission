@@ -138,35 +138,11 @@ jobs:
           PY
 
       - name: Reject retired intake wording
-        # Not the bare word "issue": reporting one privately is still the right
-        # thing to do, and the tracker still has issues. These are collocations
-        # only the retired issue-based intake produced, so a match means a
-        # document has drifted back to describing a pipeline that is gone.
-        #
-        # docs/launch-security-review.md is a historical record and is scanned
-        # anyway, because a reader who arrives at a stale sentence cannot tell
-        # which kind of document they are in. Describing the July design in
-        # words that are not these ones costs a sentence and reads better.
-        run: |
-          python - <<'PY'
-          import pathlib
-          import re
-
-          retired = re.compile(
-              r"issue-form|issue field|issue number|issue-triggered|issue-write"
-              r"|issue-reporting|triggering issue|reporting job|report_issue|issues/new",
-              re.IGNORECASE,
-          )
-          documents = [pathlib.Path("SECURITY.md"), pathlib.Path("README.md")]
-          documents += sorted(pathlib.Path("docs").rglob("*.md"))
-          failed = False
-          for document in documents:
-              for number, line in enumerate(document.read_text().splitlines(), 1):
-                  for match in retired.finditer(line):
-                      print(f"{document}:{number}: retired intake wording: {match.group(0)}")
-                      failed = True
-          raise SystemExit(failed)
-          PY
+        # The rule, the scan surface, and why prose and production scripts are
+        # both in it are in the checker's own docstring. It is a checked-in
+        # file rather than a heredoc so that the tests can run it against a
+        # planted bad file, which is the only evidence that it still fails.
+        run: python .github/scripts/check_retired_intake_wording.py
 
       - name: Reject mutable action selectors
         run: |

@@ -168,3 +168,18 @@ python -m ruff check .
 The verifier runtime dependency remains separately locked in
 [`requirements.txt`](requirements.txt); Ruff is not installed in verification
 or cold-build jobs.
+
+CI also rejects the wording of the retired intake mechanism, using the
+stdlib-only checker in
+[`.github/scripts/check_retired_intake_wording.py`](.github/scripts/check_retired_intake_wording.py).
+It reads `SECURITY.md`, `README.md`, every Markdown file below `docs/`, and
+every Python file below `scripts/`, including the ones sitting directly in it,
+and it takes an optional repository root so the tests can run it against a
+planted file. It rejects a closed set of collocations, not the bare word
+"issue", which the tracker and private reporting still need. Anything it cannot
+read is a failure rather than a file it passes over, because a scan surface
+that quietly shrinks is invisible in a passing run. Run it with:
+
+```sh
+python .github/scripts/check_retired_intake_wording.py
+```
