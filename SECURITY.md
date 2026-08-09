@@ -70,14 +70,17 @@ If the file and this paragraph disagree, the file is right.
 - Checkout containment uses the verifier-owned clone path supplied by the
   caller, never ancestor Git metadata or submitted source. The renderer
   revalidates every nested project-path component when preparing its workspace.
-  Workspace writes remove hostile final symlinks and directories before
-  installing the accepted fixed-name files, and writable directories are
-  checked against the explicitly supplied workspace boundary.
+  It retains the accepted Challenge, Solution, and Comparator configuration at
+  their original paths, binds those paths to the configured dotted modules,
+  and replaces only the project Lakefile and manifest. Writable directories
+  are checked against the explicitly supplied workspace boundary.
 - The post-acceptance renderer requires the complete six-field path set from
   registration and records it in render report schema 2. An empty project path
   means the repository root; none of the five accepted file paths may be empty.
   Preparation and execution reject old report shapes instead of guessing
-  conventional filenames.
+  conventional filenames. Lake and Verso compile the configured Challenge
+  module under its original identity; sanitization alone maps that module's
+  generated page to the stable public `Challenge/index.html` artifact path.
 - Every submitted, dependency, and separately recorded substantive source must
   be a public GitHub repository pinned to a full commit so registration can
   preserve the complete accepted source graph in native GitHub forks. Git LFS

@@ -13,8 +13,9 @@ import shutil
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +41,7 @@ from scripts.verify_submission import (  # noqa: E402
     load_comparator_config,
     manifest_packages,
     materialize_packages,
+    module_source_suffix,
     normalized_repository_path,
     now,
     require_protected_paths,
@@ -420,13 +422,19 @@ def extract_module_doc(text: str) -> str | None:
 
 
 def parsed_challenge_metadata(
-    challenge: Path, solution: Path, comparator: Path
+    challenge: Path,
+    solution: Path,
+    comparator: Path,
+    *,
+    challenge_module: str,
 ) -> dict[str, Any]:
     for path in (challenge, solution, comparator):
         if path.is_symlink() or not path.is_file():
             raise VerificationError(f"render metadata input is missing or invalid: {path.name}")
     source = challenge.read_text(encoding="utf-8")
     config = load_comparator_config(comparator)
+    if config["challenge_module"] != challenge_module:
+        raise VerificationError("rendered Challenge module does not match its comparator config")
     declarations = [*config["theorem_names"], *config.get("definition_names", [])]
     if len(declarations) != len(set(declarations)):
         raise VerificationError("comparator declaration names must be unique")
@@ -663,7 +671,13 @@ def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def trusted_lakefile(source_manifest: dict[str, Any], verso_commit: str) -> str:
+def trusted_lakefile(
+    source_manifest: dict[str, Any],
+    verso_commit: str,
+    *,
+    challenge_module: str,
+    challenge_source_root: PurePosixPath,
+) -> str:
     packages = source_manifest.get("packages")
     if not isinstance(packages, list):
         raise VerificationError("submitted Lake manifest packages must be an array")
@@ -706,7 +720,22 @@ def trusted_lakefile(source_manifest: dict[str, Any], verso_commit: str) -> str:
             lines.extend([f"path = {toml_string(directory)}", ""])
         else:
             raise VerificationError(f"unsupported direct package type for {name!r}")
-    lines.extend(["[[lean_lib]]", 'name = "Challenge"', ""])
+    module_source_suffix(challenge_module)
+    if (
+        challenge_source_root.is_absolute()
+        or ".." in challenge_source_root.parts
+        or "\\" in challenge_source_root.as_posix()
+    ):
+        raise VerificationError("configured Challenge source root is unsafe")
+    lines.extend(
+        [
+            "[[lean_lib]]",
+            'name = "Challenge"',
+            f"srcDir = {toml_string(challenge_source_root.as_posix())}",
+            f"roots = [{toml_string(challenge_module)}]",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -720,13 +749,49 @@ def replace_workspace_file(path: Path, content: bytes) -> None:
     path.write_bytes(content)
 
 
+def configured_module_source_root(
+    project: Path,
+    source: Path,
+    module: str,
+    field: str,
+) -> PurePosixPath:
+    """Bind one accepted source path to its configured dotted module identity."""
+
+    suffix = module_source_suffix(module)
+    try:
+        relative = source.relative_to(project)
+    except ValueError as error:
+        raise VerificationError(f"accepted {field} is outside the selected project") from error
+    if len(relative.parts) < len(suffix.parts) or relative.parts[-len(suffix.parts) :] != suffix.parts:
+        raise VerificationError(
+            f"accepted {field} path does not match configured module {module!r}"
+        )
+    root_parts = relative.parts[: -len(suffix.parts)]
+    return PurePosixPath(*root_parts) if root_parts else PurePosixPath(".")
+
+
+def module_html_entrypoint(module: str) -> PurePosixPath:
+    """Return Verso's output path for the original configured Lean module."""
+
+    return module_source_suffix(module).with_suffix("") / "index.html"
+
+
+@dataclass(frozen=True, slots=True)
+class RenderWorkspace:
+    project: Path
+    challenge: Path
+    solution: Path
+    comparator: Path
+    challenge_module: str
+
+
 def prepare_workspace(
     source: Path,
     workspace: Path,
     verso_commit: str,
     work: Path,
     accepted_paths: AcceptedRenderPaths,
-) -> Path:
+) -> RenderWorkspace:
     if workspace.exists():
         raise VerificationError("render workspace already exists")
     project_relative = (
@@ -760,15 +825,32 @@ def prepare_workspace(
         accepted_paths.lean_toolchain_path,
         "render lean_toolchain_path",
     )
-    accepted_challenge = resolve_repository_path(
+    accepted_challenge_path = resolve_repository_path(
         source, challenge_relative, "render challenge_path", kind="file"
-    ).read_bytes()
-    accepted_solution = resolve_repository_path(
+    )
+    accepted_solution_path = resolve_repository_path(
         source, solution_relative, "render solution_path", kind="file"
-    ).read_bytes()
-    accepted_comparator = resolve_repository_path(
+    )
+    accepted_comparator_path = resolve_repository_path(
         source, comparator_relative, "render comparator_config_path", kind="file"
-    ).read_bytes()
+    )
+    accepted_challenge = accepted_challenge_path.read_bytes()
+    accepted_solution = accepted_solution_path.read_bytes()
+    accepted_comparator = accepted_comparator_path.read_bytes()
+    comparator_config = load_comparator_config(accepted_comparator_path)
+    challenge_module = comparator_config["challenge_module"]
+    configured_module_source_root(
+        source_project,
+        accepted_solution_path,
+        comparator_config["solution_module"],
+        "Solution source",
+    )
+    challenge_source_root = configured_module_source_root(
+        source_project,
+        accepted_challenge_path,
+        challenge_module,
+        "Challenge source",
+    )
     source_toolchain_path = resolve_repository_path(
         source, toolchain_relative, "render lean_toolchain_path", kind="file"
     )
@@ -810,13 +892,39 @@ def prepare_workspace(
                 submitted_lakefile.unlink()
     replace_workspace_file(
         workspace_project / "lakefile.toml",
-        trusted_lakefile(source_manifest, verso_commit).encode("utf-8"),
+        trusted_lakefile(
+            source_manifest,
+            verso_commit,
+            challenge_module=challenge_module,
+            challenge_source_root=challenge_source_root,
+        ).encode("utf-8"),
     )
     write_json(workspace_project / "lake-manifest.json", merged_manifest)
-    replace_workspace_file(workspace_project / "Challenge.lean", accepted_challenge)
-    replace_workspace_file(workspace_project / "Solution.lean", accepted_solution)
-    replace_workspace_file(workspace_project / "comparator.json", accepted_comparator)
-    return workspace_project.resolve()
+    workspace_challenge = resolve_repository_path(
+        workspace, challenge_relative, "render workspace challenge_path", kind="file"
+    )
+    workspace_solution = resolve_repository_path(
+        workspace, solution_relative, "render workspace solution_path", kind="file"
+    )
+    workspace_comparator = resolve_repository_path(
+        workspace,
+        comparator_relative,
+        "render workspace comparator_config_path",
+        kind="file",
+    )
+    if (
+        workspace_challenge.read_bytes() != accepted_challenge
+        or workspace_solution.read_bytes() != accepted_solution
+        or workspace_comparator.read_bytes() != accepted_comparator
+    ):
+        raise VerificationError("render workspace changed an accepted source file")
+    return RenderWorkspace(
+        project=workspace_project.resolve(),
+        challenge=workspace_challenge,
+        solution=workspace_solution,
+        comparator=workspace_comparator,
+        challenge_module=challenge_module,
+    )
 
 
 def tree_bytes(root: Path, *, stop_after: int | None = None) -> int:
@@ -957,13 +1065,15 @@ def static_html_sanitize(
     sanitizer_src: str,
     runtime_src: str,
     declarations: list[str] | None = None,
+    *,
+    expected_base: str = "../",
 ) -> str:
     sanitizer = _StaticHTMLSanitizer(declarations or [])
     sanitizer.feed(text)
     if sanitizer.rawdata:
         raise VerificationError("generated HTML ends with incomplete markup")
     sanitizer.close()
-    if sanitizer.bases != ["../"]:
+    if sanitizer.bases != [expected_base]:
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
@@ -1123,6 +1233,7 @@ def sanitize_bundle(
     input_dir: Path,
     output_dir: Path,
     *,
+    challenge_module: str,
     metadata: dict[str, Any] | None = None,
 ) -> str:
     if not input_dir.is_dir() or input_dir.is_symlink():
@@ -1150,13 +1261,25 @@ def sanitize_bundle(
     declarations = metadata.get("declarations")
     if not isinstance(declarations, list) or not all(isinstance(item, str) for item in declarations):
         raise VerificationError("render metadata declarations must be an array of strings")
+    source_entrypoint = module_html_entrypoint(challenge_module)
+    source_base = "../" * (len(source_entrypoint.parts) - 1)
+    found_entrypoint = False
     (output_dir / "palomar-sanitize.js").write_text(RUNTIME_SANITIZER, encoding="utf-8")
     (output_dir / "palomar-verso.js").write_text(VERSO_RUNTIME, encoding="utf-8")
     write_json(output_dir / "challenge-metadata.json", metadata)
     for source, relative in source_files:
         if source.suffix.lower() == ".js":
             continue
-        destination = output_dir / relative
+        relative_path = PurePosixPath(relative)
+        is_entrypoint = relative_path == source_entrypoint
+        if is_entrypoint:
+            found_entrypoint = True
+        destination_relative = "Challenge/index.html" if is_entrypoint else relative
+        destination = output_dir / destination_relative
+        if destination.exists():
+            raise VerificationError(
+                f"render output paths collide after entrypoint mapping: {destination_relative}"
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source.suffix.lower() == ".html":
             sanitizer_src = os.path.relpath(
@@ -1170,15 +1293,24 @@ def sanitize_bundle(
                     source.read_text(encoding="utf-8"),
                     sanitizer_src,
                     runtime_src,
-                    declarations if relative == "Challenge/index.html" else [],
+                    declarations if is_entrypoint else [],
+                    expected_base=(
+                        source_base
+                        if is_entrypoint
+                        else "../"
+                    ),
                 ),
                 encoding="utf-8",
             )
         else:
             shutil.copyfile(source, destination)
+    if not found_entrypoint:
+        raise VerificationError(
+            f"Verso output does not contain configured module {challenge_module!r}"
+        )
     entrypoint = output_dir / "Challenge" / "index.html"
     if not entrypoint.is_file():
-        raise VerificationError("Verso output does not contain Challenge/index.html")
+        raise VerificationError("sanitized render entrypoint is missing")
     files, tree_hash = artifact_manifest(output_dir)
     write_json(
         output_dir / "artifact-manifest.json",
@@ -1192,10 +1324,12 @@ def sanitize_command(args: argparse.Namespace) -> int:
         Path(args.challenge).resolve(),
         Path(args.solution).resolve(),
         Path(args.comparator).resolve(),
+        challenge_module=args.challenge_module,
     )
     sanitize_bundle(
         Path(args.input_dir).resolve(),
         Path(args.output_dir).resolve(),
+        challenge_module=args.challenge_module,
         metadata=metadata,
     )
     return 0
@@ -1519,13 +1653,14 @@ def execute(args: argparse.Namespace) -> int:
         if sha256(accepted_challenge) != prepared.source.challenge_sha256:
             raise VerificationError("accepted Challenge source changed after render intake")
         workspace_checkout = work / "workspace"
-        workspace = prepare_workspace(
+        render_workspace = prepare_workspace(
             source,
             workspace_checkout,
             prepared.verso_commit,
             work,
             prepared.source.paths,
         )
+        workspace = render_workspace.project
 
         landrun = Path(args.landrun).resolve(strict=True)
         renderer = Path(__file__).resolve(strict=True)
@@ -1679,11 +1814,13 @@ def execute(args: argparse.Namespace) -> int:
                 "--output-dir",
                 str(clean_output),
                 "--challenge",
-                str(workspace / "Challenge.lean"),
+                str(render_workspace.challenge),
                 "--solution",
-                str(workspace / "Solution.lean"),
+                str(render_workspace.solution),
                 "--comparator",
-                str(workspace / "comparator.json"),
+                str(render_workspace.comparator),
+                "--challenge-module",
+                render_workspace.challenge_module,
             ],
             cwd=workspace,
             environment=env,
@@ -1774,6 +1911,7 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser.add_argument("--challenge", required=True)
     sanitize_parser.add_argument("--solution", required=True)
     sanitize_parser.add_argument("--comparator", required=True)
+    sanitize_parser.add_argument("--challenge-module", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result
 
