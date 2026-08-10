@@ -2965,6 +2965,20 @@ class DispatchWorkflowTests(unittest.TestCase):
                     f"{name} shares one concurrency group across submissions: {group}",
                 )
 
+    def test_root_project_render_dispatch_uses_the_empty_default(self):
+        """GitHub refuses an explicitly empty value for a required input.
+
+        Reviewer supplies the authenticated project path when it is non-empty;
+        a repository-root project must therefore be allowed to take the empty
+        workflow default instead of making the dispatch API reject it.
+        """
+        inputs = self.render_workflow()["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["project_path"]["required"], "false")
+        self.assertEqual(inputs["project_path"]["default"], "")
+        for name, contract in inputs.items():
+            if name != "project_path":
+                self.assertEqual(contract["required"], "true", name)
+
     def test_the_run_and_artifact_carry_the_submission_id(self):
         path = REPOSITORY_ROOT / ".github" / "workflows" / "submission.yml"
         text = path.read_text()
