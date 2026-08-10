@@ -22,7 +22,10 @@ on:
         type: string
       project_path:
         description: Accepted repository-relative project directory (blank means root)
-        required: true
+        # GitHub rejects an explicitly empty value for a required dispatch
+        # input. Root projects are represented by the empty default, while
+        # nested projects still supply their authenticated non-empty path.
+        required: false
         default: ""
         type: string
       challenge_path:
