@@ -36,7 +36,6 @@ __all__ = (
     "load_formalization_metadata",
     "normalize_repository",
     "normalized_provenance",
-    "reject_obsolete_provenance_fields",
     "submission_request",
 )
 
@@ -291,40 +290,81 @@ def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | Non
     return text
 
 
-def reject_obsolete_provenance_fields(data: dict[str, Any]) -> None:
-    """Name every known pre-launch provenance spelling in one migration error."""
-    obsolete: list[str] = []
-    project = data.get("project")
-    if isinstance(project, dict) and "responsible_maintainer" in project:
-        obsolete.append(
-            "project.responsible_maintainer (use project.responsible_maintainers as a "
-            "nonempty list)"
+def _people_with_legacy_alias(
+    container: dict[str, Any],
+    current_key: str,
+    legacy_key: str,
+    path: str,
+    *,
+    required: bool,
+) -> list[dict[str, str]]:
+    """Normalize one known singular spelling without weakening the closed contract."""
+    current_present = current_key in container
+    legacy_present = legacy_key in container
+
+    current: list[dict[str, str]] | None = None
+    if current_present:
+        current = _person_records(
+            container[current_key], f"{path}.{current_key}", required=required
         )
-    if "provenance" in data:
-        obsolete.append(
-            "top-level provenance (remove it; use project.responsible_maintainers, "
-            "repository, and sources with required relationships)"
+
+    legacy: list[dict[str, str]] | None = None
+    if legacy_present:
+        legacy_value = container[legacy_key]
+        if not isinstance(legacy_value, list):
+            legacy_value = [legacy_value]
+        legacy = _person_records(
+            legacy_value, f"{path}.{legacy_key}", required=required
         )
-    sources = data.get("sources")
-    if isinstance(sources, list):
-        for index, source in enumerate(sources):
-            if isinstance(source, dict) and "author" in source:
-                obsolete.append(
-                    f"sources[{index}].author (use sources[{index}].authors as a list)"
-                )
-    if obsolete:
+
+    if current is not None and legacy is not None and current != legacy:
         raise VerificationError(
-            "formalization.yaml uses obsolete provenance fields: " + "; ".join(obsolete)
+            f"formalization.yaml fields {path}.{current_key} and {path}.{legacy_key} "
+            "conflict after normalization"
         )
+    if current is not None:
+        return current
+    if legacy is not None:
+        return legacy
+    return _person_records(None, f"{path}.{current_key}", required=required)
+
+
+def _legacy_result_origin(data: dict[str, Any]) -> str | None:
+    """Return a known legacy origin only when it is a closed, lossless declaration."""
+    if "provenance" not in data:
+        return None
+    provenance = _required_mapping(data["provenance"], "provenance")
+    unknown = sorted(set(provenance) - {"result_origin"})
+    if unknown:
+        raise VerificationError(
+            "formalization.yaml field provenance supports only the legacy result_origin "
+            f"declaration; remove unsupported fields: {', '.join(unknown)}"
+        )
+    if "result_origin" not in provenance:
+        raise VerificationError(
+            "formalization.yaml field provenance must contain the legacy result_origin "
+            "declaration when present"
+        )
+    result_origin = _required_text(
+        provenance["result_origin"], "provenance.result_origin"
+    ).strip()
+    if result_origin not in {"original", "source-based"}:
+        raise VerificationError(
+            "formalization.yaml field provenance.result_origin must be original or "
+            "source-based"
+        )
+    return result_origin
 
 
 def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize the current Palomar provenance contract."""
-    reject_obsolete_provenance_fields(data)
+    legacy_result_origin = _legacy_result_origin(data)
     project = _required_mapping(data.get("project"), "project")
-    maintainers = _person_records(
-        project.get("responsible_maintainers"),
-        "project.responsible_maintainers",
+    maintainers = _people_with_legacy_alias(
+        project,
+        "responsible_maintainers",
+        "responsible_maintainer",
+        "project",
         required=True,
     )
 
@@ -403,8 +443,12 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             )
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
-            "authors": _person_records(
-                item.get("authors"), f"{path}.authors", required=False
+            "authors": _people_with_legacy_alias(
+                item,
+                "authors",
+                "author",
+                path,
+                required=False,
             ),
             "relationship": relationship,
         }
@@ -463,6 +507,11 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             "relationship background or other; formalizes, adapts, and independently-proves "
             "declare a source-based result. Remove type: original-proof when the named source "
             "is a prior presentation of the result"
+        )
+    if legacy_result_origin is not None and legacy_result_origin != result_origin:
+        raise VerificationError(
+            "formalization.yaml field provenance.result_origin conflicts with the result "
+            "origin derived from sources"
         )
 
     raw_related = data.get("related_formalizations", [])
@@ -565,8 +614,6 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             "current repository and provenance additions; a plain v0.3 file, an older file, "
             "or a project-specific shape needs those sections adding."
         )
-
-    reject_obsolete_provenance_fields(data)
 
     project = _required_mapping(data.get("project"), "project")
     _required_text(project.get("name"), "project.name")
