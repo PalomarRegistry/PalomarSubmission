@@ -1,9 +1,10 @@
+import json
 import unittest
 from pathlib import Path
 
 import yaml
 
-from scripts.submission_contract import OPTIONAL_FIELDS
+from scripts.submission_contract import OPTIONAL_FIELDS, REPAIRABLE_FORMALIZATION_FIELDS
 
 ROOT = Path(__file__).resolve().parent.parent
 SECURITY = (ROOT / "SECURITY.md").read_text()
@@ -37,7 +38,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         # them is an identity or a review has to be rechecked when it changes.
         inputs = triggers(WORKFLOW)["workflow_dispatch"]["inputs"]
         self.assertEqual(
-            sorted(inputs), ["commit", "options", "repository", "request_id"]
+            sorted(inputs), ["commit", "mode", "options", "repository", "request_id"]
         )
         self.assertEqual(
             sorted(OPTIONAL_FIELDS),
@@ -61,10 +62,20 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
             if str(step.get("uses", "")).startswith("actions/upload-artifact@")
         ]
         self.assertEqual(len(uploads), 1)
-        self.assertEqual(
-            uploads[0]["with"]["name"], "mechanical-report-${{ inputs.request_id }}"
-        )
-        self.assertIn("uploads exactly one artifact,\n`mechanical-report-<request_id>`", SECURITY)
+        artifact_name = uploads[0]["with"]["name"]
+        self.assertIn("preflight-report", artifact_name)
+        self.assertIn("mechanical-report", artifact_name)
+        self.assertIn("inputs.request_id", artifact_name)
+        self.assertIn("uploads exactly one mode-specific artifact", SECURITY)
+
+    def test_the_formalization_profile_names_the_canonical_repair_allowlist(self):
+        profile = json.loads((ROOT / "formalization-profile.json").read_text())
+        repairable = {
+            field
+            for field, presentation in profile["fields"].items()
+            if presentation.get("repairable") is True
+        }
+        self.assertEqual(repairable, set(REPAIRABLE_FORMALIZATION_FIELDS))
 
 
 if __name__ == "__main__":

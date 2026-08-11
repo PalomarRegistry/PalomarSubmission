@@ -41,13 +41,15 @@ single trigger, `workflow_dispatch`, so a run happens because something
 dispatched it, ordinarily the submission server; no push, comment, or pull
 request starts one. There is one job, `verify`, and its `permissions` block is
 `contents: read`. Its inputs are a repository, a commit, an opaque submission
-id, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
+id, a closed `preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
 allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
 relationship with its optional evidence and free-text context. There is no
 input for the submitter's GitHub identity, and none for an editorial review,
-which happens elsewhere and afterwards. The run uploads exactly one artifact,
-`mechanical-report-<request_id>`, holding the bounded `mechanical-report.json`.
+which happens elsewhere and afterwards. The run uploads exactly one mode-specific artifact,
+`preflight-report-<request_id>` or `mechanical-report-<request_id>`, holding the bounded
+`mechanical-report.json`. Both modes execute the same intake preparation; only `full`
+may continue into candidate-controlled verification.
 If the file and this paragraph disagree, the file is right.
 
 ### Intake and dependency provenance

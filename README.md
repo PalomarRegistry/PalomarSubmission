@@ -30,6 +30,16 @@ repository. The run carries the submission identifier in its name, and the
 report leaves as an artifact rather than as a comment, so nothing here needs a
 credential that can write anywhere.
 
+The workflow has `preflight` and `full` modes. Both check out `main` and invoke
+the same `verify_submission.py prepare` entry point; full verification merely
+continues into the expensive toolchain and proof steps after preparation says
+the submission is ready. Their run names and artifact names are distinct so a
+preflight result cannot be mistaken for mechanical verification. Failed reports
+carry a bounded diagnostics-v1 list: every item names its owner, explanation,
+next action, retryability, optional location, and—only for fields in
+[`formalization-profile.json`](formalization-profile.json)—whether a constrained
+metadata repair may be offered.
+
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
 Lake build directories. Submitted or substantive source repositories containing

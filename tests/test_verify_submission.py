@@ -21,7 +21,7 @@ from scripts.submission_contract import (
     normalize_repository,
     submission_request,
 )
-from scripts.verification_errors import VerificationError
+from scripts.verification_errors import FormalizationValidationError, VerificationError
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
     PERMISSIVE_RESOURCE_PROPERTIES,
@@ -2945,7 +2945,10 @@ class DispatchWorkflowTests(unittest.TestCase):
         in the queue, since GitHub keeps only one run of a group pending.
         """
         concurrency = self.workflow()["jobs"]["verify"]["concurrency"]
-        self.assertEqual(concurrency["group"], "palomar-verify-${{ inputs.request_id }}")
+        self.assertEqual(
+            concurrency["group"],
+            "palomar-verify-${{ inputs.mode }}-${{ inputs.request_id }}",
+        )
         self.assertEqual(concurrency["cancel-in-progress"], "false")
 
     def test_both_dispatched_workflows_queue_per_request(self):
@@ -2989,6 +2992,30 @@ class DispatchWorkflowTests(unittest.TestCase):
         )
         self.assertIn("inputs.request_id", str(upload["with"]["name"]))
 
+    def test_preflight_and_full_share_one_prepare_step(self):
+        workflow = self.workflow()
+        inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["mode"]["default"], "full")
+        self.assertEqual(inputs["mode"]["options"], ["preflight", "full"])
+        steps = workflow["jobs"]["verify"]["steps"]
+        prepare = next(step for step in steps if step.get("id") == "prepare")
+        self.assertNotIn("if", prepare)
+        self.assertIn("verify_submission.py prepare", prepare["run"])
+        expensive = [
+            step for step in steps
+            if step.get("name") in {
+                "Install pinned elan",
+                "Build pinned landrun",
+                "Build pinned Comparator",
+                "Build pinned NanoDa kernel",
+                "Build toolchain-matched lean4export",
+                "Run Comparator and challenge provenance audit",
+            }
+        ]
+        self.assertTrue(expensive)
+        for step in expensive:
+            self.assertIn("inputs.mode == 'full'", step["if"])
+
 
 class MetadataShapeTests(unittest.TestCase):
     """A file in another shape should learn everything it is missing at once."""
@@ -3024,6 +3051,36 @@ class MetadataShapeTests(unittest.TestCase):
                 "sources: [{title: source, relationship: formalizes}]\n"
                 "automation: {}\nreview: {}\n"
             )
+
+    def test_independent_field_problems_are_reported_together(self):
+        with self.assertRaises(FormalizationValidationError) as caught:
+            self.load(
+                "project:\n  name: ''\n  authors: []\n  license: ''\n"
+                "repository:\n  role: substantive-development\n"
+                "classification:\n  arxiv: []\n  msc2020: []\n"
+                "sources:\n  - title: source\n    relationship: formalizes\n"
+                "automation:\n  methods: []\nreview:\n  status: ''\n"
+            )
+        messages = [str(issue) for issue in caught.exception.issues]
+        for field in (
+            "project.name",
+            "project.authors",
+            "project.license",
+            "classification.arxiv",
+            "classification.msc2020",
+            "automation.methods",
+            "review.status",
+        ):
+            self.assertTrue(any(field in message for message in messages), field)
+
+    def test_invalid_yaml_has_an_actionable_location_and_no_repair(self):
+        with self.assertRaises(VerificationError) as caught:
+            self.load("project: [\n")
+        error = caught.exception
+        self.assertEqual(error.code, "formalization.invalid_yaml")
+        self.assertGreaterEqual(error.line or 0, 1)
+        self.assertGreaterEqual(error.column or 0, 1)
+        self.assertFalse(error.repairable)
 
 
 class TaxonomyTextTests(unittest.TestCase):
