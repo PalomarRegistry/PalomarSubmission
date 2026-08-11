@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from scripts.verification_errors import VerificationError
+from scripts.verification_errors import FormalizationValidationError, VerificationError
 
 __all__ = (
     "ARXIV_CATEGORIES",
@@ -17,6 +17,7 @@ __all__ = (
     "AUTHORIZATION_RELATIONSHIPS",
     "GITHUB_LOGIN_RE",
     "GITHUB_RE",
+    "FORMALIZATION_PROFILE_VERSION",
     "MAX_FORMALIZATION_BYTES",
     "MSC2020_CODES",
     "MSC2020_NAMES",
@@ -27,6 +28,7 @@ __all__ = (
     "RELATED_FORMALIZATION_RELATIONSHIPS",
     "REPOSITORY_RE",
     "REPOSITORY_ROLES",
+    "REPAIRABLE_FORMALIZATION_FIELDS",
     "SHA_RE",
     "SOURCE_ENDORSEMENTS",
     "SOURCE_RELATIONSHIPS",
@@ -42,6 +44,16 @@ __all__ = (
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
+FORMALIZATION_PROFILE_VERSION = 1
+REPAIRABLE_FORMALIZATION_FIELDS = frozenset(
+    {
+        "project.name",
+        "project.license",
+        "classification.arxiv",
+        "classification.msc2020",
+        "review.status",
+    }
+)
 
 ARXIV_CATEGORY_NAMES = json.loads(
     (ROOT / "taxonomies" / "arxiv-categories.json").read_text(encoding="utf-8")
@@ -197,7 +209,12 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
 
     if not values.get("comparator_config_path", "").strip():
         raise VerificationError(
-            "Comparator configuration path must be supplied explicitly for this submission"
+            "Comparator configuration path must be supplied explicitly for this submission",
+            code="comparator.path_missing",
+            next_action=(
+                "Choose the repository-relative Comparator configuration for this submission, "
+                "then submit the same commit again."
+            ),
         )
 
     return values, submission_id
@@ -535,16 +552,34 @@ def _required_classifications(
 def load_formalization_metadata(path: Path) -> dict[str, Any]:
     """Parse and enforce Palomar's mechanical minimum for formalization.yaml."""
     if path.stat().st_size > MAX_FORMALIZATION_BYTES:
-        raise VerificationError("formalization.yaml exceeds the 256 KiB hard cap")
+        raise VerificationError(
+            "formalization.yaml exceeds the 256 KiB hard cap",
+            code="formalization.too_large",
+            path=path.name,
+            next_action="Reduce formalization.yaml below 256 KiB, commit it, and submit again.",
+        )
     try:
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeySafeLoader)
     except (UnicodeDecodeError, yaml.YAMLError) as error:
         detail = str(error).splitlines()[0] if str(error) else type(error).__name__
+        mark = getattr(error, "problem_mark", None)
         raise VerificationError(
-            f"formalization.yaml is not valid YAML: {detail}"
+            f"formalization.yaml is not valid YAML: {detail}",
+            code="formalization.invalid_yaml",
+            path=path.name,
+            line=getattr(mark, "line", -1) + 1 if mark is not None else None,
+            column=getattr(mark, "column", -1) + 1 if mark is not None else None,
+            next_action=(
+                "Correct the YAML syntax at the reported location in your repository, "
+                "commit the change, and make a new submission."
+            ),
         ) from error
     if not isinstance(data, dict):
-        raise VerificationError("formalization.yaml must contain one top-level mapping")
+        raise VerificationError(
+            "formalization.yaml must contain one top-level mapping",
+            code="formalization.wrong_root_type",
+            path=path.name,
+        )
 
     # Named together, and before the field-by-field checks, because a file in an
     # older or a project's own shape otherwise fails one field at a time: fix,
@@ -563,44 +598,78 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             + ". Palomar uses the mathlib-initiative formalization.yaml v0.3 format as a "
             "base (https://github.com/mathlib-initiative/formalization.yaml) plus Palomar's "
             "current repository and provenance additions; a plain v0.3 file, an older file, "
-            "or a project-specific shape needs those sections adding."
+            "or a project-specific shape needs those sections adding.",
+            code="formalization.missing_sections",
+            path=path.name,
         )
 
-    reject_obsolete_provenance_fields(data)
+    issues: list[VerificationError] = []
+
+    def check(action: Any) -> None:
+        try:
+            action()
+        except VerificationError as error:
+            message = str(error)
+            match = re.search(r"formalization\.yaml field ([^ ]+)", message)
+            field = match.group(1).rstrip(";:,.") if match else error.field
+            issues.append(
+                VerificationError(
+                    message,
+                    code=error.code if error.code != "submission.invalid" else "formalization.invalid_field",
+                    owner=error.owner,
+                    next_action=error.next_action,
+                    retryable=error.retryable,
+                    path=path.name,
+                    line=error.line,
+                    column=error.column,
+                    field=field,
+                    repairable=bool(field in REPAIRABLE_FORMALIZATION_FIELDS),
+                )
+            )
 
     project = _required_mapping(data.get("project"), "project")
-    _required_text(project.get("name"), "project.name")
-    _required_people(project.get("authors"), "project.authors")
-    _required_text(project.get("license"), "project.license")
+    check(lambda: _required_text(project.get("name"), "project.name"))
+    check(lambda: _required_people(project.get("authors"), "project.authors"))
+    check(lambda: _required_text(project.get("license"), "project.license"))
 
     classification = _required_mapping(data.get("classification"), "classification")
-    _required_classifications(
-        classification.get("arxiv"),
-        "classification.arxiv",
-        allowed=ARXIV_CATEGORIES,
-        minimum=1,
-        maximum=2,
+    check(
+        lambda: _required_classifications(
+            classification.get("arxiv"),
+            "classification.arxiv",
+            allowed=ARXIV_CATEGORIES,
+            minimum=1,
+            maximum=2,
+        )
     )
-    _required_classifications(
-        classification.get("msc2020"),
-        "classification.msc2020",
-        allowed=MSC2020_CODES,
-        minimum=1,
-        maximum=8,
+    check(
+        lambda: _required_classifications(
+            classification.get("msc2020"),
+            "classification.msc2020",
+            allowed=MSC2020_CODES,
+            minimum=1,
+            maximum=8,
+        )
     )
 
-    normalized_provenance(data)
+    check(lambda: normalized_provenance(data))
 
     automation = _required_mapping(data.get("automation"), "automation")
-    methods = automation.get("methods")
-    if not isinstance(methods, list) or not methods:
-        raise VerificationError(
-            "formalization.yaml field automation.methods must be a nonempty list"
-        )
-    for index, method in enumerate(methods):
-        item = _required_mapping(method, f"automation.methods[{index}]")
-        _required_text(item.get("method"), f"automation.methods[{index}].method")
+
+    def check_automation() -> None:
+        methods = automation.get("methods")
+        if not isinstance(methods, list) or not methods:
+            raise VerificationError(
+                "formalization.yaml field automation.methods must be a nonempty list"
+            )
+        for index, method in enumerate(methods):
+            item = _required_mapping(method, f"automation.methods[{index}]")
+            _required_text(item.get("method"), f"automation.methods[{index}].method")
+
+    check(check_automation)
 
     review = _required_mapping(data.get("review"), "review")
-    _required_text(review.get("status"), "review.status")
+    check(lambda: _required_text(review.get("status"), "review.status"))
+    if issues:
+        raise FormalizationValidationError(issues)
     return data

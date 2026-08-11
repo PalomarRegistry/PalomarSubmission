@@ -31,7 +31,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
 from scripts import submission_contract  # noqa: E402
-from scripts.verification_errors import VerificationError  # noqa: E402
+from scripts.verification_errors import (  # noqa: E402
+    FormalizationValidationError,
+    VerificationError,
+)
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 MAX_LICENSE_BYTES = 1024 * 1024
@@ -94,13 +97,26 @@ def supported_toolchain(toolchain: str) -> str:
     settings = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))
     if not isinstance(settings, dict) or set(settings) != {"schema_version", "minimum"}:
         raise VerificationError(
-            "toolchains.json must contain exactly schema_version and minimum"
+            "toolchains.json must contain exactly schema_version and minimum",
+            code="palomar.toolchain_policy_invalid",
+            owner="palomar",
+            next_action="Do not change the repository; Palomar must repair its toolchain policy.",
         )
     if type(settings["schema_version"]) is not int or settings["schema_version"] != 2:
-        raise VerificationError("toolchains.json does not use schema version 2")
+        raise VerificationError(
+            "toolchains.json does not use schema version 2",
+            code="palomar.toolchain_policy_invalid",
+            owner="palomar",
+            next_action="Do not change the repository; Palomar must repair its toolchain policy.",
+        )
     minimum = settings.get("minimum")
     if not isinstance(minimum, str) or not VERSION_RE.fullmatch(minimum):
-        raise VerificationError("toolchains.json does not record a valid minimum")
+        raise VerificationError(
+            "toolchains.json does not record a valid minimum",
+            code="palomar.toolchain_policy_invalid",
+            owner="palomar",
+            next_action="Do not change the repository; Palomar must repair its toolchain policy.",
+        )
     if parse_lean_version(toolchain, TOOLCHAIN_RE) < parse_lean_version(minimum, VERSION_RE):
         raise VerificationError(
             f"Lean toolchain {toolchain} is older than the minimum Palomar supports ({minimum})"
@@ -124,7 +140,13 @@ def resolve_release_commit(repository: str, tag: str) -> str:
         timeout=120,
     )
     if proc.returncode != 0:
-        raise VerificationError(f"could not read {repository} releases")
+        raise VerificationError(
+            f"could not read {repository} releases",
+            code="provider.release_lookup_failed",
+            owner="provider",
+            next_action="Do not change the repository. Retry the same commit later.",
+            retryable=True,
+        )
     commits = {}
     for line in proc.stdout.splitlines():
         parts = line.split()
@@ -133,7 +155,14 @@ def resolve_release_commit(repository: str, tag: str) -> str:
     # An annotated tag resolves through its peeled ref; prefer that.
     commit = commits.get(f"refs/tags/{tag}^{{}}") or commits.get(f"refs/tags/{tag}")
     if not commit:
-        raise VerificationError(f"{repository} has published no {tag} release")
+        raise VerificationError(
+            f"{repository} has published no {tag} release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+            next_action=(
+                "Do not change the repository. Palomar must add support for this Lean release."
+            ),
+        )
     return commit
 
 
@@ -169,13 +198,111 @@ SANDBOX_ENVIRONMENT = (
 class LicenseValidationError(VerificationError):
     """The submitted repository does not satisfy the licence policy."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="license.mismatch",
+            field="project.license",
+            repairable=True,
+            next_action=(
+                "Make project.license agree with the repository license file, commit the "
+                "change, and make a new submission."
+            ),
+        )
+
 
 class LicenseDetectorError(VerificationError):
     """The trusted SPDX detector failed rather than rejecting submitted terms."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="palomar.license_detector_failed",
+            owner="palomar",
+            next_action=(
+                "Do not change the repository. Retry the same commit later; report the "
+                "workflow URL if the problem recurs."
+            ),
+            retryable=True,
+        )
+
 
 class ResourceExhausted(VerificationError):
     """The available worker could not complete a verification phase."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="provider.resource_exhausted",
+            owner="provider",
+            next_action="Do not change the repository. Retry the same commit later.",
+            retryable=True,
+        )
+
+
+DIAGNOSTICS_SCHEMA_VERSION = 1
+MAX_DIAGNOSTICS = 50
+PALOMAR_OWNED_STAGES = frozenset(
+    {
+        "setup",
+        "confinement-initial",
+        "confinement-final",
+        "trusted-cache",
+        "trusted-roots",
+        "resource-exhausted",
+    }
+)
+
+
+def report_diagnostic(
+    report: dict[str, Any],
+    error: BaseException,
+    *,
+    stage: str | None = None,
+    owner: str | None = None,
+) -> None:
+    """Append bounded public diagnostics without changing successful reports."""
+    current_stage = stage or str(report.get("stage") or "unknown")
+    if isinstance(error, FormalizationValidationError):
+        for issue in error.issues:
+            report_diagnostic(report, issue, stage=current_stage)
+        return
+    if isinstance(error, VerificationError):
+        diagnostic = error.diagnostic(current_stage)
+        if owner is not None:
+            diagnostic["owner"] = owner
+        elif error.owner == "submitter" and current_stage in PALOMAR_OWNED_STAGES:
+            diagnostic["owner"] = "palomar"
+            diagnostic["repairable"] = False
+            diagnostic["next_action"] = (
+                "Do not change the repository. Retry the same commit later; report the "
+                "workflow URL if the problem recurs."
+            )
+    else:
+        diagnostic = VerificationError(
+            "Palomar could not complete this check.",
+            code="palomar.internal_error",
+            owner="palomar",
+            next_action=(
+                "Do not change the repository. Retry the same commit later; report the "
+                "workflow URL if the problem recurs."
+            ),
+            retryable=True,
+        ).diagnostic(current_stage)
+        diagnostic["explanation"] = f"{type(error).__name__}: {str(error)[:1_500]}"
+    diagnostics = report.setdefault("diagnostics", [])
+    if not isinstance(diagnostics, list) or len(diagnostics) >= MAX_DIAGNOSTICS:
+        return
+    key = (diagnostic["code"], diagnostic["summary"], diagnostic.get("field"))
+    if any(
+        isinstance(item, dict)
+        and (item.get("code"), item.get("summary"), item.get("field")) == key
+        for item in diagnostics
+    ):
+        return
+    report["diagnostics_schema_version"] = DIAGNOSTICS_SCHEMA_VERSION
+    report["formalization_profile_version"] = submission_contract.FORMALIZATION_PROFILE_VERSION
+    diagnostics.append(diagnostic)
 
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
@@ -904,74 +1031,145 @@ def prepare(args: argparse.Namespace) -> int:
         metadata_path = resolve_repository_path(
             source, metadata_relative, "Formalization metadata path", kind="file"
         )
-        formalization = submission_contract.load_formalization_metadata(metadata_path)
-        provenance = submission_contract.normalized_provenance(formalization)
-        substantive = provenance.get("substantive_formalization")
-        if isinstance(substantive, dict):
-            validate_preservable_remote_source(
-                work,
-                substantive,
-                "substantive formalization source",
-            )
+        preflight_issues: list[tuple[str, BaseException]] = []
 
-        report["stage"] = "license"
-        declared_license = formalization["project"]["license"].strip()
-        license_path = repository_license_file(source)
-        license_record: dict[str, Any] = {
-            "path": license_path.name,
-            "sha256": sha256(license_path),
-            "declared_identifier": declared_license,
-            "detected_identifier": None,
-        }
-        report["license"] = license_record
-        detected_license = detect_spdx_identifier(license_path, Path(args.licensee).resolve())
-        license_record["detected_identifier"] = detected_license
-        if declared_license != detected_license:
-            raise LicenseValidationError(
-                "formalization.yaml field project.license "
-                f"declares {declared_license!r}, but {license_path.name} matches {detected_license!r}"
-            )
-        report["stage"] = "intake"
+        def add_issue(stage: str, error: BaseException) -> None:
+            if isinstance(error, FormalizationValidationError):
+                preflight_issues.extend((stage, issue) for issue in error.issues)
+            else:
+                preflight_issues.append((stage, error))
 
-        project_toolchain = project / "lean-toolchain"
-        root_toolchain = source / "lean-toolchain"
-        toolchain_path = project_toolchain if project_toolchain.exists() else root_toolchain
-        if toolchain_path.is_symlink() or not toolchain_path.is_file():
-            raise VerificationError(
-                "lean-toolchain must be a regular file in the project or repository root"
-            )
-        toolchain = toolchain_path.read_text(encoding="utf-8").strip()
-        export_commit = resolve_release_commit(
-            "leanprover/lean4export", supported_toolchain(toolchain)
-        )
-
-        raw_config_path = values.get("comparator_config_path", "").strip()
-        if not raw_config_path:
-            raise VerificationError(
-                "Comparator configuration path must be supplied explicitly for this submission"
-            )
-        config_relative = normalized_repository_path(
-            raw_config_path, "Comparator configuration path"
-        )
-        if config_relative.suffix.lower() != ".json":
-            raise VerificationError("Comparator configuration path must name a .json file")
-        config_path = resolve_repository_path(
-            source, config_relative, "Comparator configuration path", kind="file"
-        )
+        formalization: dict[str, Any] | None = None
+        provenance: dict[str, Any] | None = None
         try:
-            config_path.relative_to(project)
-        except ValueError as error:
-            raise VerificationError(
-                "Comparator configuration path must be inside the selected project"
-            ) from error
-        config = load_comparator_config(config_path)
+            formalization = submission_contract.load_formalization_metadata(metadata_path)
+            provenance = submission_contract.normalized_provenance(formalization)
+            substantive = provenance.get("substantive_formalization")
+            if isinstance(substantive, dict):
+                validate_preservable_remote_source(
+                    work,
+                    substantive,
+                    "substantive formalization source",
+                )
+        except Exception as error:  # independent preflight group
+            add_issue("formalization", error)
+
+        license_record: dict[str, Any] | None = None
+        try:
+            license_path = repository_license_file(source)
+            detected_license = detect_spdx_identifier(
+                license_path, Path(args.licensee).resolve()
+            )
+            declared_license = (
+                formalization["project"]["license"].strip()
+                if formalization is not None
+                else None
+            )
+            license_record = {
+                "path": license_path.name,
+                "sha256": sha256(license_path),
+                "declared_identifier": declared_license,
+                "detected_identifier": detected_license,
+            }
+            if declared_license is not None and declared_license != detected_license:
+                raise LicenseValidationError(
+                    "formalization.yaml field project.license "
+                    f"declares {declared_license!r}, but {license_path.name} matches "
+                    f"{detected_license!r}"
+                )
+        except Exception as error:  # independent preflight group
+            add_issue("license", error)
+
+        toolchain_path: Path | None = None
+        toolchain: str | None = None
+        export_commit: str | None = None
+        try:
+            project_toolchain = project / "lean-toolchain"
+            root_toolchain = source / "lean-toolchain"
+            toolchain_path = project_toolchain if project_toolchain.exists() else root_toolchain
+            if toolchain_path.is_symlink() or not toolchain_path.is_file():
+                raise VerificationError(
+                    "lean-toolchain must be a regular file in the project or repository root",
+                    code="toolchain.missing",
+                    path="lean-toolchain",
+                    next_action=(
+                        "Add a regular lean-toolchain file to the project or repository root, "
+                        "commit it, and make a new submission."
+                    ),
+                )
+            toolchain = toolchain_path.read_text(encoding="utf-8").strip()
+            export_commit = resolve_release_commit(
+                "leanprover/lean4export", supported_toolchain(toolchain)
+            )
+        except Exception as error:  # independent preflight group
+            add_issue("toolchain", error)
+
+        config_relative: Path | None = None
+        config_path: Path | None = None
+        config: dict[str, Any] | None = None
+        manifest_path = project / "lake-manifest.json"
+        try:
+            raw_config_path = values.get("comparator_config_path", "").strip()
+            if not raw_config_path:
+                raise VerificationError(
+                    "Comparator configuration path must be supplied explicitly for this submission",
+                    code="comparator.path_missing",
+                    next_action=(
+                        "Enter the repository-relative comparator.json path and submit again."
+                    ),
+                )
+            config_relative = normalized_repository_path(
+                raw_config_path, "Comparator configuration path"
+            )
+            if config_relative.suffix.lower() != ".json":
+                raise VerificationError(
+                    "Comparator configuration path must name a .json file",
+                    code="comparator.path_invalid",
+                )
+            config_path = resolve_repository_path(
+                source, config_relative, "Comparator configuration path", kind="file"
+            )
+            try:
+                config_path.relative_to(project)
+            except ValueError as error:
+                raise VerificationError(
+                    "Comparator configuration path must be inside the selected project",
+                    code="comparator.path_outside_project",
+                ) from error
+            config = load_comparator_config(config_path)
+            if manifest_path.is_symlink():
+                raise VerificationError("project lake-manifest.json must not be a symlink")
+            if lakefile.name == "lakefile.lean" and not manifest_path.is_file():
+                raise VerificationError(
+                    "lakefile.lean projects require a committed lake-manifest.json"
+                )
+        except Exception as error:  # independent preflight group
+            add_issue("comparator-config", error)
+
+        if preflight_issues:
+            report["stage"] = "preflight"
+            for issue_stage, issue in preflight_issues:
+                report["errors"].append(str(issue))
+                report_diagnostic(report, issue, stage=issue_stage)
+            owners = {
+                item.get("owner")
+                for item in report.get("diagnostics", [])
+                if isinstance(item, dict)
+            }
+            report["status"] = "error" if owners - {"submitter"} else "fail"
+            if license_record is not None:
+                report["license"] = license_record
+            write_json(output, report)
+            workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+            return 0
+
+        assert formalization is not None and provenance is not None
+        assert license_record is not None
+        assert toolchain_path is not None and toolchain is not None and export_commit is not None
+        assert config_relative is not None and config_path is not None and config is not None
+        report["license"] = license_record
         lakefile_relative = repository_relative_path(source, lakefile)
         toolchain_relative = repository_relative_path(source, toolchain_path)
-        manifest_path = project / "lake-manifest.json"
-        if manifest_path.is_symlink():
-            raise VerificationError("project lake-manifest.json must not be a symlink")
-        if lakefile.name == "lakefile.lean" and not manifest_path.is_file():
-            raise VerificationError("lakefile.lean projects require a committed lake-manifest.json")
         report.update(
             {
                 "lean_toolchain": toolchain,
@@ -1038,10 +1236,20 @@ def prepare(args: argparse.Namespace) -> int:
         report["status"] = "fail"
         report["stage"] = "license"
         report["errors"].append(str(error))
+        report_diagnostic(report, error, stage="license")
+        write_json(output, report)
+        workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+    except FormalizationValidationError as error:
+        report["status"] = "fail"
+        report["stage"] = "formalization"
+        report["errors"].extend(str(issue) for issue in error.issues)
+        report_diagnostic(report, error, stage="formalization")
         write_json(output, report)
         workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
     except Exception as error:  # noqa: BLE001 -- all intake failures become a bounded report
         report["errors"].append(str(error))
+        report["status"] = "fail" if isinstance(error, VerificationError) else "error"
+        report_diagnostic(report, error)
         write_json(output, report)
         workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
     finally:
@@ -3109,6 +3317,7 @@ def execute(args: argparse.Namespace) -> int:
                 message = str(error)
                 if message not in report["errors"]:
                     report["errors"].append(message)
+                report_diagnostic(report, error, owner="palomar")
         write_json(output, report)
 
     try:
@@ -3433,9 +3642,16 @@ def execute(args: argparse.Namespace) -> int:
         if audit["untrusted_sources"]:
             report["status"] = "fail"
             report["stage"] = "challenge-provenance"
-            report["errors"].append(
-                "configured Challenge transitively imports sources outside the allowlist"
+            error = VerificationError(
+                "configured Challenge transitively imports sources outside the allowlist",
+                code="challenge.untrusted_imports",
+                next_action=(
+                    "Remove the untrusted Challenge imports or move the trusted statement into "
+                    "the submitted project, then make a new submission."
+                ),
             )
+            report["errors"].append(str(error))
+            report_diagnostic(report, error)
             report["checked_at"] = now()
             guarded_write()
             return 0
@@ -3508,12 +3724,28 @@ def execute(args: argparse.Namespace) -> int:
         if proc.returncode:
             if "landrun adapter:" in log:
                 report["status"] = "error"
-                report["errors"].append("Comparator sandbox adapter failed")
+                error = VerificationError(
+                    "Comparator sandbox adapter failed",
+                    code="palomar.comparator_sandbox_failed",
+                    owner="palomar",
+                    next_action=(
+                        "Do not change the repository. Retry the same commit later; report the "
+                        "workflow URL if the problem recurs."
+                    ),
+                    retryable=True,
+                )
             else:
                 report["status"] = "fail"
-                report["errors"].append(
-                    f"Comparator rejected the project (exit {proc.returncode})"
+                error = VerificationError(
+                    f"Comparator rejected the project (exit {proc.returncode})",
+                    code="comparator.rejected",
+                    next_action=(
+                        "Open the workflow log, correct the reported Lean or Comparator failure, "
+                        "commit it, and make a new submission."
+                    ),
                 )
+            report["errors"].append(str(error))
+            report_diagnostic(report, error, stage="comparator")
             report["stage"] = "comparator"
             guarded_write()
             return 0
@@ -3528,15 +3760,23 @@ def execute(args: argparse.Namespace) -> int:
         report["error_kind"] = "infrastructure/resource-exhausted"
         report["retryable"] = True
         if isinstance(error, subprocess.TimeoutExpired):
-            report["errors"].append(
+            bounded = ResourceExhausted(
                 "worker wall-clock capacity was exhausted; retry on a longer-running worker"
             )
         else:
-            report["errors"].append(str(error))
+            bounded = error
+        report["errors"].append(str(bounded))
+        report_diagnostic(report, bounded, stage="resource-exhausted")
         guarded_write()
     except Exception as error:  # noqa: BLE001 -- all verifier failures become a bounded report
-        report["status"] = "error"
+        submitter_failure = (
+            isinstance(error, VerificationError)
+            and error.owner == "submitter"
+            and str(report.get("stage") or "") not in PALOMAR_OWNED_STAGES
+        )
+        report["status"] = "fail" if submitter_failure else "error"
         report["errors"].append(str(error))
+        report_diagnostic(report, error)
         guarded_write()
     finally:
         _EXECUTION_DEADLINE = previous_deadline

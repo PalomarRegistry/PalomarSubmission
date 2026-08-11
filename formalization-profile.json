@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "title": "Palomar formalization.yaml profile",
+  "fields": {
+    "project.name": {
+      "label": "Project name",
+      "description": "The name of the formalized result or project.",
+      "input": "text",
+      "repairable": true
+    },
+    "project.authors": {
+      "label": "Project authors",
+      "description": "People who authored the formalization. Enter one person per line and do not infer missing authorship.",
+      "input": "text-list",
+      "repairable": false
+    },
+    "project.license": {
+      "label": "Project license",
+      "description": "The SPDX identifier for the repository license; it must agree with the repository license file.",
+      "input": "text",
+      "repairable": true
+    },
+    "project.responsible_maintainers": {
+      "label": "Responsible maintainers",
+      "description": "People responsible for the submitted formalization. Enter one person per line.",
+      "input": "text-list",
+      "repairable": false
+    },
+    "repository.role": {
+      "label": "Repository role",
+      "description": "Whether this repository contains the substantive development or is a thin wrapper around another repository.",
+      "input": "enum",
+      "options": ["substantive-development", "thin-wrapper"],
+      "repairable": false
+    },
+    "classification.arxiv": {
+      "label": "arXiv classifications",
+      "description": "One or two arXiv category codes that describe the mathematical content.",
+      "input": "text-list",
+      "repairable": true
+    },
+    "classification.msc2020": {
+      "label": "MSC 2020 classifications",
+      "description": "Between one and eight MSC 2020 classification codes.",
+      "input": "text-list",
+      "repairable": true
+    },
+    "sources": {
+      "label": "Mathematical sources",
+      "description": "A nonempty list describing the mathematical result's sources and each source's relationship to this formalization.",
+      "input": "complex",
+      "repairable": false
+    },
+    "automation.methods": {
+      "label": "Automation methods",
+      "description": "A nonempty list of the proof automation or formalization methods used.",
+      "input": "complex",
+      "repairable": false
+    },
+    "review.status": {
+      "label": "Review status",
+      "description": "The current review status claimed by the submitter; this is metadata, not a Palomar endorsement.",
+      "input": "text",
+      "repairable": true
+    }
+  }
+}
