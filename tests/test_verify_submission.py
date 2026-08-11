@@ -2903,6 +2903,14 @@ class SubmissionRequestTests(unittest.TestCase):
         for name in OPTIONAL_FIELDS:
             self.assertIn(name, values, f"{name} cannot be submitted")
 
+    def test_technical_team_test_relationship_is_preserved_explicitly(self):
+        self.assertEqual(
+            submission_contract.AUTHORIZATION_RELATIONSHIPS[
+                "I am a Palomar Technical Maintainer testing the workflow"
+            ],
+            "technical-test",
+        )
+
     def test_comparator_configuration_must_be_selected_explicitly(self):
         with self.assertRaisesRegex(VerificationError, "must be supplied explicitly"):
             submission_request(self.dispatch(options="{}"))
