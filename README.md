@@ -123,10 +123,16 @@ A supplied source `type` must be exactly `paper`, `book`, `web discussion`,
 `folklore`, `original-proof`, or `other`; it may be omitted except where
 `original-proof` is the origin declaration. Invalid or missing provenance fails
 mechanical verification with the field that needs changing.
-Do not add a top-level `provenance` block: put maintainers under `project`, the
-optional thin-wrapper target under `repository`, and result origin in the source
-entries as above. The exact mechanical minimum is enforced here; the fields' intended
-meaning and authoring conventions are documented in
+New files should not add a top-level `provenance` block: put maintainers under
+`project`, the optional thin-wrapper target under `repository`, and result origin
+in the source entries as above. For compatibility with older files, the verifier
+ignores a top-level `provenance` block and accepts singular
+`project.responsible_maintainer` and `sources[].author` aliases; current plural
+fields take precedence when both spellings are present. Result origin is always
+derived from the current `sources` entries, so a `result_origin` value in an
+ignored legacy block cannot override them. The exact mechanical minimum is
+enforced here; the fields' intended meaning and authoring conventions are
+documented in
 [`PalomarPolicy/CONTRIBUTING.md`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md#3-write-formalizationyaml).
 
 The checked-in identifier lists under [`taxonomies/`](taxonomies/) are snapshots

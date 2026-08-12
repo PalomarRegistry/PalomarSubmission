@@ -967,6 +967,44 @@ review:
             self.assertEqual(metadata["project"]["name"], "Example result")
             self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
 
+    def test_legacy_person_aliases_pass_full_metadata_loading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+project:
+  name: Example result
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+  responsible_maintainer: Ada Lovelace
+classification:
+  arxiv: [math.LO]
+  msc2020: [03B35]
+sources:
+  - title: A source theorem
+    author:
+      name: Emmy Noether
+      orcid: 0000-0000-0000-000X
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            metadata = load_formalization_metadata(path)
+
+        provenance = submission_contract.normalized_provenance(metadata)
+        self.assertEqual(
+            provenance["responsible_maintainers"], [{"name": "Ada Lovelace"}]
+        )
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"],
+            [{"name": "Emmy Noether", "orcid": "0000-0000-0000-000X"}],
+        )
+
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
         # Exact snapshot of PalomarTemplate@e5d6243c3b6e1bbce415647a7cb2d4354d2570a3.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
@@ -1174,7 +1212,7 @@ review:
         self.assertEqual(provenance["result_origin"], "original")
         self.assertNotIn("declared", provenance)
 
-    def test_obsolete_top_level_provenance_is_always_rejected(self):
+    def test_obsolete_top_level_provenance_is_ignored(self):
         current = {
             "project": {"responsible_maintainers": ["Ada Lovelace"]},
             "repository": {"role": "substantive-development"},
@@ -1187,21 +1225,17 @@ review:
             ],
         }
         for obsolete in (
-            {"result_origin": "original"},
+            {"result_origin": "source-based"},
             {"notes": "free-form provenance does not belong here"},
             {},
             "original",
             None,
         ):
             with self.subTest(obsolete=obsolete):
-                with self.assertRaisesRegex(
-                    VerificationError,
-                    r"obsolete provenance fields: top-level provenance.*"
-                    r"project\.responsible_maintainers.*sources with required relationships",
-                ):
-                    submission_contract.normalized_provenance(
-                        {**current, "provenance": obsolete}
-                    )
+                provenance = submission_contract.normalized_provenance(
+                    {**current, "provenance": obsolete}
+                )
+                self.assertEqual(provenance["result_origin"], "original")
 
     def test_source_based_provenance_requires_a_substantive_relationship(self):
         data = {
@@ -1219,7 +1253,7 @@ review:
         ):
             submission_contract.normalized_provenance(data)
 
-    def test_obsolete_person_field_names_are_rejected_with_current_replacements(self):
+    def test_singular_person_field_names_are_accepted(self):
         current = {
             "project": {"responsible_maintainers": ["Ada Lovelace"]},
             "repository": {"role": "substantive-development"},
@@ -1235,48 +1269,97 @@ review:
         obsolete_maintainer["project"] = {
             "responsible_maintainer": "Ada Lovelace"
         }
-        with self.assertRaisesRegex(
-            VerificationError,
-            r"obsolete provenance fields: project\.responsible_maintainer.*"
-            r"project\.responsible_maintainers",
-        ):
-            submission_contract.normalized_provenance(obsolete_maintainer)
+        provenance = submission_contract.normalized_provenance(obsolete_maintainer)
+        self.assertEqual(
+            provenance["responsible_maintainers"], [{"name": "Ada Lovelace"}]
+        )
 
         obsolete_author = json.loads(json.dumps(current))
         obsolete_author["sources"][0].pop("authors")
         obsolete_author["sources"][0]["author"] = "Emmy Noether"
-        with self.assertRaisesRegex(
-            VerificationError,
-            r"obsolete provenance fields: sources\[0\]\.author.*sources\[0\]\.authors",
-        ):
-            submission_contract.normalized_provenance(obsolete_author)
+        provenance = submission_contract.normalized_provenance(obsolete_author)
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"],
+            [{"name": "Emmy Noether"}],
+        )
 
-    def test_all_known_obsolete_provenance_fields_are_reported_together(self):
-        with self.assertRaises(VerificationError) as caught:
-            submission_contract.normalized_provenance(
-                {
-                    "project": {
-                        "responsible_maintainer": "Ada Lovelace",
-                        "responsible_maintainers": ["Ada Lovelace"],
-                    },
-                    "provenance": {"result_origin": "source-based"},
-                    "repository": {"role": "substantive-development"},
-                    "sources": [
-                        {
-                            "title": "A source theorem",
-                            "author": "Emmy Noether",
-                            "authors": ["Emmy Noether"],
-                            "relationship": "formalizes",
-                        }
-                    ],
-                }
-            )
-        message = str(caught.exception)
-        self.assertIn("project.responsible_maintainer", message)
-        self.assertIn("top-level provenance", message)
-        self.assertIn("sources[0].author", message)
-        self.assertIn("project.responsible_maintainers", message)
-        self.assertIn("sources[0].authors", message)
+    def test_singular_person_fields_accept_lists(self):
+        provenance = submission_contract.normalized_provenance(
+            {
+                "project": {"responsible_maintainer": ["Ada", "Grace"]},
+                "sources": [
+                    {
+                        "title": "A source theorem",
+                        "author": ["Emmy", "Sofia"],
+                        "relationship": "formalizes",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            provenance["responsible_maintainers"],
+            [{"name": "Ada"}, {"name": "Grace"}],
+        )
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"],
+            [{"name": "Emmy"}, {"name": "Sofia"}],
+        )
+
+    def test_empty_optional_singular_author_is_ignored(self):
+        provenance = submission_contract.normalized_provenance(
+            {
+                "project": {"responsible_maintainer": "Ada Lovelace"},
+                "sources": [
+                    {
+                        "title": "A source theorem",
+                        "author": None,
+                        "relationship": "formalizes",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(provenance["mathematical_sources"][0]["authors"], [])
+
+    def test_canonical_person_fields_take_precedence_over_singular_aliases(self):
+        provenance = submission_contract.normalized_provenance(
+            {
+                "project": {
+                    "responsible_maintainers": ["Ada Lovelace"],
+                    "responsible_maintainer": 7,
+                },
+                "provenance": {"result_origin": "original"},
+                "sources": [
+                    {
+                        "title": "A source theorem",
+                        "authors": ["Emmy Noether"],
+                        "author": 7,
+                        "relationship": "formalizes",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            provenance["responsible_maintainers"], [{"name": "Ada Lovelace"}]
+        )
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["authors"],
+            [{"name": "Emmy Noether"}],
+        )
+        self.assertEqual(provenance["result_origin"], "source-based")
+
+        invalid_canonical = {
+            "project": {
+                "responsible_maintainers": [],
+                "responsible_maintainer": "Ada Lovelace",
+            },
+            "sources": [
+                {"title": "A source theorem", "relationship": "formalizes"}
+            ],
+        }
+        with self.assertRaisesRegex(
+            VerificationError, r"project\.responsible_maintainers must be a nonempty list"
+        ):
+            submission_contract.normalized_provenance(invalid_canonical)
 
     def test_current_provenance_declarations_are_required(self):
         current = {
