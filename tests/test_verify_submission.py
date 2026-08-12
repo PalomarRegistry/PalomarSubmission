@@ -1667,12 +1667,17 @@ review:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"
             path.write_text("{}\n")
-            with self.assertRaisesRegex(
-                VerificationError,
-                r"missing the sections Palomar requires: project, classification, "
-                r"automation, review, sources \(nonempty list\)",
-            ):
+            with self.assertRaises(FormalizationValidationError) as caught:
                 load_formalization_metadata(path)
+            self.assertEqual(
+                {issue.field for issue in caught.exception.issues},
+                {
+                    "project.name", "project.authors", "project.license",
+                    "project.responsible_maintainers", "classification.arxiv",
+                    "classification.msc2020", "sources", "automation.methods",
+                    "review.status",
+                },
+            )
 
     def test_formalization_metadata_rejects_empty_required_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3150,21 +3155,57 @@ class MetadataShapeTests(unittest.TestCase):
             return load_formalization_metadata(path)
 
     def test_every_missing_section_is_named_together(self):
-        # The shape a project might reasonably have written before the standard.
-        with self.assertRaises(VerificationError) as caught:
+        # An old shape must produce the whole guided form in one preflight,
+        # rather than an aggregate prose error or one fix/resubmit cycle per field.
+        with self.assertRaises(FormalizationValidationError) as caught:
             self.load("result:\n  name: x\nartifacts:\n  challenge: Challenge.lean\n")
-        message = str(caught.exception)
-        for section in (
-            "project",
-            "classification",
-            "automation",
-            "review",
-            "sources (nonempty list)",
+        fields = {issue.field for issue in caught.exception.issues}
+        self.assertEqual(
+            fields,
+            {
+                "project.name", "project.authors", "project.license",
+                "project.responsible_maintainers", "classification.arxiv",
+                "classification.msc2020", "sources", "automation.methods",
+                "review.status",
+            },
+        )
+        self.assertTrue(all(issue.repairable for issue in caught.exception.issues))
+
+    def test_legacy_values_are_safely_prefilled_without_inference(self):
+        with self.assertRaises(FormalizationValidationError) as caught:
+            self.load(
+                "artifact:\n"
+                "  name: Legacy project\n"
+                "  authors: [Ada Lovelace]\n"
+                "  license: MIT\n"
+                "source:\n"
+                "  title: A source theorem\n"
+                "  authors: [Emmy Noether]\n"
+                "  id: arXiv:1234.5678\n"
+                "  type: article\n"
+                "automation:\n"
+                "  method: agent\n"
+                "  framework: Example agent\n"
+            )
+        draft = caught.exception.repair_draft
+        self.assertEqual(draft["values"]["project.name"], "Legacy project")
+        self.assertEqual(draft["values"]["project.authors"], ["Ada Lovelace"])
+        self.assertEqual(draft["values"]["project.license"], "MIT")
+        self.assertEqual(draft["values"]["sources"], [{
+            "title": "A source theorem",
+            "authors": ["Emmy Noether"],
+            "id": "arXiv:1234.5678",
+        }])
+        self.assertEqual(draft["values"]["automation.methods"], [{
+            "method": "agent", "framework": "Example agent",
+        }])
+        for inferred in (
+            "project.responsible_maintainers", "classification.arxiv",
+            "classification.msc2020", "review.status",
         ):
-            self.assertIn(section, message, f"{section} was not named")
-        self.assertIn("mathlib-initiative/formalization.yaml", message)
-        self.assertIn("plus Palomar's current classification and provenance additions", message)
-        self.assertIn("repository section is optional", message)
+            self.assertNotIn(inferred, draft["values"])
+        self.assertNotIn("type", draft["values"]["sources"][0])
+        self.assertNotIn("relationship", draft["values"]["sources"][0])
 
     def test_a_file_with_the_sections_gets_the_specific_complaint(self):
         # And once the shape is right, the detailed checks speak again.

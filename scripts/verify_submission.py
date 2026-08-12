@@ -1052,6 +1052,8 @@ def prepare(args: argparse.Namespace) -> int:
                     "substantive formalization source",
                 )
         except Exception as error:  # independent preflight group
+            if isinstance(error, FormalizationValidationError) and error.repair_draft is not None:
+                report["formalization_repair_draft"] = error.repair_draft
             add_issue("formalization", error)
 
         license_record: dict[str, Any] | None = None

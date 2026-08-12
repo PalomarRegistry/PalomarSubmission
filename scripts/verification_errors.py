@@ -62,8 +62,14 @@ class VerificationError(RuntimeError):
 class FormalizationValidationError(VerificationError):
     """Several independent formalization.yaml checks failed together."""
 
-    def __init__(self, issues: list[VerificationError]) -> None:
+    def __init__(
+        self,
+        issues: list[VerificationError],
+        *,
+        repair_draft: dict[str, Any] | None = None,
+    ) -> None:
         if not issues:
             raise ValueError("formalization validation needs at least one issue")
         super().__init__(str(issues[0]), code=issues[0].code)
         self.issues = tuple(issues)
+        self.repair_draft = repair_draft
