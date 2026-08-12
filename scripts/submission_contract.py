@@ -38,7 +38,6 @@ __all__ = (
     "load_formalization_metadata",
     "normalize_repository",
     "normalized_provenance",
-    "reject_obsolete_provenance_fields",
     "submission_request",
 )
 
@@ -309,40 +308,36 @@ def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | Non
     return text
 
 
-def reject_obsolete_provenance_fields(data: dict[str, Any]) -> None:
-    """Name every known pre-launch provenance spelling in one migration error."""
-    obsolete: list[str] = []
-    project = data.get("project")
-    if isinstance(project, dict) and "responsible_maintainer" in project:
-        obsolete.append(
-            "project.responsible_maintainer (use project.responsible_maintainers as a "
-            "nonempty list)"
-        )
-    if "provenance" in data:
-        obsolete.append(
-            "top-level provenance (remove it; use project.responsible_maintainers, "
-            "repository, and sources with required relationships)"
-        )
-    sources = data.get("sources")
-    if isinstance(sources, list):
-        for index, source in enumerate(sources):
-            if isinstance(source, dict) and "author" in source:
-                obsolete.append(
-                    f"sources[{index}].author (use sources[{index}].authors as a list)"
-                )
-    if obsolete:
-        raise VerificationError(
-            "formalization.yaml uses obsolete provenance fields: " + "; ".join(obsolete)
-        )
+def _person_records_with_singular_alias(
+    mapping: dict[str, Any],
+    plural: str,
+    singular: str,
+    path: str,
+    *,
+    required: bool,
+) -> list[dict[str, str]]:
+    """Read the canonical people list, falling back to a legacy singular key."""
+    if plural in mapping:
+        return _person_records(mapping.get(plural), f"{path}.{plural}", required=required)
+    if singular not in mapping:
+        return _person_records(None, f"{path}.{plural}", required=required)
+
+    value = mapping.get(singular)
+    if value is None:
+        value = []
+    elif not isinstance(value, list):
+        value = [value]
+    return _person_records(value, f"{path}.{singular}", required=required)
 
 
 def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize the current Palomar provenance contract."""
-    reject_obsolete_provenance_fields(data)
     project = _required_mapping(data.get("project"), "project")
-    maintainers = _person_records(
-        project.get("responsible_maintainers"),
-        "project.responsible_maintainers",
+    maintainers = _person_records_with_singular_alias(
+        project,
+        "responsible_maintainers",
+        "responsible_maintainer",
+        "project",
         required=True,
     )
 
@@ -436,8 +431,8 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             )
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
-            "authors": _person_records(
-                item.get("authors"), f"{path}.authors", required=False
+            "authors": _person_records_with_singular_alias(
+                item, "authors", "author", path, required=False
             ),
             "relationship": relationship,
         }
