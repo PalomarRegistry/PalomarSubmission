@@ -14,7 +14,10 @@ class VerificationError(RuntimeError):
         *,
         code: str = "submission.invalid",
         owner: str = "submitter",
-        next_action: str = "Correct the repository at this commit, then make a new submission.",
+        next_action: str = (
+            "Update the repository, commit the correction, then make a new submission "
+            "using the new commit SHA."
+        ),
         retryable: bool = False,
         path: str | None = None,
         line: int | None = None,
