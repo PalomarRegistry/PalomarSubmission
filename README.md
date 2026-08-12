@@ -103,9 +103,13 @@ exactly with the SPDX identifier in `project.license`.
 project identity, authorship, license, classification, automation-method, and
 review-status fields. Classification requires one or two official arXiv subject
 classes and between one and eight distinct MSC2020 codes. The current provenance
-contract also requires a nonempty `project.responsible_maintainers` list, a
-`repository.role` of `substantive-development` or `thin-wrapper`, and a nonempty
-`sources` list. Every source, including an `original-proof` entry, needs a
+contract also requires a nonempty `project.responsible_maintainers` list and a
+nonempty `sources` list. The submitted repository is the substantive proof
+development by default, so ordinary submissions need no `repository` section.
+A thin wrapper must instead provide a pinned
+`repository.substantive_formalization`; the legacy explicit
+`repository.role: thin-wrapper` spelling remains accepted. Every source,
+including an `original-proof` entry, needs a
 `relationship`. An `original-proof` entry must use `relationship: other`;
 additional sources accompanying an original result may use `background` or
 `other`. A `formalizes`, `adapts`, or `independently-proves` relationship instead
@@ -120,8 +124,8 @@ A supplied source `type` must be exactly `paper`, `book`, `web discussion`,
 `original-proof` is the origin declaration. Invalid or missing provenance fails
 mechanical verification with the field that needs changing.
 Do not add a top-level `provenance` block: put maintainers under `project`, the
-repository role under `repository`, and result origin in the source entries as
-above. The exact mechanical minimum is enforced here; the fields' intended
+optional thin-wrapper target under `repository`, and result origin in the source
+entries as above. The exact mechanical minimum is enforced here; the fields' intended
 meaning and authoring conventions are documented in
 [`PalomarPolicy/CONTRIBUTING.md`](https://github.com/PalomarRegistry/PalomarPolicy/blob/main/CONTRIBUTING.md#3-write-formalizationyaml).
 

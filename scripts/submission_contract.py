@@ -346,13 +346,27 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         required=True,
     )
 
-    repository = _required_mapping(data.get("repository"), "repository")
-    repository_role = _required_text(repository.get("role"), "repository.role").strip()
-    if repository_role not in REPOSITORY_ROLES:
-        allowed = ", ".join(sorted(REPOSITORY_ROLES))
-        raise VerificationError(
-            f"formalization.yaml field repository.role must be one of: {allowed}"
+    raw_repository = data.get("repository")
+    if raw_repository is None:
+        repository: dict[str, Any] = {}
+    else:
+        repository = _required_mapping(raw_repository, "repository")
+    raw_repository_role = repository.get("role")
+    if raw_repository_role is None or raw_repository_role == "":
+        repository_role = (
+            "thin-wrapper"
+            if "substantive_formalization" in repository
+            else "substantive-development"
         )
+    else:
+        repository_role = _required_text(
+            raw_repository_role, "repository.role"
+        ).strip()
+        if repository_role not in REPOSITORY_ROLES:
+            allowed = ", ".join(sorted(REPOSITORY_ROLES))
+            raise VerificationError(
+                f"formalization.yaml field repository.role must be one of: {allowed}"
+            )
     substantive: dict[str, str] | None = None
     if (
         repository_role == "substantive-development"
@@ -360,7 +374,8 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     ):
         raise VerificationError(
             "formalization.yaml field repository.substantive_formalization is valid only "
-            "when repository.role is thin-wrapper; remove it for substantive-development"
+            "for a thin wrapper; remove it when the submitted repository contains the "
+            "substantive development"
         )
     if repository_role == "thin-wrapper":
         if not isinstance(repository.get("substantive_formalization"), dict):
@@ -587,7 +602,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
     # resubmit, wait, learn the next one.
     missing = [
         name
-        for name in ("project", "repository", "classification", "automation", "review")
+        for name in ("project", "classification", "automation", "review")
         if not isinstance(data.get(name), dict)
     ]
     if not isinstance(data.get("sources"), list) or not data["sources"]:
@@ -598,8 +613,10 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             + ", ".join(missing)
             + ". Palomar uses the mathlib-initiative formalization.yaml v0.3 format as a "
             "base (https://github.com/mathlib-initiative/formalization.yaml) plus Palomar's "
-            "current repository and provenance additions; a plain v0.3 file, an older file, "
-            "or a project-specific shape needs those sections adding.",
+            "current classification and provenance additions; a plain v0.3 file, an older "
+            "file, or a project-specific shape needs those sections adding. The repository "
+            "section is optional unless this is a thin wrapper around a separately pinned "
+            "substantive formalization.",
             code="formalization.missing_sections",
             path=path.name,
         )

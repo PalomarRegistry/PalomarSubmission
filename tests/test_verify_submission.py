@@ -947,8 +947,6 @@ project:
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
-repository:
-  role: substantive-development
 classification:
   arxiv: [math.LO, cs.LO]
   msc2020: [03B35, 68V15]
@@ -970,16 +968,17 @@ review:
             self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@d720f59dbe2edd29e0b9273c113139cdb1f24d2b.
+        # Exact snapshot of PalomarTemplate@e5d6243c3b6e1bbce415647a7cb2d4354d2570a3.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "e4c6ab90c0439205cb41cf18b7b0e81397dd74a4a57ebdfe847c4eda719c21aa",
+            "bbe923c5e362373bb4c79db46b4ba1a9cb00d611f8f5e03b3a619b658ed3860c",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
+        self.assertNotIn("repository", template)
         self.assertEqual(
             template["sources"][0]["type"],
             "TEMPLATE: paper, book, web discussion, folklore, original-proof, or other",
@@ -988,7 +987,6 @@ review:
         template["project"]["name"] = "Example result"
         template["project"]["authors"] = ["Ada Lovelace"]
         template["project"]["responsible_maintainers"] = ["Ada Lovelace"]
-        template["repository"]["role"] = "substantive-development"
         template["classification"] = {"arxiv": ["math.LO"], "msc2020": ["03B35"]}
         template["sources"][0].update(
             {
@@ -1006,6 +1004,7 @@ review:
             metadata = load_formalization_metadata(path)
         provenance = submission_contract.normalized_provenance(metadata)
         self.assertEqual(provenance["result_origin"], "source-based")
+        self.assertEqual(provenance["repository_role"], "substantive-development")
         self.assertEqual(provenance["mathematical_sources"][0]["type"], "paper")
         self.assertNotIn("declared", provenance)
 
@@ -1289,14 +1288,24 @@ review:
         }
         cases = (
             ("responsible_maintainers", {**current, "project": {}}, "nonempty list"),
-            ("repository", {**current, "repository": None}, "must be a mapping"),
-            ("repository.role", {**current, "repository": {}}, "nonempty string"),
             ("sources", {**current, "sources": []}, "nonempty list"),
         )
         for label, data, message in cases:
             with self.subTest(label):
                 with self.assertRaisesRegex(VerificationError, message):
                     submission_contract.normalized_provenance(data)
+
+    def test_omitted_repository_defaults_to_substantive_development(self):
+        provenance = submission_contract.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "sources": [
+                    {"title": "A source theorem", "relationship": "formalizes"}
+                ],
+            }
+        )
+        self.assertEqual(provenance["repository_role"], "substantive-development")
+        self.assertNotIn("substantive_formalization", provenance)
 
     def test_unrecognized_enumerated_provenance_values_are_rejected(self):
         current = {
@@ -1507,6 +1516,27 @@ review:
             f"https://github.com/example/substantive/tree/{revision}",
         )
 
+    def test_substantive_target_without_role_implies_thin_wrapper(self):
+        revision = "a" * 40
+        provenance = submission_contract.normalized_provenance(
+            {
+                "project": {"responsible_maintainers": ["Ada Lovelace"]},
+                "repository": {
+                    "substantive_formalization": {
+                        "id": "example/substantive",
+                        "revision": revision,
+                    }
+                },
+                "sources": [
+                    {"title": "A source theorem", "relationship": "formalizes"}
+                ],
+            }
+        )
+        self.assertEqual(provenance["repository_role"], "thin-wrapper")
+        self.assertEqual(
+            provenance["substantive_formalization"]["commit"], revision
+        )
+
     def test_thin_wrapper_requires_a_substantive_repository_target(self):
         with self.assertRaisesRegex(
             VerificationError,
@@ -1525,7 +1555,7 @@ review:
     def test_substantive_repository_rejects_a_thin_wrapper_target(self):
         with self.assertRaisesRegex(
             VerificationError,
-            r"repository\.substantive_formalization is valid only.*thin-wrapper.*remove it",
+            r"repository\.substantive_formalization is valid only.*thin wrapper.*remove it",
         ):
             submission_contract.normalized_provenance(
                 {
@@ -1556,8 +1586,8 @@ review:
             path.write_text("{}\n")
             with self.assertRaisesRegex(
                 VerificationError,
-                r"missing the sections Palomar requires: project, repository, "
-                r"classification, automation, review, sources \(nonempty list\)",
+                r"missing the sections Palomar requires: project, classification, "
+                r"automation, review, sources \(nonempty list\)",
             ):
                 load_formalization_metadata(path)
 
@@ -1571,8 +1601,6 @@ project:
   authors: []
   license: ""
   responsible_maintainers: [Ada Lovelace]
-repository:
-  role: substantive-development
 classification:
   arxiv: []
   msc2020: []
@@ -3045,7 +3073,6 @@ class MetadataShapeTests(unittest.TestCase):
         message = str(caught.exception)
         for section in (
             "project",
-            "repository",
             "classification",
             "automation",
             "review",
@@ -3053,13 +3080,14 @@ class MetadataShapeTests(unittest.TestCase):
         ):
             self.assertIn(section, message, f"{section} was not named")
         self.assertIn("mathlib-initiative/formalization.yaml", message)
-        self.assertIn("plus Palomar's current repository and provenance additions", message)
+        self.assertIn("plus Palomar's current classification and provenance additions", message)
+        self.assertIn("repository section is optional", message)
 
     def test_a_file_with_the_sections_gets_the_specific_complaint(self):
         # And once the shape is right, the detailed checks speak again.
         with self.assertRaisesRegex(VerificationError, "project.name"):
             self.load(
-                "project: {}\nrepository: {}\nclassification: {}\n"
+                "project: {}\nclassification: {}\n"
                 "sources: [{title: source, relationship: formalizes}]\n"
                 "automation: {}\nreview: {}\n"
             )
@@ -3068,7 +3096,6 @@ class MetadataShapeTests(unittest.TestCase):
         with self.assertRaises(FormalizationValidationError) as caught:
             self.load(
                 "project:\n  name: ''\n  authors: []\n  license: ''\n"
-                "repository:\n  role: substantive-development\n"
                 "classification:\n  arxiv: []\n  msc2020: []\n"
                 "sources:\n  - title: source\n    relationship: formalizes\n"
                 "automation:\n  methods: []\nreview:\n  status: ''\n"

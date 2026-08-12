@@ -257,7 +257,7 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             for step in ci["jobs"]["test"]["steps"]
             if step.get("name") == "Match the current PalomarTemplate authoring contracts"
         )
-        template_commit = "d720f59dbe2edd29e0b9273c113139cdb1f24d2b"
+        template_commit = "e5d6243c3b6e1bbce415647a7cb2d4354d2570a3"
         self.assertIn(f"/{template_commit}/formalization.yaml", pinned_step["run"])
         self.assertIn(f"/{template_commit}/comparator.json", pinned_step["run"])
         self.assertIn("cmp tests/fixtures/palomar-template-comparator.json", pinned_step["run"])

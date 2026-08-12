@@ -26,13 +26,6 @@
       "input": "text-list",
       "repairable": false
     },
-    "repository.role": {
-      "label": "Repository role",
-      "description": "Whether this repository contains the substantive development or is a thin wrapper around another repository.",
-      "input": "enum",
-      "options": ["substantive-development", "thin-wrapper"],
-      "repairable": false
-    },
     "classification.arxiv": {
       "label": "arXiv classifications",
       "description": "One or two arXiv category codes that describe the mathematical content.",
