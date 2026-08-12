@@ -1062,7 +1062,7 @@ review:
                             "options": json.dumps(
                                 {
                                     "authorization_relationship": (
-                                        "I am a responsible author or maintainer"
+                                        "I am a Palomar Technical Maintainer testing the workflow"
                                     ),
                                     "comparator_config_path": "comparator.json",
                                 }
@@ -1103,6 +1103,10 @@ review:
             self.assertEqual(report["status"], "pending", report["errors"])
             self.assertEqual(report["schema_version"], 1)
             self.assertEqual(report["warnings"], [])
+            self.assertEqual(
+                report["submission"]["authorization"],
+                {"relationship": "technical-test"},
+            )
             self.assertEqual(
                 report["formalization"]["sha256"],
                 verifier.sha256(fixture / "formalization.yaml"),
@@ -2864,10 +2868,6 @@ review:
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SubmissionRequestTests(unittest.TestCase):
     """Submissions arrive as a dispatch, and carry no submitter."""
 
@@ -2905,10 +2905,14 @@ class SubmissionRequestTests(unittest.TestCase):
 
     def test_technical_team_test_relationship_is_preserved_explicitly(self):
         self.assertEqual(
-            submission_contract.AUTHORIZATION_RELATIONSHIPS[
-                "I am a Palomar Technical Maintainer testing the workflow"
-            ],
-            "technical-test",
+            submission_contract.AUTHORIZATION_RELATIONSHIPS,
+            {
+                "I am a responsible author or maintainer": "maintainer",
+                "I have approval from a responsible author or maintainer": "approved",
+                "I am a Palomar Technical Maintainer testing the workflow": (
+                    "technical-test"
+                ),
+            },
         )
 
     def test_comparator_configuration_must_be_selected_explicitly(self):
@@ -3109,3 +3113,7 @@ class TaxonomyTextTests(unittest.TestCase):
         self.assertEqual(
             codes["52C10"], "Erdős problems and related topics of discrete geometry"
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
