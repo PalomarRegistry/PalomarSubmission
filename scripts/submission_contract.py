@@ -88,6 +88,7 @@ ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
 AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
+    "I am a Palomar Technical Maintainer testing the workflow": "technical-test",
 }
 SOURCE_TYPES = {
     "paper",

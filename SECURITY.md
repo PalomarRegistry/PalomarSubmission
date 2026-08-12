@@ -52,6 +52,13 @@ which happens elsewhere and afterwards. The run uploads exactly one mode-specifi
 may continue into candidate-controlled verification.
 If the file and this paragraph disagree, the file is right.
 
+The submission server emits `technical-test` only after browser sign-in has
+established active Technical Maintainer membership. This verifier treats it like
+every dispatched field: recorded, not trusted. The report preserves the value
+rather than presenting it as author or maintainer approval. A submission carrying
+it cannot be registered; the submission server and reviewer enforce that rule,
+not this credential-free verification workflow.
+
 ### Intake and dependency provenance
 
 - The verifier accepts only a public, credential-free
