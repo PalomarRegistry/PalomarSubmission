@@ -43,14 +43,19 @@ __all__ = (
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
-FORMALIZATION_PROFILE_VERSION = 1
+FORMALIZATION_PROFILE_VERSION = 2
 REPAIRABLE_FORMALIZATION_FIELDS = frozenset(
     {
         "project.name",
+        "project.authors",
         "project.license",
+        "project.responsible_maintainers",
         "classification.arxiv",
         "classification.msc2020",
+        "sources",
+        "automation.methods",
         "review.status",
+        "repository.substantive_formalization",
     }
 )
 
@@ -560,6 +565,153 @@ def _required_classifications(
     return value
 
 
+def _safe_people(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    names: list[str] = []
+    for person in value:
+        name = person if isinstance(person, str) else person.get("name") if isinstance(person, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            return None
+        names.append(name.strip())
+    return names
+
+
+def _safe_string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        return None
+    return [item.strip() for item in value]
+
+
+def _safe_source(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    title = value.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    result: dict[str, Any] = {"title": title.strip()}
+    authors = _safe_people(value.get("authors"))
+    if authors is None and "author" in value:
+        authors = _safe_people(
+            value["author"] if isinstance(value["author"], list) else [value["author"]]
+        )
+    if authors:
+        result["authors"] = authors
+    for field in ("id", "location", "license"):
+        item = value.get(field)
+        if isinstance(item, str) and item.strip():
+            result[field] = item.strip()
+    if value.get("type") in SOURCE_TYPES:
+        result["type"] = value["type"]
+    if value.get("relationship") in SOURCE_RELATIONSHIPS:
+        result["relationship"] = value["relationship"]
+    if value.get("author_endorsement") in SOURCE_ENDORSEMENTS:
+        result["author_endorsement"] = value["author_endorsement"]
+    return result
+
+
+def formalization_repair_draft(data: dict[str, Any]) -> dict[str, Any]:
+    """Carry only exact legacy equivalents into a submitter-confirmed repair."""
+    values: dict[str, Any] = {}
+    origins: dict[str, str] = {}
+
+    project = data.get("project") if isinstance(data.get("project"), dict) else {}
+    artifact = data.get("artifact") if isinstance(data.get("artifact"), dict) else {}
+    for field, current, legacy in (
+        ("project.name", project.get("name"), artifact.get("name")),
+        ("project.license", project.get("license"), artifact.get("license")),
+    ):
+        value = current if isinstance(current, str) and current.strip() else legacy
+        if isinstance(value, str) and value.strip():
+            values[field] = value.strip()
+            origins[field] = field if value is current else f"artifact.{field.split('.')[-1]}"
+    for field, current, legacy in (
+        ("project.authors", project.get("authors"), artifact.get("authors")),
+        (
+            "project.responsible_maintainers",
+            project.get("responsible_maintainers"),
+            project.get("responsible_maintainer"),
+        ),
+    ):
+        legacy_people = legacy if isinstance(legacy, list) else [legacy] if legacy is not None else None
+        people = _safe_people(current) or _safe_people(legacy_people)
+        if people:
+            values[field] = people
+            origins[field] = field if _safe_people(current) else (
+                "project.responsible_maintainer"
+                if field == "project.responsible_maintainers"
+                else f"artifact.{field.split('.')[-1]}"
+            )
+
+    classification = data.get("classification")
+    if isinstance(classification, dict):
+        for name in ("arxiv", "msc2020"):
+            items = _safe_string_list(classification.get(name))
+            if items:
+                field = f"classification.{name}"
+                values[field] = items
+                origins[field] = field
+
+    raw_sources = data.get("sources")
+    source_origin = "sources"
+    if not isinstance(raw_sources, list) or not raw_sources:
+        legacy_source = data.get("source")
+        raw_sources = [legacy_source] if isinstance(legacy_source, dict) else []
+        source_origin = "source"
+    sources = [item for raw in raw_sources if (item := _safe_source(raw)) is not None]
+    if sources:
+        values["sources"] = sources
+        origins["sources"] = source_origin
+
+    automation = data.get("automation")
+    if isinstance(automation, dict):
+        raw_methods = automation.get("methods")
+        method_origin = "automation.methods"
+        if not isinstance(raw_methods, list) or not raw_methods:
+            raw_methods = [automation] if isinstance(automation.get("method"), str) else []
+            method_origin = "automation.method"
+        methods: list[dict[str, Any]] = []
+        for raw in raw_methods:
+            if (
+                not isinstance(raw, dict)
+                or not isinstance(raw.get("method"), str)
+                or not raw["method"].strip()
+            ):
+                continue
+            method: dict[str, Any] = {"method": raw["method"].strip()}
+            if isinstance(raw.get("framework"), str) and raw["framework"].strip():
+                method["framework"] = raw["framework"].strip()
+            models = _safe_string_list(raw.get("models"))
+            if models:
+                method["models"] = models
+            methods.append(method)
+        if methods:
+            values["automation.methods"] = methods
+            origins["automation.methods"] = method_origin
+
+    review = data.get("review")
+    if isinstance(review, dict) and isinstance(review.get("status"), str) and review["status"].strip():
+        values["review.status"] = review["status"].strip()
+        origins["review.status"] = "review.status"
+    repository = data.get("repository")
+    if isinstance(repository, dict) and isinstance(repository.get("substantive_formalization"), dict):
+        item = repository["substantive_formalization"]
+        identifier, revision = item.get("id"), item.get("revision")
+        if (
+            isinstance(identifier, str)
+            and identifier.strip()
+            and isinstance(revision, str)
+            and revision.strip()
+        ):
+            values["repository.substantive_formalization"] = {
+                "id": identifier.strip(), "revision": revision.strip()
+            }
+            origins["repository.substantive_formalization"] = "repository.substantive_formalization"
+    return {"values": values, "origins": origins}
+
+
 def load_formalization_metadata(path: Path) -> dict[str, Any]:
     """Parse and enforce Palomar's mechanical minimum for formalization.yaml."""
     if path.stat().st_size > MAX_FORMALIZATION_BYTES:
@@ -592,60 +744,53 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             path=path.name,
         )
 
-    # Named together, and before the field-by-field checks, because a file in an
-    # older or a project's own shape otherwise fails one field at a time: fix,
-    # resubmit, wait, learn the next one.
-    missing = [
-        name
-        for name in ("project", "classification", "automation", "review")
-        if not isinstance(data.get(name), dict)
-    ]
-    if not isinstance(data.get("sources"), list) or not data["sources"]:
-        missing.append("sources (nonempty list)")
-    if missing:
-        raise VerificationError(
-            "formalization.yaml is missing the sections Palomar requires: "
-            + ", ".join(missing)
-            + ". Palomar uses the mathlib-initiative formalization.yaml v0.3 format as a "
-            "base (https://github.com/mathlib-initiative/formalization.yaml) plus Palomar's "
-            "current classification and provenance additions; a plain v0.3 file, an older "
-            "file, or a project-specific shape needs those sections adding. The repository "
-            "section is optional unless this is a thin wrapper around a separately pinned "
-            "substantive formalization.",
-            code="formalization.missing_sections",
-            path=path.name,
-        )
-
     issues: list[VerificationError] = []
 
-    def check(action: Any) -> None:
+    def check(action: Any, field: str | None = None) -> None:
         try:
             action()
         except VerificationError as error:
             message = str(error)
             match = re.search(r"formalization\.yaml field ([^ ]+)", message)
-            field = match.group(1).rstrip(";:,.") if match else error.field
+            detected = match.group(1).rstrip(";:,.") if match else error.field
+            canonical = field or detected
+            if canonical and canonical.startswith("sources"):
+                canonical = "sources"
+            elif canonical and canonical.startswith("automation.methods"):
+                canonical = "automation.methods"
             issues.append(
                 VerificationError(
                     message,
                     code=error.code if error.code != "submission.invalid" else "formalization.invalid_field",
                     owner=error.owner,
-                    next_action=error.next_action,
                     retryable=error.retryable,
                     path=path.name,
                     line=error.line,
                     column=error.column,
-                    field=field,
-                    repairable=bool(field in REPAIRABLE_FORMALIZATION_FIELDS),
+                    field=canonical,
+                    repairable=bool(canonical in REPAIRABLE_FORMALIZATION_FIELDS),
+                    next_action=(
+                        "Complete the guided metadata form and let Palomar prepare a pull request."
+                        if canonical in REPAIRABLE_FORMALIZATION_FIELDS
+                        else error.next_action
+                    ),
                 )
             )
 
-    project = _required_mapping(data.get("project"), "project")
+    project = data.get("project") if isinstance(data.get("project"), dict) else {}
     check(lambda: _required_text(project.get("name"), "project.name"))
     check(lambda: _required_people(project.get("authors"), "project.authors"))
     check(lambda: _required_text(project.get("license"), "project.license"))
+    maintainers = project.get("responsible_maintainers")
+    if "responsible_maintainers" not in project and "responsible_maintainer" in project:
+        maintainers = project.get("responsible_maintainer")
+        if not isinstance(maintainers, list):
+            maintainers = [maintainers]
+    check(lambda: _required_people(maintainers, "project.responsible_maintainers"))
 
-    classification = _required_mapping(data.get("classification"), "classification")
+    classification = (
+        data.get("classification") if isinstance(data.get("classification"), dict) else {}
+    )
     check(
         lambda: _required_classifications(
             classification.get("arxiv"),
@@ -665,9 +810,39 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
         )
     )
 
-    check(lambda: normalized_provenance(data))
+    # Validate source provenance independently of maintainers and repository so
+    # one old section cannot hide the other fields the guided form must collect.
+    source_document = {
+        **data,
+        "project": {**project, "responsible_maintainers": ["Palomar validation placeholder"]},
+    }
+    source_document.pop("repository", None)
+    check(lambda: normalized_provenance(source_document), "sources")
 
-    automation = _required_mapping(data.get("automation"), "automation")
+    # Ordinary repositories need no repository edit. Only an explicitly
+    # declared thin wrapper may ask the guided form for its pinned target.
+    if "repository" in data:
+        repository_document = {
+            **data,
+            "project": {**project, "responsible_maintainers": ["Palomar validation placeholder"]},
+            "sources": [{
+                "title": "Palomar validation placeholder",
+                "type": "original-proof",
+                "relationship": "other",
+            }],
+        }
+        repository = data.get("repository")
+        explicit_missing_target = (
+            isinstance(repository, dict)
+            and repository.get("role") == "thin-wrapper"
+            and not isinstance(repository.get("substantive_formalization"), dict)
+        )
+        check(
+            lambda: normalized_provenance(repository_document),
+            "repository.substantive_formalization" if explicit_missing_target else None,
+        )
+
+    automation = data.get("automation") if isinstance(data.get("automation"), dict) else {}
 
     def check_automation() -> None:
         methods = automation.get("methods")
@@ -681,8 +856,11 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
 
     check(check_automation)
 
-    review = _required_mapping(data.get("review"), "review")
+    review = data.get("review") if isinstance(data.get("review"), dict) else {}
     check(lambda: _required_text(review.get("status"), "review.status"))
     if issues:
-        raise FormalizationValidationError(issues)
+        raise FormalizationValidationError(
+            issues,
+            repair_draft=formalization_repair_draft(data),
+        )
     return data

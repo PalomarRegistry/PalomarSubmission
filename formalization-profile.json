@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "title": "Palomar formalization.yaml profile",
+  "schema_version": 2,
+  "title": "Palomar formalization.yaml repair profile",
   "fields": {
     "project.name": {
       "label": "Project name",
@@ -10,9 +10,9 @@
     },
     "project.authors": {
       "label": "Project authors",
-      "description": "People who authored the formalization. Enter one person per line and do not infer missing authorship.",
-      "input": "text-list",
-      "repairable": false
+      "description": "People who authored the formalization. Enter one person per line; Palomar does not infer authorship.",
+      "input": "people",
+      "repairable": true
     },
     "project.license": {
       "label": "Project license",
@@ -22,13 +22,13 @@
     },
     "project.responsible_maintainers": {
       "label": "Responsible maintainers",
-      "description": "People responsible for the submitted formalization. Enter one person per line.",
-      "input": "text-list",
-      "repairable": false
+      "description": "People responsible for the submitted formalization. Enter one person per line; Palomar does not infer this from authorship.",
+      "input": "people",
+      "repairable": true
     },
     "classification.arxiv": {
       "label": "arXiv classifications",
-      "description": "One or two arXiv category codes that describe the mathematical content.",
+      "description": "One or two arXiv category codes describing the mathematical content.",
       "input": "text-list",
       "repairable": true
     },
@@ -40,20 +40,26 @@
     },
     "sources": {
       "label": "Mathematical sources",
-      "description": "A nonempty list describing the mathematical result's sources and each source's relationship to this formalization.",
-      "input": "complex",
-      "repairable": false
+      "description": "A nonempty list of sources for the result. Every source needs a title and an accurate relationship.",
+      "input": "sources",
+      "repairable": true
     },
     "automation.methods": {
       "label": "Automation methods",
-      "description": "A nonempty list of the proof automation or formalization methods used.",
-      "input": "complex",
-      "repairable": false
+      "description": "A nonempty list describing how the formalization was produced; use manual when no automated system was used.",
+      "input": "methods",
+      "repairable": true
     },
     "review.status": {
       "label": "Review status",
-      "description": "The current review status claimed by the submitter; this is metadata, not a Palomar endorsement.",
+      "description": "The review completed before submission; this is metadata, not a Palomar endorsement.",
       "input": "text",
+      "repairable": true
+    },
+    "repository.substantive_formalization": {
+      "label": "Substantive formalization",
+      "description": "Only for a thin wrapper: the owner/repository and full commit containing the substantive formalization.",
+      "input": "substantive-repository",
       "repairable": true
     }
   }

@@ -40,6 +40,13 @@ next action, retryability, optional location, and—only for fields in
 [`formalization-profile.json`](formalization-profile.json)—whether a constrained
 metadata repair may be offered.
 
+Formalization profile 2 reports every missing or invalid mechanically required
+metadata field separately and includes only safely reusable values from a
+recognized older shape. That lets the submission site explain and collect the
+complete correction in one form. It never guesses classifications,
+maintainers, source relationships, review claims, or whether a repository is a
+thin wrapper; malformed or alias-bearing YAML remains a manual correction.
+
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
 Lake build directories. Submitted or substantive source repositories containing
