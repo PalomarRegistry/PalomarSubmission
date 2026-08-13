@@ -2805,6 +2805,23 @@ def reject_untrusted_package_artifacts(
             )
 
 
+def mathlib_cache_availability(transcript: str) -> bool | None:
+    """Interpret the trusted cache client's completion summary."""
+    downloaded = [
+        int(count)
+        for count in re.findall(r"(?im)^[\r ]*Downloaded:\s*([0-9]+)\s+file", transcript)
+    ]
+    if "Warning: some files were not found in the cache." in transcript:
+        return False
+    if downloaded:
+        return any(count > 0 for count in downloaded)
+    if "No files to download" in transcript:
+        return True
+    # Older cache clients did not expose a stable availability summary. Do not
+    # claim either outcome when the trusted transcript is silent.
+    return None
+
+
 def get_mathlib_cache(
     source: Path,
     *,
@@ -2817,8 +2834,8 @@ def get_mathlib_cache(
     executable_paths: list[Path],
     tools: dict[Path, str],
     resource_properties: tuple[str, ...] = (),
-) -> None:
-    """Run the cache client only from a clean, pinned official Mathlib checkout."""
+) -> dict[str, bool | None]:
+    """Run the trusted cache client and report whether it supplied the closure."""
     packages = manifest_packages(source)
     _roots, aliases = allowed_roots()
     mathlib = next(
@@ -2831,7 +2848,7 @@ def get_mathlib_cache(
         None,
     )
     if mathlib is None:
-        return
+        return {"required": False, "available": None}
     package_dir = package_checkout(source, mathlib, checkout=checkout)
     if not (package_dir / ".git").is_dir():
         raise VerificationError("official Mathlib dependency is not a Git checkout")
@@ -2924,7 +2941,7 @@ def get_mathlib_cache(
         {"HOME": str(home.resolve()), "TMPDIR": str(temporary.resolve()), "LEAN_ABORT_ON_PANIC": "1"}
     )
     try:
-        sandboxed_run(
+        cache_result = sandboxed_run(
             [str(lake), "exe", "cache", "get"],
             cwd=package_dir,
             environment=cache_env,
@@ -2937,6 +2954,8 @@ def get_mathlib_cache(
             unrestricted_network=True,
             resource_properties=resource_properties,
         )
+        cache_transcript = f"{cache_result.stdout}\n{cache_result.stderr}"
+        cache_available = mathlib_cache_availability(cache_transcript)
         # Replay the trusted cache while the high-trust Mathlib closure
         # is still the only writable package surface. Lake records local hash
         # metadata during replay; creating it here prevents a qualified root
@@ -2953,6 +2972,7 @@ def get_mathlib_cache(
             tools=tools,
             timeout=EXECUTION_BUDGET_SECONDS,
         )
+        return {"required": True, "available": cache_available}
     finally:
         if nested_packages.is_symlink():
             nested_packages.unlink()
@@ -3585,7 +3605,7 @@ def execute(args: argparse.Namespace) -> int:
             source, packages, allowlist, checkout=checkout
         )
         report["stage"] = "trusted-cache"
-        get_mathlib_cache(
+        report["mathlib_cache"] = get_mathlib_cache(
             source,
             checkout=checkout,
             base_env=env,

@@ -69,6 +69,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
+        self.assertTrue(verifier.mathlib_cache_availability("\rDownloaded: 42 file(s)"))
+        self.assertFalse(verifier.mathlib_cache_availability(
+            "Downloaded: 0 file(s)\nWarning: some files were not found in the cache."
+        ))
+        self.assertFalse(verifier.mathlib_cache_availability(
+            "Downloaded: 17 file(s)\nWarning: some files were not found in the cache."
+        ))
+        self.assertTrue(verifier.mathlib_cache_availability("No files to download"))
+        self.assertIsNone(verifier.mathlib_cache_availability("older client output"))
+
     def test_manifest_packages_directory_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             ancestor = Path(directory)
