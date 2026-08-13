@@ -1440,7 +1440,12 @@ def download_mathlib_cache(
     curl: Path,
     env_tool: Path,
 ) -> tuple[int, int]:
-    """Fetch fixed-host opaque cache bytes without executing source-derived code."""
+    """Fetch any available fixed-host cache bytes without requiring a cache hit.
+
+    Cache archives are an optimization.  A newly released Lean or Mathlib
+    revision may legitimately have no published archives yet; the confined
+    build below can compile the required target from source in that case.
+    """
     if cache_dir.is_symlink():
         cache_dir.unlink()
     elif cache_dir.exists():
@@ -1489,7 +1494,7 @@ def download_mathlib_cache(
         "--config",
         str(config),
     ]
-    proc = run(
+    run(
         systemd_command(
             command,
             cwd=trusted_work,
@@ -1519,9 +1524,6 @@ def download_mathlib_cache(
         total += size
         if total > MAX_CACHE_BYTES:
             raise VerificationError("Mathlib cache downloads exceed the byte cap")
-    if downloaded == 0:
-        detail = (proc.stderr or proc.stdout).strip()[-1000:]
-        raise VerificationError(f"no Mathlib cache archives were downloaded: {detail}")
     return downloaded, total
 
 
@@ -1559,18 +1561,19 @@ def hydrate_mathlib_cache(
     )
     cache_env = environment.copy()
     cache_env["MATHLIB_CACHE_DIR"] = str(cache_dir.resolve())
-    sandboxed_run(
-        [str(lake), "exe", "cache", "unpack"],
-        cwd=workspace,
-        environment=cache_env,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-        timeout=1800,
-        resource_properties=RESOURCE_PROPERTIES,
-    )
+    if downloaded:
+        sandboxed_run(
+            [str(lake), "exe", "cache", "unpack"],
+            cwd=workspace,
+            environment=cache_env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=1800,
+            resource_properties=RESOURCE_PROPERTIES,
+        )
     shutil.rmtree(cache_dir)
     return {"requested": len(hashes), "downloaded": downloaded, "bytes": total}
 

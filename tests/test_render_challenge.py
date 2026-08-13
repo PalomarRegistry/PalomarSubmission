@@ -13,8 +13,10 @@ from scripts.render_challenge import (
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
     artifact_manifest,
+    download_mathlib_cache,
     execute,
     extract_module_doc,
+    hydrate_mathlib_cache,
     merge_renderer_manifest,
     parsed_challenge_metadata,
     parser,
@@ -31,6 +33,86 @@ from scripts.verification_errors import VerificationError
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_missing_mathlib_cache_is_an_optimization_miss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+            with mock.patch(
+                "scripts.render_challenge.run",
+                return_value=subprocess.CompletedProcess([], 22, "", "404"),
+            ), mock.patch(
+                "scripts.render_challenge.systemd_command",
+                side_effect=lambda command, **_kwargs: command,
+            ):
+                downloaded, size = download_mathlib_cache(
+                    {"0123456789abcdef"},
+                    cache,
+                    trusted_work=root,
+                    environment=environment,
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                )
+        self.assertEqual((downloaded, size), (0, 0))
+
+    def test_partial_mathlib_cache_is_used_and_the_build_may_fill_the_rest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+
+            def download(*_args, **_kwargs):
+                (cache / "0123456789abcdef.ltar").write_bytes(b"archive")
+                return subprocess.CompletedProcess([], 22, "", "one archive was missing")
+
+            with mock.patch(
+                "scripts.render_challenge.run", side_effect=download
+            ), mock.patch(
+                "scripts.render_challenge.systemd_command",
+                side_effect=lambda command, **_kwargs: command,
+            ):
+                downloaded, size = download_mathlib_cache(
+                    {"0123456789abcdef", "fedcba9876543210"},
+                    cache,
+                    trusted_work=root,
+                    environment=environment,
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                )
+        self.assertEqual((downloaded, size), (1, len(b"archive")))
+
+    def test_zero_cache_downloads_skip_unpack_and_leave_source_build_to_follow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / ".lake" / "config" / "mathlib-cache"
+            cache.mkdir(parents=True)
+            with (
+                mock.patch(
+                    "scripts.render_challenge.discover_mathlib_cache_hashes",
+                    return_value=({"0123456789abcdef"}, cache),
+                ),
+                mock.patch(
+                    "scripts.render_challenge.download_mathlib_cache",
+                    return_value=(0, 0),
+                ),
+                mock.patch("scripts.render_challenge.sandboxed_run") as sandbox,
+            ):
+                result = hydrate_mathlib_cache(
+                    root,
+                    trusted_work=root,
+                    environment={"HOME": str(root), "TMPDIR": str(root)},
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    writable_directories=[],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                )
+        self.assertEqual(result, {"requested": 1, "downloaded": 0, "bytes": 0})
+        sandbox.assert_not_called()
+
     def test_renderer_confinement_cleans_probe_artifacts_on_runner_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
