@@ -1006,7 +1006,7 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@6349c1ecf34432083cb9da05c2248eeb22ac07e7.
+        # Exact snapshot of PalomarTemplate@dc76d6dc29f16e2d7fb3c078443eb1b28506bf85.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
