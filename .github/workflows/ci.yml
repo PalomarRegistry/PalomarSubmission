@@ -55,13 +55,13 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors \
             --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/palomar-template-formalization.yaml" \
-            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/e5d6243c3b6e1bbce415647a7cb2d4354d2570a3/formalization.yaml
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/6349c1ecf34432083cb9da05c2248eeb22ac07e7/formalization.yaml
           cmp tests/fixtures/palomar-template-formalization.yaml \
             "$RUNNER_TEMP/palomar-template-formalization.yaml"
           curl --fail --location --retry 3 --retry-all-errors \
             --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/palomar-template-comparator.json" \
-            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/e5d6243c3b6e1bbce415647a7cb2d4354d2570a3/comparator.json
+            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/6349c1ecf34432083cb9da05c2248eeb22ac07e7/comparator.json
           cmp tests/fixtures/palomar-template-comparator.json \
             "$RUNNER_TEMP/palomar-template-comparator.json"
           python - "$RUNNER_TEMP/palomar-template-comparator.json" <<'PY'
