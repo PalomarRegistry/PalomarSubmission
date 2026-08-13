@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "valid-template",
+      "files": {
+        "comparator": "palomar-template-comparator.json"
+      },
+      "formalization": "version: v0.4\nproject:\n  name: Example\n  authors: [Example Author]\n  license: MIT\n  responsible_maintainers: [Example Maintainer]\nclassification:\n  arxiv: [math.LO]\n  msc2020: [03B35]\nsources:\n  - title: Original result\n    type: original-proof\n    relationship: other\nautomation:\n  methods:\n    - method: manual\nreview:\n  status: self-assessed\n",
+      "toolchain": "leanprover/lean4:v99.0.0",
+      "expected_codes": []
+    },
+    {
+      "id": "duplicate-yaml-key",
+      "formalization": "project:\n  name: First\n  name: Second\n",
+      "expected_codes": ["formalization.invalid_yaml"]
+    },
+    {
+      "id": "yaml-merge-key",
+      "formalization": "defaults: &defaults\n  name: Example\nproject:\n  <<: *defaults\n",
+      "expected_codes": ["formalization.invalid_yaml"]
+    },
+    {
+      "id": "duplicate-json-key",
+      "comparator": "{\"challenge_module\":\"A\",\"challenge_module\":\"B\"}",
+      "expected_codes": ["comparator.duplicate_key"]
+    },
+    {
+      "id": "old-toolchain",
+      "toolchain": "leanprover/lean4:v4.27.0",
+      "expected_codes": ["toolchain.unsupported"]
+    },
+    {
+      "id": "minimum-release-candidate",
+      "toolchain": "leanprover/lean4:v4.28.0-rc1",
+      "expected_codes": ["toolchain.unsupported"]
+    },
+    {
+      "id": "newer-release-candidate",
+      "toolchain": "leanprover/lean4:v4.29.0-rc1",
+      "expected_codes": []
+    },
+    {
+      "id": "malformed-toolchain",
+      "toolchain": "leanprover/lean4:nightly",
+      "expected_codes": ["toolchain.invalid"]
+    }
+  ]
+}

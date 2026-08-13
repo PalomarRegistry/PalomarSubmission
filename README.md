@@ -40,6 +40,16 @@ next action, retryability, optional location, and—only for fields in
 [`formalization-profile.json`](formalization-profile.json)—whether a constrained
 metadata repair may be offered.
 
+Every report also labels its broad `phase` as `preparation` or `verification`.
+That producer-owned classification lets downstream services keep preparation
+failures actionable even when they are discovered during a full run.
+[`browser-preflight-policy.json`](browser-preflight-policy.json) publishes the
+bounded subset of preparation rules that the submission page can repeat at an
+exact commit. It is advisory only: the workflow remains authoritative and
+repeats every check after submission. Consumers must fail open when the policy
+is unavailable or incompatible, and compare its complete contents before using
+a browser result to ask for confirmation.
+
 Formalization profile 2 reports every missing or invalid mechanically required
 metadata field separately and includes only safely reusable values from a
 recognized older shape. That lets the submission site explain and collect the

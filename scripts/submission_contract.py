@@ -140,7 +140,10 @@ def _construct_unique_mapping(
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         if key_node.tag == "tag:yaml.org,2002:merge":
-            raise VerificationError("formalization.yaml must not use YAML merge keys")
+            raise VerificationError(
+                "formalization.yaml must not use YAML merge keys",
+                code="formalization.invalid_yaml",
+            )
         key = loader.construct_object(key_node, deep=deep)
         try:
             duplicate = key in mapping
@@ -150,7 +153,8 @@ def _construct_unique_mapping(
             ) from error
         if duplicate:
             raise VerificationError(
-                f"formalization.yaml contains a duplicate key: {key!r}"
+                f"formalization.yaml contains a duplicate key: {key!r}",
+                code="formalization.invalid_yaml",
             )
         mapping[key] = loader.construct_object(value_node, deep=deep)
     return mapping

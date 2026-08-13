@@ -42,6 +42,13 @@ MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
+COMPARATOR_REQUIRED_KEYS = {
+    "challenge_module",
+    "solution_module",
+    "theorem_names",
+    "permitted_axioms",
+}
+COMPARATOR_ALLOWED_KEYS = COMPARATOR_REQUIRED_KEYS | {"definition_names", "enable_nanoda"}
 COMPILED_ARTIFACT_SUFFIXES = {
     ".a",
     ".bc",
@@ -58,16 +65,21 @@ COMPILED_ARTIFACT_SUFFIXES = {
 # release they lead to, so v4.31.0-rc2 < v4.31.0, and anything that does not
 # parse is refused rather than guessed at.
 TOOLCHAIN_RE = re.compile(
-    r"^leanprover/lean4:v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
-    r"(?:-rc(?P<rc>\d+))?$"
+    r"^leanprover/lean4:v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
+    r"(?:-rc(?P<rc>[0-9]+))?$"
 )
-VERSION_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:-rc(?P<rc>\d+))?$")
+VERSION_RE = re.compile(
+    r"^v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
+    r"(?:-rc(?P<rc>[0-9]+))?$"
+)
 
 
 def parse_lean_version(value: str, pattern: re.Pattern[str]) -> tuple[int, int, int, int, int]:
     match = pattern.fullmatch(value.strip())
     if not match:
-        raise VerificationError(f"unsupported Lean toolchain: {value!r}")
+        raise VerificationError(
+            f"unsupported Lean toolchain: {value!r}", code="toolchain.invalid"
+        )
     rc = match.group("rc")
     # The fourth element orders a release candidate before its release.
     return (
@@ -119,7 +131,8 @@ def supported_toolchain(toolchain: str) -> str:
         )
     if parse_lean_version(toolchain, TOOLCHAIN_RE) < parse_lean_version(minimum, VERSION_RE):
         raise VerificationError(
-            f"Lean toolchain {toolchain} is older than the minimum Palomar supports ({minimum})"
+            f"Lean toolchain {toolchain} is older than the minimum Palomar supports ({minimum})",
+            code="toolchain.unsupported",
         )
     return toolchain_release_tag(toolchain)
 
@@ -837,7 +850,8 @@ def unique_comparator_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result[key] = value
     if duplicates:
         raise VerificationError(
-            f"Comparator configuration has duplicate keys: {', '.join(sorted(duplicates))}"
+            f"Comparator configuration has duplicate keys: {', '.join(sorted(duplicates))}",
+            code="comparator.duplicate_key",
         )
     return result
 
@@ -846,7 +860,10 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise VerificationError("Comparator configuration is not a regular file")
     if path.stat().st_size > MAX_CONFIGURATION_BYTES:
-        raise VerificationError("Comparator configuration exceeds the 1 MiB hard cap")
+        raise VerificationError(
+            "Comparator configuration exceeds the 1 MiB hard cap",
+            code="comparator.too_large",
+        )
     try:
         config = json.loads(
             path.read_text(encoding="utf-8"), object_pairs_hook=unique_comparator_object
@@ -857,23 +874,22 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         ) from error
     if not isinstance(config, dict):
         raise VerificationError("Comparator configuration must contain one JSON object")
-    required = {
-        "challenge_module",
-        "solution_module",
-        "theorem_names",
-        "permitted_axioms",
-    }
-    missing = required - config.keys()
+    missing = COMPARATOR_REQUIRED_KEYS - config.keys()
     if missing:
-        raise VerificationError(f"comparator.json missing: {', '.join(sorted(missing))}")
+        raise VerificationError(
+            f"comparator.json missing: {', '.join(sorted(missing))}",
+            code="comparator.missing_key",
+        )
     # Comparator exposes this switch for other callers, but it is not an
     # authoring requirement here. Palomar always enables the independent
     # replay in its own protected copy below, regardless of what a repository
     # says or whether it carries the compatibility field at all.
-    allowed = required | {"definition_names", "enable_nanoda"}
-    unknown = config.keys() - allowed
+    unknown = config.keys() - COMPARATOR_ALLOWED_KEYS
     if unknown:
-        raise VerificationError(f"comparator.json has unknown keys: {', '.join(sorted(unknown))}")
+        raise VerificationError(
+            f"comparator.json has unknown keys: {', '.join(sorted(unknown))}",
+            code="comparator.unknown_key",
+        )
     module_source_suffix(config["challenge_module"])
     module_source_suffix(config["solution_module"])
     if config["challenge_module"] == config["solution_module"]:
@@ -886,7 +902,10 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         raise VerificationError("comparator declaration names must be nonempty strings")
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
-        raise VerificationError("comparator permitted_axioms exceed Palomar's standard allowlist")
+        raise VerificationError(
+            "comparator permitted_axioms exceed Palomar's standard allowlist",
+            code="comparator.invalid_axioms",
+        )
     return config
 
 
@@ -914,6 +933,7 @@ def prepare(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "status": "error",
         "stage": "intake",
+        "phase": "preparation",
         "checked_at": now(),
         "errors": [],
         "warnings": [],
@@ -3301,6 +3321,7 @@ def execute(args: argparse.Namespace) -> int:
         {
             "status": "error",
             "stage": "setup",
+            "phase": "verification",
             "comparator_commit": args.comparator_commit,
             "landrun_commit": args.landrun_commit,
             "nanoda_commit": args.nanoda_commit,
