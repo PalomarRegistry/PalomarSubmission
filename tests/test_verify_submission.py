@@ -941,7 +941,7 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
             path = Path(directory) / "formalization.yaml"
             path.write_text(
                 """\
-version: v0.3
+version: v0.4
 project:
   name: Example result
   authors: [Ada Lovelace]
@@ -1006,16 +1006,17 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@e5d6243c3b6e1bbce415647a7cb2d4354d2570a3.
+        # Exact snapshot of PalomarTemplate@dc76d6dc29f16e2d7fb3c078443eb1b28506bf85.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "bbe923c5e362373bb4c79db46b4ba1a9cb00d611f8f5e03b3a619b658ed3860c",
+            "4583bed61e02d0b4f76bb77511c3b6989e41a0cbdcafc8776109845e7f611395",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
+        self.assertEqual(template["version"], "v0.4")
         self.assertNotIn("repository", template)
         self.assertEqual(
             template["sources"][0]["type"],

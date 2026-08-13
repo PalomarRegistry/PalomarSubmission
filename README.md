@@ -106,7 +106,8 @@ The licence filename is case-insensitive and may instead use `LICENCE`,
 nonempty UTF-8 text, match one standard SPDX licence mechanically, and agree
 exactly with the SPDX identifier in `project.license`.
 
-`formalization.yaml` must be valid YAML with one top-level mapping and nonempty
+Current metadata should declare `version: v0.4`; an omitted version follows the
+upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
 project identity, authorship, license, classification, automation-method, and
 review-status fields. Classification requires one or two official arXiv subject
 classes and between one and eight distinct MSC2020 codes. The current provenance
