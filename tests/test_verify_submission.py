@@ -491,6 +491,7 @@ class VerifySubmissionTests(unittest.TestCase):
 
                 report = json.loads(report_path.read_text())
                 self.assertEqual(report["status"], "error")
+                self.assertEqual(report["phase"], "verification")
                 self.assertIn(expected, report["errors"][0])
 
     def test_expired_job_deadline_is_reported_and_restored(self):
@@ -528,6 +529,7 @@ class VerifySubmissionTests(unittest.TestCase):
             report = json.loads(report_path.read_text())
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["stage"], "resource-exhausted")
+            self.assertEqual(report["phase"], "verification")
             self.assertEqual(report["error_kind"], "infrastructure/resource-exhausted")
             self.assertTrue(report["retryable"])
             self.assertIn("retry on a longer-running worker", report["errors"][0])
@@ -1139,6 +1141,7 @@ review:
 
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "pending", report["errors"])
+            self.assertEqual(report["phase"], "preparation")
             self.assertEqual(report["schema_version"], 1)
             self.assertEqual(report["warnings"], [])
             self.assertEqual(

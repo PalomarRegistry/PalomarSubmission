@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "formalization_profile_version": 2,
+  "limits": {
+    "source_bytes": 524288000,
+    "configuration_bytes": 1048576,
+    "formalization_bytes": 262144
+  },
+  "toolchain": {
+    "pattern": "^leanprover/lean4:v([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-rc([0-9]+))?$",
+    "minimum": "v4.28.0",
+    "normalization": "strip",
+    "prerelease_ordering": "rc-before-release"
+  },
+  "formalization": {
+    "repository_roles": [
+      "substantive-development",
+      "thin-wrapper"
+    ],
+    "source_types": [
+      "book",
+      "folklore",
+      "original-proof",
+      "other",
+      "paper",
+      "web discussion"
+    ],
+    "source_relationships": [
+      "adapts",
+      "background",
+      "formalizes",
+      "independently-proves",
+      "other"
+    ],
+    "source_endorsements": [
+      "declined",
+      "endorsed",
+      "n/a",
+      "no-response",
+      "not-contacted",
+      "participated"
+    ],
+    "related_relationships": [
+      "adapts",
+      "builds-on",
+      "independent",
+      "other",
+      "supersedes"
+    ],
+    "classification_cardinality": {
+      "arxiv": [1, 2],
+      "msc2020": [1, 8]
+    }
+  },
+  "comparator": {
+    "required_keys": [
+      "challenge_module",
+      "permitted_axioms",
+      "solution_module",
+      "theorem_names"
+    ],
+    "allowed_keys": [
+      "challenge_module",
+      "definition_names",
+      "enable_nanoda",
+      "permitted_axioms",
+      "solution_module",
+      "theorem_names"
+    ],
+    "standard_axioms": [
+      "Classical.choice",
+      "Quot.sound",
+      "propext"
+    ]
+  },
+  "deferred_checks": [
+    "classification-taxonomies",
+    "git-attributes-lfs",
+    "lakefile-toml",
+    "licensee",
+    "release-tag",
+    "substantive-repository",
+    "trusted-hashes"
+  ]
+}
