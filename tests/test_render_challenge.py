@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import html
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,31 +32,70 @@ from scripts.render_challenge import (
 from scripts.render_report import AcceptedRenderPaths
 from scripts.verification_errors import VerificationError
 
+# Inline style values and whether the sanitizers are meant to keep them. Both
+# sanitizers see the same list, because a page is only as sanitized as the
+# weaker of the two passes: the static pass writes the file, the browser pass
+# reruns over it and over everything the page renders from Markdown later.
+INLINE_STYLE_CASES = (
+    ("--indent: 4", True),
+    ("--indent:12;", True),
+    ("\t--indent: 0 ;\n", True),
+    ("position: fixed; inset: 0; background: #fff", False),
+    ("--indent: 4; position: fixed", False),
+    ("--indent: 100", False),
+    ("--indent: 12345", False),
+    # `\s` covers U+FEFF in JavaScript and U+0085 and U+001C-1F in Python, so a
+    # pattern written with it lets the two passes disagree about these.
+    ("\ufeff--indent: 4", False),
+    ("\x85--indent: 4", False),
+    ("\x1c--indent: 4", False),
+    # A CSS escape the browser reads as `--indent`, and the property name in a
+    # case the custom property does not answer to.
+    ("--\\69 ndent: 4", False),
+    ("--INDENT: 4", False),
+    ("", False),
+)
+
+# Element tag names as the DOM reports them, and whether the browser sanitizer
+# is meant to remove the element. SVG and MathML keep the case they were
+# written in rather than being folded to upper case like HTML.
+RUNTIME_SANITIZER_ELEMENT_CASES = (
+    ("svg", True),
+    ("math", True),
+    ("SCRIPT", True),
+    ("IFRAME", True),
+    ("DIV", False),
+)
+
 # Enough of a document for the shipped browser sanitizer to walk: it asks a root
 # for its elements, and each element for its tag name and its attributes. The
-# probe prints the inline styles that survived, in element order.
-RUNTIME_SANITIZER_STYLE_PROBE = r"""
-const styles = [
-  "--indent: 4",
-  "--indent: 12;",
-  "position: fixed; inset: 0; background: #fff",
-  "--indent: 4; position: fixed",
-  "",
-];
-const elements = styles.map((value) => ({
-  tagName: "DIV",
-  attrs: [{name: "class", value: "md-text"}, {name: "style", value}],
+# probe reports which inline styles and which elements survived. `styles` and
+# `tags` are supplied by the test, so both sanitizers face the same cases.
+RUNTIME_SANITIZER_PROBE = r"""
+const element = (tagName, attrs) => ({
+  tagName,
+  removed: false,
+  attrs: attrs.map(([name, value]) => ({name, value})),
   get attributes() { return this.attrs; },
   removeAttribute(name) {
     this.attrs = this.attrs.filter(
       (entry) => entry.name.toLowerCase() !== name.toLowerCase()
     );
   },
-  remove() { this.attrs = []; },
-}));
+  remove() { this.removed = true; },
+});
+// Half the cases spell the attribute name in upper case: an attribute name is
+// not case sensitive, and the sanitizer has to fold it before matching.
+const styled = styles.map((value, index) =>
+  element("DIV", [["class", "md-text"], [index % 2 ? "STYLE" : "style", value]]));
+const tagged = tags.map((tagName) => element(tagName, [["class", "md-text"]]));
+const elements = styled.concat(tagged);
 window.palomarSanitize({querySelectorAll: () => elements});
-console.log(JSON.stringify(elements.map((element) =>
-  element.attrs.filter((entry) => entry.name === "style").map((entry) => entry.value))));
+console.log(JSON.stringify({
+  styles: styled.map((subject) =>
+    subject.attrs.some((entry) => entry.name.toLowerCase() === "style")),
+  removed: tagged.map((subject) => subject.removed),
+}));
 """
 
 
@@ -711,7 +751,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "edd9ce42204f51bce4ccc4531b3b80a57e1506b153a7f3bff6119526aeae793d",
+            "6686ea33086a48b4d9b1897cb3a002cd17531cfd7c4ae613ea076d363a532b5b",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
@@ -865,7 +905,7 @@ end Audit.Task
     def test_static_html_rewrites_namespaced_urls_and_rejects_incomplete_markup(self):
         html_text = (
             '<html><head><base href="../"></head><body>'
-            '<svg><a xlink:href="javascript:bad">bad</a></svg></body></html>'
+            '<a xlink:href="javascript:bad">bad</a></body></html>'
         )
         sanitized = static_html_sanitize(
             html_text, "../palomar-sanitize.js", "../palomar-verso.js"
@@ -898,24 +938,56 @@ end Audit.Task
         self.assertIn("one only once target action ping", sanitized)
 
     def test_static_html_keeps_only_the_verso_indent_inline_style(self):
+        body = "".join(
+            f'<div data-case="{index}" style="{html.escape(value, quote=True)}">x</div>'
+            for index, (value, _keep) in enumerate(INLINE_STYLE_CASES)
+        )
+        sanitized = static_html_sanitize(
+            f'<html><head><base href="../"></head><body>{body}'
+            '<div id="bare" style>x</div>'
+            '<div id="shouted" STYLE="position: fixed">x</div>'
+            "</body></html>",
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+        )
+        for index, (value, keep) in enumerate(INLINE_STYLE_CASES):
+            element = re.search(rf'<div data-case="{index}"([^>]*)>', sanitized)
+            self.assertIsNotNone(element, f"case {index} lost its element")
+            attributes = element.group(1)
+            self.assertEqual("style=" in attributes, keep, f"case {index}: {value!r}")
+            if keep:
+                self.assertIn(f'style="{html.escape(value, quote=True)}"', attributes)
+        self.assertIn('<div id="bare">', sanitized)
+        self.assertIn('<div id="shouted">', sanitized)
+        self.assertNotIn("position", sanitized)
+
+    def test_static_html_drops_svg_and_mathml_subtrees(self):
         html_text = (
             '<html><head><base href="../"></head><body>'
-            '<div class="md-text" style="--indent: 4">documentation</div>'
-            '<div style="position: fixed; inset: 0; background: #fff">cover</div>'
-            '<div style="--indent: 4; position: fixed">both</div>'
-            '<div style>bare</div>'
-            '<div style="--INDENT: 4">other property</div>'
-            "</body></html>"
+            '<svg width="1" height="1" overflow="visible">'
+            '<rect x="-10000" y="-10000" width="20000" height="20000" fill="white"'
+            ' pointer-events="all"/></svg>'
+            "<svg><svg></svg><circle r=\"9999\"/></svg>"
+            "<math><mtext>covered</mtext></math>"
+            "<p>kept</p></body></html>"
         )
         sanitized = static_html_sanitize(
             html_text, "../palomar-sanitize.js", "../palomar-verso.js"
         )
-        self.assertIn('<div class="md-text" style="--indent: 4">', sanitized)
-        self.assertEqual(sanitized.count('style="--indent'), 1)
-        self.assertNotIn("position", sanitized)
-        self.assertNotIn("--INDENT", sanitized)
+        # The renderer's own stylesheet mentions some of these words, so read
+        # only the part of the document the submission wrote.
+        body = sanitized[sanitized.index("<body") :]
+        self.assertIn("<p>kept</p>", body)
+        for leaked in ("svg", "rect", "circle", "math", "mtext", "pointer-events"):
+            self.assertNotIn(leaked, body, f"{leaked} survived sanitizing")
+        with self.assertRaisesRegex(VerificationError, "foreign subtree"):
+            static_html_sanitize(
+                '<html><head><base href="../"></head><body><svg>',
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+            )
 
-    def test_runtime_sanitizer_keeps_only_the_verso_indent_inline_style(self):
+    def test_runtime_sanitizer_matches_the_static_style_and_element_rules(self):
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is needed to run the browser sanitizer")
@@ -924,7 +996,9 @@ end Audit.Task
                 "globalThis.window = {};",
                 "globalThis.document = {addEventListener() {}};",
                 RUNTIME_SANITIZER,
-                RUNTIME_SANITIZER_STYLE_PROBE,
+                f"const styles = {json.dumps([value for value, _ in INLINE_STYLE_CASES])};",
+                f"const tags = {json.dumps([tag for tag, _ in RUNTIME_SANITIZER_ELEMENT_CASES])};",
+                RUNTIME_SANITIZER_PROBE,
             ]
         )
         result = subprocess.run(
@@ -932,7 +1006,10 @@ end Audit.Task
         )
         self.assertEqual(
             json.loads(result.stdout),
-            [["--indent: 4"], ["--indent: 12;"], [], [], []],
+            {
+                "styles": [keep for _value, keep in INLINE_STYLE_CASES],
+                "removed": [drop for _tag, drop in RUNTIME_SANITIZER_ELEMENT_CASES],
+            },
         )
 
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):

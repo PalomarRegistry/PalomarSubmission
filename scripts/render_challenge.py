@@ -108,17 +108,24 @@ ALLOWED_EXTENSIONS = {
 
 RUNTIME_SANITIZER = r'''(() => {
   "use strict";
+  // SVG and MathML carry their own presentation and geometry attributes, which
+  // are a second way to draw over the page. The literate-code genre emits
+  // neither, so both subtrees go rather than being filtered attribute by
+  // attribute. Foreign tag names keep their own case, so match on the folded
+  // one.
   const blocked = new Set([
     "APPLET", "BASE", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
-    "META", "OBJECT", "SCRIPT"
+    "MATH", "META", "OBJECT", "SCRIPT", "SVG"
   ]);
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
   // Verso's literate-code output needs one inline declaration, the indent
-  // custom property its stylesheet reads. Any other one is enough to
-  // reposition or repaint a page served with `style-src 'unsafe-inline'`.
-  const allowedStyle = /^\s*--indent:\s*[0-9]{1,4}\s*;?\s*$/;
+  // custom property its stylesheet reads, whose value is the source column the
+  // documentation starts at. Any other one is enough to reposition or repaint
+  // a page served with `style-src 'unsafe-inline'`. The whitespace is spelled
+  // out because `\s` does not mean the same thing here as it does in Python.
+  const allowedStyle = /^[ \t\r\n\f]*--indent:[ \t\r\n\f]*[0-9]{1,2}[ \t\r\n\f]*;?[ \t\r\n\f]*$/;
 
   function safeUrl(value, attribute) {
     const trimmed = value.trim();
@@ -138,7 +145,7 @@ RUNTIME_SANITIZER = r'''(() => {
 
   function sanitize(root) {
     for (const element of Array.from(root.querySelectorAll("*"))) {
-      if (blocked.has(element.tagName)) {
+      if (blocked.has(element.tagName.toUpperCase())) {
         element.remove();
         continue;
       }
@@ -960,14 +967,27 @@ class _StaticHTMLSanitizer(HTMLParser):
         "target",
     }
 
+    # SVG and MathML give presentation and geometry their own attributes, so a
+    # single `<rect>` covers the page as effectively as a positioned `style`
+    # does. The literate-code genre Verso builds here emits neither element
+    # (its only SVG is the manual genre's diagram files, and `latexMath`
+    # renders to nothing), so both subtrees are dropped whole.
+    _DROPPED_ELEMENTS = {"math", "svg"}
+
     # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
     # submitter reaches is a free hand over the rendered page: fixed position,
     # colour and size are enough to cover the surrounding text with a
     # convincing imitation of it. Verso's literate-code output needs exactly
     # one declaration, since `code.css` indents prose with
     # `calc(var(--indent, 0) * 1ch)`, so the attribute is filtered down to that
-    # custom property with an integer value rather than dropped outright.
-    _ALLOWED_STYLE = re.compile(r"\s*--indent:\s*[0-9]{1,4}\s*;?\s*")
+    # custom property rather than dropped outright. Its value is the source
+    # column the documentation starts at, which two digits already covers with
+    # room to spare, and an unbounded one would be a shove off the page. The
+    # whitespace is spelled out because `\s` does not mean the same thing in
+    # the browser sanitizer as it does here.
+    _ALLOWED_STYLE = re.compile(
+        r"[ \t\r\n\f]*--indent:[ \t\r\n\f]*[0-9]{1,2}[ \t\r\n\f]*;?[ \t\r\n\f]*"
+    )
 
     def __init__(self, declarations: list[str]) -> None:
         super().__init__(convert_charrefs=False)
@@ -976,6 +996,11 @@ class _StaticHTMLSanitizer(HTMLParser):
         self.declarations = set(declarations)
         self.found_declarations: set[str] = set()
         self.script_depth = 0
+        self.dropped_depth = 0
+
+    @property
+    def _suppressed(self) -> bool:
+        return bool(self.script_depth or self.dropped_depth)
 
     @staticmethod
     def _rewrite_url(attribute: str, raw: str) -> str:
@@ -999,7 +1024,15 @@ class _StaticHTMLSanitizer(HTMLParser):
         self, tag: str, attrs: list[tuple[str, str | None]], *, closed: bool
     ) -> None:
         tag = tag.lower()
+        if self.dropped_depth:
+            if tag in self._DROPPED_ELEMENTS and not closed:
+                self.dropped_depth += 1
+            return
         if self.script_depth:
+            return
+        if tag in self._DROPPED_ELEMENTS:
+            if not closed:
+                self.dropped_depth = 1
             return
         if tag == "script":
             if not closed:
@@ -1047,6 +1080,10 @@ class _StaticHTMLSanitizer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if self.dropped_depth:
+            if tag in self._DROPPED_ELEMENTS:
+                self.dropped_depth -= 1
+            return
         if self.script_depth:
             if tag == "script":
                 self.script_depth = 0
@@ -1055,27 +1092,27 @@ class _StaticHTMLSanitizer(HTMLParser):
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(data)
 
     def handle_entityref(self, name: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<!--{data}-->")
 
     def handle_decl(self, decl: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<!{decl}>")
 
     def handle_pi(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<?{data}>")
 
 
@@ -1092,6 +1129,8 @@ def static_html_sanitize(
     if sanitizer.rawdata:
         raise VerificationError("generated HTML ends with incomplete markup")
     sanitizer.close()
+    if sanitizer.dropped_depth:
+        raise VerificationError("generated HTML leaves a foreign subtree unclosed")
     if sanitizer.bases != [expected_base]:
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
