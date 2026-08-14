@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import html
 import json
+import pathlib
 import re
 import shutil
 import subprocess
@@ -1171,7 +1172,7 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
         self.assertIn("html { height: auto !important", sanitized)
         self.assertIn("overflow: visible !important", sanitized)
         self.assertIn("white-space: nowrap", sanitized)
-        self.assertIn("background: #fff !important", sanitized)
+        self.assertIn("background: var(--palomar-panel) !important", sanitized)
         self.assertIn("palomar-declaration-style", sanitized)
 
     def test_declaration_metadata_is_injected_after_url_rewriting(self):
@@ -1372,6 +1373,262 @@ class CallSignatureTests(unittest.TestCase):
                 )
             checked += 1
         self.assertGreater(checked, 10, "no cross-module calls were checked")
+
+
+def _injected_surface_style() -> str:
+    """The stylesheet Palomar adds to a rendered Challenge, as it is shipped."""
+    sanitized = static_html_sanitize(
+        '<!doctype html><html><head><base href="../"></head><body></body></html>',
+        "../palomar-sanitize.js",
+        "../palomar-verso.js",
+    )
+    match = re.search(
+        r'<style id="palomar-declaration-style">(.*?)</style>', sanitized, re.DOTALL
+    )
+    if match is None:
+        raise AssertionError("the sanitized page carries no declaration stylesheet")
+    return match.group(1)
+
+
+def _blocks(css: str) -> list[str]:
+    """The bodies of the innermost braced blocks, comments already gone."""
+    return re.findall(r"\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL))
+
+
+def _declarations(body: str) -> list[tuple[str, str]]:
+    pairs = []
+    for chunk in body.split(";"):
+        name, separator, value = chunk.partition(":")
+        if separator:
+            pairs.append((name.strip().lower(), value.strip()))
+    return pairs
+
+
+def _is_palette(body: str) -> bool:
+    """A block that only binds tokens, plus the `color-scheme` that opens the light one."""
+    pairs = _declarations(body)
+    return bool(pairs) and all(
+        name.startswith("--") or name == "color-scheme" for name, _ in pairs
+    )
+
+
+def _palettes(css: str) -> tuple[dict[str, str], dict[str, str]]:
+    """The light palette, and the dark block that overrides it. Tokens only."""
+    blocks = [
+        {name: value for name, value in _declarations(body) if name.startswith("--")}
+        for body in _blocks(css)
+        if _is_palette(body)
+    ]
+    if len(blocks) != 2:
+        raise AssertionError(f"expected a light and a dark palette, found {len(blocks)}")
+    return blocks[0], blocks[1]
+
+
+_COLOUR_KEYWORDS = (
+    "black|white|red|blue|green|gray|grey|silver|maroon|navy|orange|purple|yellow"
+)
+_NAMES_A_COLOUR = re.compile(
+    rf"#[0-9a-fA-F]{{3,8}}\b|\b(?:{_COLOUR_KEYWORDS})\b|\b(?:rgba?|hsla?)\("
+)
+_PAINTS = re.compile(
+    r"^(?:background|background-color|color|border|border-[a-z-]+|box-shadow|outline"
+    r"|outline-color|text-decoration-color|fill|stroke)$"
+)
+
+
+def _painting_selectors(css: str) -> set[str]:
+    """Every single selector in `css` that gives some element a literal colour.
+
+    Comma groups are split, because a group is answered one selector at a time.
+    """
+    found: set[str] = set()
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    for block in re.finditer(r"([^{}]*)\{([^{}]*)\}", stripped):
+        group = " ".join(block.group(1).split())
+        if not group or group.startswith("@"):
+            continue
+        for name, separator, value in (
+            chunk.partition(":") for chunk in block.group(2).split(";")
+        ):
+            if not separator or not _PAINTS.match(name.strip().lower()):
+                continue
+            if _NAMES_A_COLOUR.search(value):
+                found.update(part.strip() for part in group.split(",") if part.strip())
+                break
+    return found
+
+
+def _answered_selectors(css: str) -> set[str]:
+    """Every single selector the injected stylesheet writes a rule for."""
+    answered: set[str] = set()
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    for block in re.finditer(r"([^{}]*)\{([^{}]*)\}", stripped):
+        group = " ".join(block.group(1).split())
+        if not group or group.startswith("@"):
+            continue
+        answered.update(part.strip() for part in group.split(",") if part.strip())
+    return answered
+
+
+def _luminance(colour: str) -> float:
+    raw = colour.lstrip("#")
+    if len(raw) == 3:
+        raw = "".join(channel * 2 for channel in raw)
+    channels = [int(raw[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+    linear = [
+        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(one: str, other: str) -> float:
+    high, low = sorted((_luminance(one), _luminance(other)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+class RenderSurfaceAppearanceTests(unittest.TestCase):
+    """The framed render follows the browser's light and dark preference.
+
+    The frame is a separate document on a separate origin, so nothing hands it
+    a theme: it answers `prefers-color-scheme` itself, exactly as the page
+    around it does. What is checkable here is that the stylesheet Palomar
+    injects is in a position to answer, that no rule in it quietly names a
+    light colour instead of spending a palette token, and that both answers are
+    readable. A published bundle is immutable, so a palette that goes out wrong
+    stays wrong for that record.
+    """
+
+    # Text, and the surfaces it is set on. WCAG AA for body text.
+    READABLE = (
+        ("--palomar-ink", "--palomar-paper"),
+        ("--palomar-ink", "--palomar-panel"),
+        ("--palomar-ink", "--palomar-raise"),
+        ("--palomar-ink", "--palomar-alarm-paper"),
+        ("--palomar-link", "--palomar-paper"),
+        # The selected node in Verso's module tree reverses the two.
+        ("--palomar-paper", "--palomar-link"),
+        ("--palomar-alarm", "--palomar-paper"),
+    )
+    # Indicators, and what they are drawn on. WCAG AA for non-text.
+    #
+    # `--palomar-info-paper` is here rather than in READABLE because it is a
+    # saturated fill Verso already used, and ink on it clears 3.74:1 in light.
+    # This change does not move a light value, so asserting 4.5 would be
+    # asserting a change that was deliberately not made.
+    #
+    # `--palomar-mark` and `--palomar-mark-on` are absent on purpose: they are
+    # the tactic-toggle pill, which Verso draws at 1.94:1 in light because a
+    # disclosure affordance that shouts drowns the code it sits in.
+    VISIBLE = (
+        ("--palomar-edge", "--palomar-paper"),
+        ("--palomar-edge", "--palomar-panel"),
+        ("--palomar-info", "--palomar-paper"),
+        ("--palomar-ink", "--palomar-info-paper"),
+    )
+    # Properties that put a colour on the page. `border` and `box-shadow` are
+    # shorthands that carry one.
+    COLOUR_PROPERTIES = frozenset(
+        {
+            "background",
+            "background-color",
+            "border",
+            "border-color",
+            "border-left-color",
+            "border-top-color",
+            "box-shadow",
+            "color",
+            "text-decoration-color",
+        }
+    )
+    # A colour property may decline to name a colour at all.
+    DEFERRED = frozenset({"inherit", "currentcolor", "transparent", "none", "unset"})
+
+    def test_the_surface_style_answers_the_browser_colour_preference(self):
+        style = _injected_surface_style()
+        self.assertIn("color-scheme: light dark", style)
+        self.assertIn("@media (prefers-color-scheme: dark)", style)
+        light, override = _palettes(style)
+        # A token bound in light and left out of dark is the whole bug this
+        # change fixes, one declaration at a time.
+        self.assertEqual(
+            sorted(light),
+            sorted(override),
+            "the dark palette must answer every token the light one binds",
+        )
+        self.assertEqual(
+            [],
+            [name for name, value in override.items() if light[name] == value],
+            "a dark token that repeats its light value says nothing",
+        )
+
+    def test_every_surface_colour_is_a_palette_token(self):
+        style = _injected_surface_style()
+        rules = [body for body in _blocks(style) if not _is_palette(body)]
+        for body in rules:
+            for name, value in _declarations(body):
+                if name.startswith("--") or name not in self.COLOUR_PROPERTIES:
+                    continue
+                cleaned = value.replace("!important", "").strip().lower()
+                self.assertTrue(
+                    "var(--palomar-" in cleaned or cleaned in self.DEFERRED,
+                    f"{name}: {value} names a colour instead of spending a token",
+                )
+        outside = "".join(rules)
+        self.assertNotRegex(outside, r"#[0-9a-fA-F]{3,8}\b")
+        self.assertNotRegex(outside, r"\b(?:rgba?|hsla?)\(")
+
+    # Verso selectors that name a colour and are deliberately left as they are.
+    # Everything else it paints must be answered, or the frame keeps a light
+    # patch in dark mode that no palette test can see.
+    LEFT_TO_VERSO = {
+        # Tippy's script is dropped by `sanitize_bundle`, so nothing in a
+        # published bundle ever carries `data-theme`, and the popup a reader
+        # actually sees is Palomar's own `.palomar-hover`.
+        "tippy": "the Tippy runtime is not shipped, so no element matches",
+        # A half-opaque black scrim over the narrow-screen menu. Black at half
+        # opacity darkens either paper, which is what a scrim is for.
+        ".menu-toggle:checked + .hamburger + .layout::after": "a scrim reads on both",
+    }
+
+    def test_every_verso_colour_selector_is_answered_or_left_alone(self):
+        """Read Verso's stylesheets, not just ours.
+
+        A palette can be complete, internally consistent and still leave the
+        frame half light, because the rule that paints the light patch lives
+        upstream and no test that reads only Palomar's own block can see it.
+        This is the test that would have caught the tactic-label hover.
+        """
+        fixtures = pathlib.Path(__file__).parent / "fixtures" / "verso-render-css"
+        answered = _answered_selectors(_injected_surface_style())
+        unanswered = []
+        for stylesheet in sorted(fixtures.glob("*.css")):
+            for selector in _painting_selectors(stylesheet.read_text()):
+                if selector in answered or selector in self.LEFT_TO_VERSO:
+                    continue
+                if "tippy" in selector and "tippy" in self.LEFT_TO_VERSO:
+                    continue
+                unanswered.append(f"{stylesheet.name}: {selector}")
+        self.assertEqual(
+            [],
+            sorted(unanswered),
+            "Verso paints these and the injected stylesheet does not answer them; "
+            "either answer them or record why they are left alone",
+        )
+
+    def test_both_palettes_are_readable(self):
+        light, override = _palettes(_injected_surface_style())
+        for mode, palette in (("light", light), ("dark", {**light, **override})):
+            for ink, paper in self.READABLE:
+                ratio = _contrast(palette[ink], palette[paper])
+                self.assertGreaterEqual(
+                    ratio, 4.5, f"{mode}: {ink} on {paper} is only {ratio:.2f}:1"
+                )
+            for edge, paper in self.VISIBLE:
+                ratio = _contrast(palette[edge], palette[paper])
+                self.assertGreaterEqual(
+                    ratio, 3.0, f"{mode}: {edge} on {paper} is only {ratio:.2f}:1"
+                )
 
 
 if __name__ == "__main__":

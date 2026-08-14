@@ -67,12 +67,17 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
+# Every dispatch input is visible on the run page of this public repository, so
+# a submitter's private prose stays private only by the server never sending it.
+# `context` carried the submission form's free-text notes until the server
+# stopped sending it. Dropping the key here cannot unmake a disclosure that has
+# already happened by the time this runs; what it does is turn a stale or
+# regressed caller into a failed run rather than a silently accepted field.
 OPTIONAL_FIELDS = frozenset(
     {
         "existing_id",
         "authorization_relationship",
         "authorization_evidence",
-        "context",
         "project_path",
         "comparator_config_path",
         "formalization_metadata_path",
