@@ -115,6 +115,10 @@ RUNTIME_SANITIZER = r'''(() => {
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
+  // Verso's literate-code output needs one inline declaration, the indent
+  // custom property its stylesheet reads. Any other one is enough to
+  // reposition or repaint a page served with `style-src 'unsafe-inline'`.
+  const allowedStyle = /^\s*--indent:\s*[0-9]{1,4}\s*;?\s*$/;
 
   function safeUrl(value, attribute) {
     const trimmed = value.trim();
@@ -145,6 +149,8 @@ RUNTIME_SANITIZER = r'''(() => {
         } else if (name === "src" && !safeUrl(attribute.value, name)) {
           element.removeAttribute(attribute.name);
         } else if (name === "href" && !safeUrl(attribute.value, name)) {
+          element.removeAttribute(attribute.name);
+        } else if (name === "style" && !allowedStyle.test(attribute.value)) {
           element.removeAttribute(attribute.name);
         } else if (name === "target") {
           element.removeAttribute(attribute.name);
@@ -954,6 +960,15 @@ class _StaticHTMLSanitizer(HTMLParser):
         "target",
     }
 
+    # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
+    # submitter reaches is a free hand over the rendered page: fixed position,
+    # colour and size are enough to cover the surrounding text with a
+    # convincing imitation of it. Verso's literate-code output needs exactly
+    # one declaration, since `code.css` indents prose with
+    # `calc(var(--indent, 0) * 1ch)`, so the attribute is filtered down to that
+    # custom property with an integer value rather than dropped outright.
+    _ALLOWED_STYLE = re.compile(r"\s*--indent:\s*[0-9]{1,4}\s*;?\s*")
+
     def __init__(self, declarations: list[str]) -> None:
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
@@ -1009,6 +1024,10 @@ class _StaticHTMLSanitizer(HTMLParser):
         for name, value in attrs:
             name = name.lower()
             if name.startswith("on") or name in self._STRIPPED_ATTRIBUTES:
+                continue
+            if name == "style" and (
+                value is None or not self._ALLOWED_STYLE.fullmatch(value)
+            ):
                 continue
             if value is None:
                 rendered.append(name)

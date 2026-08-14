@@ -31,6 +31,33 @@ from scripts.render_challenge import (
 from scripts.render_report import AcceptedRenderPaths
 from scripts.verification_errors import VerificationError
 
+# Enough of a document for the shipped browser sanitizer to walk: it asks a root
+# for its elements, and each element for its tag name and its attributes. The
+# probe prints the inline styles that survived, in element order.
+RUNTIME_SANITIZER_STYLE_PROBE = r"""
+const styles = [
+  "--indent: 4",
+  "--indent: 12;",
+  "position: fixed; inset: 0; background: #fff",
+  "--indent: 4; position: fixed",
+  "",
+];
+const elements = styles.map((value) => ({
+  tagName: "DIV",
+  attrs: [{name: "class", value: "md-text"}, {name: "style", value}],
+  get attributes() { return this.attrs; },
+  removeAttribute(name) {
+    this.attrs = this.attrs.filter(
+      (entry) => entry.name.toLowerCase() !== name.toLowerCase()
+    );
+  },
+  remove() { this.attrs = []; },
+}));
+window.palomarSanitize({querySelectorAll: () => elements});
+console.log(JSON.stringify(elements.map((element) =>
+  element.attrs.filter((entry) => entry.name === "style").map((entry) => entry.value))));
+"""
+
 
 class RenderChallengeTests(unittest.TestCase):
     def test_missing_mathlib_cache_is_an_optimization_miss(self):
@@ -684,7 +711,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "d15fb1c3eca7a3eb32293cff66a913301c25fb03706004a0e27319b631c6ff60",
+            "edd9ce42204f51bce4ccc4531b3b80a57e1506b153a7f3bff6119526aeae793d",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
@@ -869,6 +896,44 @@ end Audit.Task
             html, "../palomar-sanitize.js", "../palomar-verso.js"
         )
         self.assertIn("one only once target action ping", sanitized)
+
+    def test_static_html_keeps_only_the_verso_indent_inline_style(self):
+        html_text = (
+            '<html><head><base href="../"></head><body>'
+            '<div class="md-text" style="--indent: 4">documentation</div>'
+            '<div style="position: fixed; inset: 0; background: #fff">cover</div>'
+            '<div style="--indent: 4; position: fixed">both</div>'
+            '<div style>bare</div>'
+            '<div style="--INDENT: 4">other property</div>'
+            "</body></html>"
+        )
+        sanitized = static_html_sanitize(
+            html_text, "../palomar-sanitize.js", "../palomar-verso.js"
+        )
+        self.assertIn('<div class="md-text" style="--indent: 4">', sanitized)
+        self.assertEqual(sanitized.count('style="--indent'), 1)
+        self.assertNotIn("position", sanitized)
+        self.assertNotIn("--INDENT", sanitized)
+
+    def test_runtime_sanitizer_keeps_only_the_verso_indent_inline_style(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is needed to run the browser sanitizer")
+        harness = "\n".join(
+            [
+                "globalThis.window = {};",
+                "globalThis.document = {addEventListener() {}};",
+                RUNTIME_SANITIZER,
+                RUNTIME_SANITIZER_STYLE_PROBE,
+            ]
+        )
+        result = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True, check=True
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [["--indent: 4"], ["--indent: 12;"], [], [], []],
+        )
 
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:
