@@ -54,7 +54,7 @@ from scripts.verify_submission import (  # noqa: E402
     systemd_command,
     tool_snapshot,
     tree_size,
-    verify_filesystem_confinement,
+    verify_sandbox_confinement,
     write_json,
 )
 
@@ -1983,8 +1983,18 @@ def execute(args: argparse.Namespace) -> int:
         tools = tool_snapshot(
             [landrun, renderer, lake, lean, python, printenv, touch, curl, git, env_tool]
         )
-        verify_filesystem_confinement(
-            work / "render-landrun-denial-probe",
+        # The render build is where untrusted compile-time Lean runs, so it
+        # gets the verifier's whole probe set rather than a write-only subset.
+        # Every phase Landrun confines here is network-disabled: the one
+        # network-enabled step is trusted `curl` fetching Mathlib cache
+        # archives, which runs outside Landrun and never loads submitted Lake
+        # configuration. Egress denial therefore holds for exactly the phases
+        # that follow this probe. No submitted Lean or Lake code has run yet.
+        verify_sandbox_confinement(
+            work / "render-landrun-write-denial-probe",
+            work / "render-landrun-read-denial-probe",
+            positive_read=render_workspace.challenge,
+            python=python,
             touch=touch,
             cwd=workspace,
             environment=env,

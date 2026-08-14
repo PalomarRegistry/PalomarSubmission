@@ -2430,6 +2430,31 @@ def verify_sandbox_confinement(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> None:
+    """Prove the composed outer boundary before untrusted code runs.
+
+    Positive controls: a write inside the first writable directory, a read of
+    ``positive_read``, and a nested Landrun domain. Negative controls: a write
+    outside the writable set, a write into each ``protected_write_directories``
+    entry, a read outside the read allowlist, a read of a live sibling
+    process's ``/proc`` environment, and an outbound TCP connection to a
+    listener the trusted parent has just accepted on.
+
+    The probes run under the same readable-path policy as the work they stand
+    for, so that what they demonstrate is a property of the policy actually
+    used. The filesystem assertions hold either way, since a readable path
+    grants no right to create or write; matching the real policy makes the
+    probes representative rather than merely sound. Every parameter is
+    required rather than defaulted, so that a later caller cannot quietly
+    probe a configuration nobody runs under.
+
+    Landrun is invoked with ``--best-effort``, which silently drops access
+    rights the running kernel's Landlock ABI does not support. These controls
+    are what makes that safe: a boundary degraded to the point of permitting a
+    denied read, write, or connection fails here, before any candidate Lean or
+    Lake configuration executes. Callers must therefore run this under the
+    same policy, and in the same network phase, as the work that follows.
+    """
+
     def detail(proc: subprocess.CompletedProcess[str]) -> str:
         message = (proc.stderr or proc.stdout).strip().replace("\n", " ")
         return f" (exit {proc.returncode}: {message[:500]})" if message else ""
@@ -2647,64 +2672,6 @@ def verify_sandbox_confinement(
         listener.close()
     if network.returncode == 0:
         raise VerificationError("normal sandbox phase unexpectedly reached the network")
-
-
-def verify_filesystem_confinement(
-    probe: Path,
-    *,
-    touch: Path,
-    cwd: Path,
-    environment: dict[str, str],
-    landrun: Path,
-    writable_directories: list[Path],
-    readable_paths: list[Path],
-    executable_paths: list[Path],
-    tools: dict[Path, str],
-) -> None:
-    """Exercise the renderer's narrower write-only confinement contract.
-
-    The probes run under the same readable-path policy as the work they stand
-    for, so that what they demonstrate is a property of the policy actually
-    used. Both assertions hold either way, since a readable path grants no
-    right to create or write; matching the real policy makes the probes
-    representative rather than sound. Required rather than defaulted, so that
-    a later caller cannot quietly probe a configuration nobody runs under.
-    """
-
-    def failure_detail(proc: subprocess.CompletedProcess[str]) -> str:
-        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
-        if len(detail) > 500:
-            detail = f"{detail[:497]}..."
-        suffix = f" (exit {proc.returncode}"
-        if detail:
-            suffix += f": {detail}"
-        return f"{suffix})"
-
-    result = _run_filesystem_confinement_probe(
-        probe,
-        existing_probe_error="filesystem confinement probe path already exists",
-        touch=touch,
-        cwd=cwd,
-        environment=environment,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        tools=tools,
-    )
-    if result.allowed.returncode or not result.allowed_created:
-        raise VerificationError(
-            "outer Landrun did not permit its writable directory"
-            + failure_detail(result.allowed)
-        )
-
-    if result.denied is None:
-        raise VerificationError("filesystem confinement probe omitted its negative control")
-    if result.denied_created or result.denied.returncode == 0:
-        raise VerificationError(
-            "outer Landrun filesystem policy was not enforced"
-            + failure_detail(result.denied)
-        )
 
 
 def materialize_packages(

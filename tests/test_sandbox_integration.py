@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.render_challenge import executable_paths as renderer_executable_paths
 from scripts.verify_submission import (
     compile_canonical_challenge,
     protected_lean_path,
@@ -83,6 +84,64 @@ class SandboxIntegrationTests(unittest.TestCase):
                 protected_write_directories=[frozen],
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
                 executable_paths=sorted(set(executable_paths)),
+                tools=tool_snapshot([python, landrun, touch]),
+            )
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LANDRUN"),
+        "set PALOMAR_TEST_LANDRUN to exercise the real Landrun/systemd boundary",
+    )
+    def test_real_renderer_policy_proves_the_same_controls(self):
+        # The render build runs untrusted compile-time Lean, so it is held to
+        # the verifier's controls. Its policy is not the verifier's: the read
+        # allowlist is the render workspace alone, with no certificate or
+        # name-service files, and the executable set comes from the renderer's
+        # own resolver. Probe that policy rather than a lookalike.
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            work = Path(directory).resolve()
+            workspace_checkout = work / "workspace"
+            workspace_checkout.mkdir()
+            challenge = workspace_checkout / "Challenge.lean"
+            challenge.write_text("theorem probe : True := by trivial\n")
+            build, config = remove_untrusted_lake_state(workspace_checkout)
+            home = config / "home"
+            tmp = config / "tmp"
+            home.mkdir()
+            tmp.mkdir()
+
+            python = Path(sys.executable).resolve(strict=True)
+            landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
+            touch_command = shutil.which("touch")
+            self.assertIsNotNone(touch_command)
+            touch = Path(touch_command).absolute()
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(home.resolve()),
+                    "TMPDIR": str(tmp.resolve()),
+                    "LEAN_ABORT_ON_PANIC": "1",
+                }
+            )
+            # Without a Lean toolchain the renderer's resolver still produces
+            # the shape that matters here: the interpreter prefix, the pinned
+            # programs, their linkage, and the immutable system directories.
+            toolchain_prefix = python.parent.parent
+            executable_paths = renderer_executable_paths(
+                toolchain_prefix, [landrun, python, touch]
+            )
+
+            verify_sandbox_confinement(
+                work / "render-landrun-write-denial-probe",
+                work / "render-landrun-read-denial-probe",
+                positive_read=challenge,
+                python=python,
+                touch=touch,
+                cwd=workspace_checkout,
+                environment=environment,
+                landrun=landrun,
+                writable_directories=[build, config],
+                readable_paths=[workspace_checkout.resolve()],
+                executable_paths=executable_paths,
                 tools=tool_snapshot([python, landrun, touch]),
             )
 
