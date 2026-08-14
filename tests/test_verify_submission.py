@@ -3021,13 +3021,14 @@ class SubmissionRequestTests(unittest.TestCase):
         self.assertEqual(values["existing_id"], "PALOMAR-2026-01-01-000001")
         self.assertEqual(submission_id, "abc123def456")
 
-    def test_free_text_context_is_refused_rather_than_republished(self):
-        """The submission form's notes are private, and a dispatch input is not.
+    def test_retired_context_option_is_rejected(self):
+        """`context` is retired, and a caller still sending it fails intake.
 
-        `context` used to carry them into this public repository, where every
-        dispatch input can be read by anyone. The field is gone from both ends
-        now, and the allowlist is what stops it coming back: a payload still
-        carrying it fails loudly instead of publishing what it holds.
+        The submission form's notes stay private because the submission server
+        stopped putting them in the dispatch, not because of anything here: by
+        the time this code runs, the inputs are already on the public run page.
+        What the allowlist gives is detection, so a stale or regressed caller
+        fails loudly rather than having the field silently accepted again.
         """
         self.assertNotIn("context", OPTIONAL_FIELDS)
         with self.assertRaisesRegex(

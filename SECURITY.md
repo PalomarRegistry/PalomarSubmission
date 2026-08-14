@@ -44,10 +44,13 @@ request starts one. There is one job, `verify`, and its `permissions` block is
 id, a closed `preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
 allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
-relationship with its optional evidence. Nothing the submitter wrote in prose
-travels this way: a dispatch input on a public repository is readable by
-anyone, so the allowlist carries no free-text field, and a payload offering one
-is refused rather than published. There is no
+relationship with its optional evidence. That evidence is submitter-written
+prose and is meant to be read: everything dispatched here is visible on the run
+page of a public repository, which is why the allowlist is short. The
+submitter's private notes from the submission form are not among these fields,
+and keeping them out is the submission server's doing rather than this
+workflow's. What the allowlist adds is that a caller sending them anyway fails
+the contract check instead of being quietly accepted. There is no
 input for the submitter's GitHub identity, and none for an editorial review,
 which happens elsewhere and afterwards. The run uploads exactly one mode-specific artifact,
 `preflight-report-<request_id>` or `mechanical-report-<request_id>`, holding the bounded

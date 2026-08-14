@@ -67,11 +67,12 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
-# Dispatch inputs are world-readable on a public repository, so nothing a
-# submitter wrote for the reviewer's eyes belongs here. The retired `context`
-# field carried the submission form's free-text notes; the submission server no
-# longer sends it, and a payload that still does is refused below rather than
-# quietly published, which is what keeps it from returning unnoticed.
+# Every dispatch input is visible on the run page of this public repository, so
+# a submitter's private prose stays private only by the server never sending it.
+# `context` carried the submission form's free-text notes until the server
+# stopped sending it. Dropping the key here cannot unmake a disclosure that has
+# already happened by the time this runs; what it does is turn a stale or
+# regressed caller into a failed run rather than a silently accepted field.
 OPTIONAL_FIELDS = frozenset(
     {
         "existing_id",
