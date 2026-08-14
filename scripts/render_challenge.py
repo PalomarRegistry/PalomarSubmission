@@ -1144,10 +1144,20 @@ def static_html_sanitize(
 
          Verso's stylesheets name light colours directly, and a published
          bundle is immutable, so the answers are frozen here as a palette
-         rather than read from the page. The light values are the ones Verso
-         already used, so light mode is unchanged; the dark values are the
-         page's own, so the frame sits on the paper it is drawn on. Every rule
-         below this block spends a token, never a literal. */
+         rather than read from the page. The dark values are the page's own, so
+         the frame sits on the paper it is drawn on. Every rule below this block
+         spends a token, never a literal.
+
+         The light values are Verso's own wherever a reader meets them: the
+         code surface, the docstring frames, the signature popup and the tactic
+         marks all render exactly as before. Where Verso reached for a colour
+         off its own scale — `black` popup borders, a `red` error underline,
+         `#e5e5e5` message panels, Bootstrap greys in the page shell — the
+         token takes over and light shifts a shade. Those are the diagnostic
+         panels and the shell a reader sees only with scripts disabled.
+         Carrying a second light value for each of them would have doubled a
+         palette that every future bundle is stuck with, to preserve choices
+         that were incidental. */
       :root {
         color-scheme: light dark;
         --palomar-paper: #ffffff;
@@ -1160,6 +1170,10 @@ def static_html_sanitize(
         --palomar-link: #0066cc;
         --palomar-alarm: #b42318;
         --palomar-alarm-paper: #ffb3b3;
+        --palomar-info: #4777ff;
+        --palomar-info-paper: #4777ff;
+        --palomar-mark: #bbbbbb;
+        --palomar-mark-on: #999999;
         --palomar-shadow: rgb(0 0 0 / 22%);
       }
       @media (prefers-color-scheme: dark) {
@@ -1174,6 +1188,10 @@ def static_html_sanitize(
           --palomar-link: #8ab4f8;
           --palomar-alarm: #ff9e91;
           --palomar-alarm-paper: #3a1c1a;
+          --palomar-info: #8ab4f8;
+          --palomar-info-paper: #1c3a6b;
+          --palomar-mark: #686f7c;
+          --palomar-mark-on: #8e96a3;
           --palomar-shadow: rgb(0 0 0 / 55%);
         }
       }
@@ -1192,11 +1210,21 @@ def static_html_sanitize(
       .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
       .code-content .verso-text,
       .code-content .md-text { border-color: var(--palomar-line); }
+      /* Each of these repeats a Verso selector exactly rather than writing a
+         shorter one that happens to reach the same elements. `:has()` and
+         `:not()` take the specificity of their argument, so a hand-shortened
+         selector loses to the original and the rule silently does nothing;
+         repeating it makes source order the only thing that decides, and this
+         stylesheet is last. */
       @media (hover: hover) {
         .hl.lean .token.binding-hl,
         .hl.lean .literal:hover,
         .hl.lean .token.typed:hover { background-color: var(--palomar-raise); }
         .hl.lean .has-info.error:hover { background-color: var(--palomar-alarm-paper); }
+        .hl.lean .has-info.information:hover { background-color: var(--palomar-info-paper); }
+        .hl.lean .tactic:has(> .tactic-toggle:not(:checked))
+          > label:hover:not(:has(.tactic > label:hover)) {
+          background-color: var(--palomar-raise); }
       }
       .hl.lean .token .hover-info,
       .hl.lean .has-info .hover-info { background-color: var(--palomar-panel);
@@ -1205,11 +1233,26 @@ def static_html_sanitize(
       .hl.lean .hover-info .sep { border-top-color: var(--palomar-rule); }
       .hl.lean .hover-info.messages > code.error { background-color: var(--palomar-panel);
         border-left-color: var(--palomar-alarm); }
+      .hl.lean .hover-info.messages > code.information { background-color: var(--palomar-panel);
+        border-left-color: var(--palomar-info); }
       .hl.lean .has-info.error :not(.tactic-state):not(.tactic-state *) {
         text-decoration-color: var(--palomar-alarm); }
+      /* Verso's own fallback here is the keyword `blue`, which on dark paper is
+         an underline nobody can see. */
+      .hl.lean .has-info.information :not(.tactic-state):not(.tactic-state *) {
+        text-decoration-color: var(--palomar-info); }
       .hl.lean .tactic-state { background-color: var(--palomar-panel);
         border-color: var(--palomar-edge); }
       .hl.lean.popup .tactic-state { background-color: var(--palomar-panel); }
+      /* The pill that says a tactic block can be opened, and the triangle that
+         says a case can. Verso draws the pill faintly on purpose, so the two
+         marks keep their own tokens rather than borrowing the border ones; the
+         triangle it draws in `black`, which is text, so it spends the ink. */
+      .hl.lean .tactic > label::after { border-color: var(--palomar-mark); }
+      .hl.lean .tactic > label:has(+ .tactic-toggle:checked)::after {
+        border-color: var(--palomar-mark-on); background-color: var(--palomar-mark-on); }
+      .hl.lean .case-label:has(input[type="checkbox"])::before {
+        background-color: var(--palomar-ink); }
       .palomar-hover {
         padding: .65rem !important; border: 1px solid var(--palomar-edge) !important;
         border-radius: .35rem; background: var(--palomar-panel) !important;
@@ -1256,6 +1299,7 @@ def static_html_sanitize(
       .breadcrumbs a { color: var(--palomar-link); }
       .module-tree summary:hover,
       .breadcrumbs a:hover { background-color: var(--palomar-raise); }
+      .module-tree summary::before { color: var(--palomar-ink); }
       .module-tree summary.current,
       .module-tree .current { background-color: var(--palomar-link);
         color: var(--palomar-paper); }

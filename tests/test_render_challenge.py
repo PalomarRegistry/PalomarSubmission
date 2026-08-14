@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import html
 import json
+import pathlib
 import re
 import shutil
 import subprocess
@@ -1192,6 +1193,52 @@ def _palettes(css: str) -> tuple[dict[str, str], dict[str, str]]:
     return blocks[0], blocks[1]
 
 
+_COLOUR_KEYWORDS = (
+    "black|white|red|blue|green|gray|grey|silver|maroon|navy|orange|purple|yellow"
+)
+_NAMES_A_COLOUR = re.compile(
+    rf"#[0-9a-fA-F]{{3,8}}\b|\b(?:{_COLOUR_KEYWORDS})\b|\b(?:rgba?|hsla?)\("
+)
+_PAINTS = re.compile(
+    r"^(?:background|background-color|color|border|border-[a-z-]+|box-shadow|outline"
+    r"|outline-color|text-decoration-color|fill|stroke)$"
+)
+
+
+def _painting_selectors(css: str) -> set[str]:
+    """Every single selector in `css` that gives some element a literal colour.
+
+    Comma groups are split, because a group is answered one selector at a time.
+    """
+    found: set[str] = set()
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    for block in re.finditer(r"([^{}]*)\{([^{}]*)\}", stripped):
+        group = " ".join(block.group(1).split())
+        if not group or group.startswith("@"):
+            continue
+        for name, separator, value in (
+            chunk.partition(":") for chunk in block.group(2).split(";")
+        ):
+            if not separator or not _PAINTS.match(name.strip().lower()):
+                continue
+            if _NAMES_A_COLOUR.search(value):
+                found.update(part.strip() for part in group.split(",") if part.strip())
+                break
+    return found
+
+
+def _answered_selectors(css: str) -> set[str]:
+    """Every single selector the injected stylesheet writes a rule for."""
+    answered: set[str] = set()
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    for block in re.finditer(r"([^{}]*)\{([^{}]*)\}", stripped):
+        group = " ".join(block.group(1).split())
+        if not group or group.startswith("@"):
+            continue
+        answered.update(part.strip() for part in group.split(",") if part.strip())
+    return answered
+
+
 def _luminance(colour: str) -> float:
     raw = colour.lstrip("#")
     if len(raw) == 3:
@@ -1232,11 +1279,21 @@ class RenderSurfaceAppearanceTests(unittest.TestCase):
         ("--palomar-paper", "--palomar-link"),
         ("--palomar-alarm", "--palomar-paper"),
     )
-    # Borders that carry meaning: they are what separates a popup from the code
-    # underneath it. WCAG AA for non-text.
+    # Indicators, and what they are drawn on. WCAG AA for non-text.
+    #
+    # `--palomar-info-paper` is here rather than in READABLE because it is a
+    # saturated fill Verso already used, and ink on it clears 3.74:1 in light.
+    # This change does not move a light value, so asserting 4.5 would be
+    # asserting a change that was deliberately not made.
+    #
+    # `--palomar-mark` and `--palomar-mark-on` are absent on purpose: they are
+    # the tactic-toggle pill, which Verso draws at 1.94:1 in light because a
+    # disclosure affordance that shouts drowns the code it sits in.
     VISIBLE = (
         ("--palomar-edge", "--palomar-paper"),
         ("--palomar-edge", "--palomar-panel"),
+        ("--palomar-info", "--palomar-paper"),
+        ("--palomar-ink", "--palomar-info-paper"),
     )
     # Properties that put a colour on the page. `border` and `box-shadow` are
     # shorthands that carry one.
@@ -1289,6 +1346,44 @@ class RenderSurfaceAppearanceTests(unittest.TestCase):
         outside = "".join(rules)
         self.assertNotRegex(outside, r"#[0-9a-fA-F]{3,8}\b")
         self.assertNotRegex(outside, r"\b(?:rgba?|hsla?)\(")
+
+    # Verso selectors that name a colour and are deliberately left as they are.
+    # Everything else it paints must be answered, or the frame keeps a light
+    # patch in dark mode that no palette test can see.
+    LEFT_TO_VERSO = {
+        # Tippy's script is dropped by `sanitize_bundle`, so nothing in a
+        # published bundle ever carries `data-theme`, and the popup a reader
+        # actually sees is Palomar's own `.palomar-hover`.
+        "tippy": "the Tippy runtime is not shipped, so no element matches",
+        # A half-opaque black scrim over the narrow-screen menu. Black at half
+        # opacity darkens either paper, which is what a scrim is for.
+        ".menu-toggle:checked + .hamburger + .layout::after": "a scrim reads on both",
+    }
+
+    def test_every_verso_colour_selector_is_answered_or_left_alone(self):
+        """Read Verso's stylesheets, not just ours.
+
+        A palette can be complete, internally consistent and still leave the
+        frame half light, because the rule that paints the light patch lives
+        upstream and no test that reads only Palomar's own block can see it.
+        This is the test that would have caught the tactic-label hover.
+        """
+        fixtures = pathlib.Path(__file__).parent / "fixtures" / "verso-render-css"
+        answered = _answered_selectors(_injected_surface_style())
+        unanswered = []
+        for stylesheet in sorted(fixtures.glob("*.css")):
+            for selector in _painting_selectors(stylesheet.read_text()):
+                if selector in answered or selector in self.LEFT_TO_VERSO:
+                    continue
+                if "tippy" in selector and "tippy" in self.LEFT_TO_VERSO:
+                    continue
+                unanswered.append(f"{stylesheet.name}: {selector}")
+        self.assertEqual(
+            [],
+            sorted(unanswered),
+            "Verso paints these and the injected stylesheet does not answer them; "
+            "either answer them or record why they are left alone",
+        )
 
     def test_both_palettes_are_readable(self):
         light, override = _palettes(_injected_surface_style())
