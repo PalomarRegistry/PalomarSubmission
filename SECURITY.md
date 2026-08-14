@@ -227,10 +227,14 @@ The post-acceptance renderer runs the same probe contract as the verifier,
 under its own narrower policy, and fails closed on the same conditions. That
 matters more there than anywhere else, because compile-time Lean in the
 submitted Challenge, its macros and elaborators, execute during the render
-build. The renderer has no network-enabled confined phase to except: its only
-outbound step fetches Mathlib cache archives with trusted `curl`, outside
-Landrun and without loading submitted Lake configuration, so outbound-network
-denial is proved for every phase Landrun confines. The renderer has no frozen
+build. The renderer has no network-enabled confined phase to except. Every
+outbound step it takes is a trusted one outside Landrun: before the probe it
+clones the pinned Verso revision and fetches each revision the submitted Lake
+manifest pins, using Git directly rather than `lake update` so that no package
+post-update hook runs; after the probe, trusted `curl` fetches Mathlib cache
+archives. None of them load submitted Lake configuration, and every phase
+Landrun confines, on both sides of that download, is network-disabled, so
+outbound-network denial is proved for each of them. The renderer has no frozen
 trusted build directories, so the verifier's frozen-write probe has nothing to
 assert there and is not run. Both callers use a probe contract that removes
 its owned probe files even when the sandbox runner fails.

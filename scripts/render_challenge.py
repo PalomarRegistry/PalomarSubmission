@@ -1985,11 +1985,14 @@ def execute(args: argparse.Namespace) -> int:
         )
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
-        # Every phase Landrun confines here is network-disabled: the one
-        # network-enabled step is trusted `curl` fetching Mathlib cache
-        # archives, which runs outside Landrun and never loads submitted Lake
-        # configuration. Egress denial therefore holds for exactly the phases
-        # that follow this probe. No submitted Lean or Lake code has run yet.
+        # Every phase Landrun confines from here on is network-disabled. The
+        # only outbound step that follows is trusted `curl` fetching Mathlib
+        # cache archives, outside Landrun and without loading submitted Lake
+        # configuration. The trusted Verso clone and the pinned package
+        # fetches above were also outbound and also outside Landrun; neither
+        # executes submitted Lean or Lake code, and no submitted code has run
+        # at this point. Egress denial therefore holds for exactly the
+        # confined phases this probe stands for.
         verify_sandbox_confinement(
             work / "render-landrun-write-denial-probe",
             work / "render-landrun-read-denial-probe",
