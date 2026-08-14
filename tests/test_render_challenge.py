@@ -69,9 +69,11 @@ RUNTIME_SANITIZER_ELEMENT_CASES = (
 )
 
 # Element, attribute, value, and whether the sanitizers are meant to keep it.
-# Verso emits `open` on the module tree's `<details>` and none of the rest.
+# Verso emits `open` on `<details>` in both the forms it writes, valueless in
+# the module tree and `open="open"` on an expanded trace, and none of the rest.
 PRESENTATION_ATTRIBUTE_CASES = (
     ("details", "open", "", True),
+    ("details", "open", "open", True),
     ("div", "open", "", False),
     ("div", "hidden", "", False),
     ("div", "popover", "manual", False),
@@ -777,7 +779,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "3d56098733444ad3d5c28bb83bb384f0009be47dea23b9d796ec7c99b9cf17cf",
+            "c39c4bc61544b0c0b9b6f0605859aceb11a2bf9cbb5c9f22c492d938243dbea7",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),

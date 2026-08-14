@@ -164,7 +164,8 @@ RUNTIME_SANITIZER = r'''(() => {
             || presentationAttributes.has(name)) {
           element.removeAttribute(attribute.name);
         } else if (name === "open" && element.tagName.toUpperCase() !== "DETAILS") {
-          // Verso opens the module tree's `<details>` with it, and nothing else.
+          // Verso emits `open` only on `<details>`: the module tree's, and the
+          // trace ones it leaves expanded.
           element.removeAttribute(attribute.name);
         } else if (name === "src" && !safeUrl(attribute.value, name)) {
           element.removeAttribute(attribute.name);
@@ -997,8 +998,9 @@ class _StaticHTMLSanitizer(HTMLParser):
         "width",
     }
 
-    # Verso opens the module tree's `<details>` with `open` and uses the
-    # attribute nowhere else, so it is kept there and stripped everywhere else.
+    # Verso emits `open` only on `<details>`, both in the module tree and on
+    # the `<details class="trace">` it leaves expanded, so the attribute is
+    # kept there and stripped everywhere else.
     _OPEN_ELEMENT = "details"
 
     # SVG and MathML give presentation and geometry their own attributes, so a
