@@ -62,15 +62,38 @@ INLINE_STYLE_CASES = (
 RUNTIME_SANITIZER_ELEMENT_CASES = (
     ("svg", True),
     ("math", True),
+    ("DIALOG", True),
     ("SCRIPT", True),
     ("IFRAME", True),
     ("DIV", False),
 )
 
+# Element, attribute, value, and whether the sanitizers are meant to keep it.
+# Verso emits `open` on the module tree's `<details>` and none of the rest.
+PRESENTATION_ATTRIBUTE_CASES = (
+    ("details", "open", "", True),
+    ("div", "open", "", False),
+    ("div", "hidden", "", False),
+    ("div", "popover", "manual", False),
+    ("button", "popovertarget", "cover", False),
+    ("button", "popovertargetaction", "show", False),
+    ("table", "background", "cover.png", False),
+    ("table", "bgcolor", "#ffffff", False),
+    ("table", "text", "#ffffff", False),
+    ("table", "link", "#ffffff", False),
+    ("table", "vlink", "#ffffff", False),
+    ("table", "alink", "#ffffff", False),
+    ("img", "width", "9999", False),
+    ("img", "height", "9999", False),
+    ("div", "width", "9999", False),
+    ("div", "class", "md-text", True),
+)
+
 # Enough of a document for the shipped browser sanitizer to walk: it asks a root
 # for its elements, and each element for its tag name and its attributes. The
-# probe reports which inline styles and which elements survived. `styles` and
-# `tags` are supplied by the test, so both sanitizers face the same cases.
+# probe reports which inline styles, elements and attributes survived. `styles`,
+# `tags` and `attributes` are supplied by the test, so both sanitizers face the
+# same cases.
 RUNTIME_SANITIZER_PROBE = r"""
 const element = (tagName, attrs) => ({
   tagName,
@@ -89,12 +112,15 @@ const element = (tagName, attrs) => ({
 const styled = styles.map((value, index) =>
   element("DIV", [["class", "md-text"], [index % 2 ? "STYLE" : "style", value]]));
 const tagged = tags.map((tagName) => element(tagName, [["class", "md-text"]]));
-const elements = styled.concat(tagged);
+const attributed = attributes.map(([tagName, name, value], index) =>
+  element(tagName.toUpperCase(), [[index % 2 ? name.toUpperCase() : name, value]]));
+const elements = styled.concat(tagged, attributed);
 window.palomarSanitize({querySelectorAll: () => elements});
 console.log(JSON.stringify({
   styles: styled.map((subject) =>
     subject.attrs.some((entry) => entry.name.toLowerCase() === "style")),
   removed: tagged.map((subject) => subject.removed),
+  attributes: attributed.map((subject) => subject.attrs.length === 1),
 }));
 """
 
@@ -751,7 +777,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "6686ea33086a48b4d9b1897cb3a002cd17531cfd7c4ae613ea076d363a532b5b",
+            "3d56098733444ad3d5c28bb83bb384f0009be47dea23b9d796ec7c99b9cf17cf",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
@@ -961,36 +987,96 @@ end Audit.Task
         self.assertIn('<div id="shouted">', sanitized)
         self.assertNotIn("position", sanitized)
 
-    def test_static_html_drops_svg_and_mathml_subtrees(self):
-        html_text = (
-            '<html><head><base href="../"></head><body>'
+    def _sanitize_body(self, body: str) -> str:
+        sanitized = static_html_sanitize(
+            f'<html><head><base href="../"></head><body>{body}</body></html>',
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+        )
+        # The renderer's own stylesheet mentions several of the words these
+        # tests look for, so read only the part the submission wrote.
+        return sanitized[sanitized.index("<body") :]
+
+    def test_static_html_drops_drawing_subtrees(self):
+        body = self._sanitize_body(
             '<svg width="1" height="1" overflow="visible">'
             '<rect x="-10000" y="-10000" width="20000" height="20000" fill="white"'
             ' pointer-events="all"/></svg>'
-            "<svg><svg></svg><circle r=\"9999\"/></svg>"
+            '<svg><svg></svg><circle r="9999"/></svg>'
             "<math><mtext>covered</mtext></math>"
-            "<p>kept</p></body></html>"
+            '<dialog open><p>sign in</p></dialog>'
+            "<p>kept</p>"
         )
-        sanitized = static_html_sanitize(
-            html_text, "../palomar-sanitize.js", "../palomar-verso.js"
-        )
-        # The renderer's own stylesheet mentions some of these words, so read
-        # only the part of the document the submission wrote.
-        body = sanitized[sanitized.index("<body") :]
         self.assertIn("<p>kept</p>", body)
-        for leaked in ("svg", "rect", "circle", "math", "mtext", "pointer-events"):
+        for leaked in (
+            "svg",
+            "rect",
+            "circle",
+            "math",
+            "mtext",
+            "pointer-events",
+            "dialog",
+            "sign in",
+        ):
             self.assertNotIn(leaked, body, f"{leaked} survived sanitizing")
-        with self.assertRaisesRegex(VerificationError, "foreign subtree"):
-            static_html_sanitize(
-                '<html><head><base href="../"></head><body><svg>',
-                "../palomar-sanitize.js",
-                "../palomar-verso.js",
+
+    def test_static_html_refuses_unbalanced_dropped_subtrees(self):
+        for name, body in (
+            ("unclosed", "<svg>"),
+            ("wrong closer", "<svg></math><dialog open>cover</dialog></svg>"),
+            ("crossed", "<svg><math></svg></math>"),
+            ("unopened", "</svg>"),
+            ("unclosed around markup", "<svg><p>x</p>"),
+        ):
+            with self.subTest(name), self.assertRaises(VerificationError):
+                self._sanitize_body(body)
+
+    def test_static_html_drops_html_inside_a_dropped_subtree(self):
+        """Conservative where the two parsers disagree.
+
+        A browser breaks out of foreign content when it meets an HTML element
+        such as `<p>`, so it would place this paragraph beside the SVG rather
+        than inside it. Serializing it away is the safe side of that
+        disagreement: what is not in the file cannot be broken back out of.
+        """
+        body = self._sanitize_body("<svg><p>covered</p></svg><p>kept</p>")
+        self.assertIn("<p>kept</p>", body)
+        self.assertNotIn("covered", body)
+
+    def test_static_html_strips_presentational_and_state_attributes(self):
+        markup = "".join(
+            f'<{tag} data-case="{index}" {name}="{html.escape(value, quote=True)}">x</{tag}>'
+            for index, (tag, name, value, _keep) in enumerate(
+                PRESENTATION_ATTRIBUTE_CASES
+            )
+        )
+        body = self._sanitize_body(markup)
+        for index, (tag, name, _value, keep) in enumerate(PRESENTATION_ATTRIBUTE_CASES):
+            element = re.search(rf'<{tag} data-case="{index}"([^>]*)>', body)
+            self.assertIsNotNone(element, f"case {index} lost its element")
+            self.assertEqual(
+                f"{name}=" in element.group(1), keep, f"case {index}: {tag} {name}"
             )
 
-    def test_runtime_sanitizer_matches_the_static_style_and_element_rules(self):
+    def test_static_html_requires_exactly_one_body_and_head(self):
+        for name, document in (
+            ("two bodies", '<html><head><base href="../"></head><body><body></body></html>'),
+            (
+                "two heads",
+                '<html><head><base href="../"></head><head></head><body></body></html>',
+            ),
+            ("no closing head", '<html><head><base href="../"><body></body></html>'),
+        ):
+            with self.subTest(name), self.assertRaises(VerificationError):
+                static_html_sanitize(
+                    document, "../palomar-sanitize.js", "../palomar-verso.js"
+                )
+
+    def test_runtime_sanitizer_matches_the_static_element_and_attribute_rules(self):
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is needed to run the browser sanitizer")
+        attributes = [[tag, name, value] for tag, name, value, _ in PRESENTATION_ATTRIBUTE_CASES]
         harness = "\n".join(
             [
                 "globalThis.window = {};",
@@ -998,6 +1084,7 @@ end Audit.Task
                 RUNTIME_SANITIZER,
                 f"const styles = {json.dumps([value for value, _ in INLINE_STYLE_CASES])};",
                 f"const tags = {json.dumps([tag for tag, _ in RUNTIME_SANITIZER_ELEMENT_CASES])};",
+                f"const attributes = {json.dumps(attributes)};",
                 RUNTIME_SANITIZER_PROBE,
             ]
         )
@@ -1009,6 +1096,7 @@ end Audit.Task
             {
                 "styles": [keep for _value, keep in INLINE_STYLE_CASES],
                 "removed": [drop for _tag, drop in RUNTIME_SANITIZER_ELEMENT_CASES],
+                "attributes": [keep for *_case, keep in PRESENTATION_ATTRIBUTE_CASES],
             },
         )
 

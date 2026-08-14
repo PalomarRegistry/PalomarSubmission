@@ -108,17 +108,26 @@ ALLOWED_EXTENSIONS = {
 
 RUNTIME_SANITIZER = r'''(() => {
   "use strict";
-  // SVG and MathML carry their own presentation and geometry attributes, which
-  // are a second way to draw over the page. The literate-code genre emits
-  // neither, so both subtrees go rather than being filtered attribute by
-  // attribute. Foreign tag names keep their own case, so match on the folded
-  // one.
+  // SVG and MathML carry their own presentation and geometry attributes, and a
+  // `dialog` draws itself over the document without needing any. The
+  // literate-code genre emits none of the three, so their subtrees go rather
+  // than being filtered attribute by attribute. Foreign tag names keep their
+  // own case, so match on the folded one.
   const blocked = new Set([
-    "APPLET", "BASE", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
+    "APPLET", "BASE", "DIALOG", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
     "MATH", "META", "OBJECT", "SCRIPT", "SVG"
   ]);
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
+  ]);
+  // Presentation and visibility without a stylesheet: the legacy colour
+  // attributes, the sizing pair, the top-layer controls, and the one that
+  // hides honest content so that dishonest content can stand in for it. Verso
+  // emits none of them here, `<meta name="viewport">` being a meta element and
+  // dropped whole.
+  const presentationAttributes = new Set([
+    "alink", "background", "bgcolor", "height", "hidden", "link", "popover",
+    "popovertarget", "popovertargetaction", "text", "vlink", "width"
   ]);
   // Verso's literate-code output needs one inline declaration, the indent
   // custom property its stylesheet reads, whose value is the source column the
@@ -151,7 +160,11 @@ RUNTIME_SANITIZER = r'''(() => {
       }
       for (const attribute of Array.from(element.attributes)) {
         const name = attribute.name.toLowerCase();
-        if (name.startsWith("on") || activeAttributes.has(name)) {
+        if (name.startsWith("on") || activeAttributes.has(name)
+            || presentationAttributes.has(name)) {
+          element.removeAttribute(attribute.name);
+        } else if (name === "open" && element.tagName.toUpperCase() !== "DETAILS") {
+          // Verso opens the module tree's `<details>` with it, and nothing else.
           element.removeAttribute(attribute.name);
         } else if (name === "src" && !safeUrl(attribute.value, name)) {
           element.removeAttribute(attribute.name);
@@ -965,14 +978,37 @@ class _StaticHTMLSanitizer(HTMLParser):
         "formaction",
         "ping",
         "target",
+        # Presentation and visibility without a stylesheet: the legacy colour
+        # attributes, the sizing pair, the top-layer controls, and the one that
+        # hides honest content so that dishonest content can stand in for it.
+        # Verso emits none of these here. Its only `width` and `height` are in
+        # `<meta name="viewport">`, and meta elements are dropped whole.
+        "alink",
+        "background",
+        "bgcolor",
+        "height",
+        "hidden",
+        "link",
+        "popover",
+        "popovertarget",
+        "popovertargetaction",
+        "text",
+        "vlink",
+        "width",
     }
+
+    # Verso opens the module tree's `<details>` with `open` and uses the
+    # attribute nowhere else, so it is kept there and stripped everywhere else.
+    _OPEN_ELEMENT = "details"
 
     # SVG and MathML give presentation and geometry their own attributes, so a
     # single `<rect>` covers the page as effectively as a positioned `style`
-    # does. The literate-code genre Verso builds here emits neither element
-    # (its only SVG is the manual genre's diagram files, and `latexMath`
-    # renders to nothing), so both subtrees are dropped whole.
-    _DROPPED_ELEMENTS = {"math", "svg"}
+    # does, and a `dialog` draws itself over the document without needing any.
+    # The literate-code genre Verso builds here emits none of the three (its
+    # only SVG is the manual genre's diagram files, `latexMath` renders to
+    # nothing, and no genre emits a dialog), so their subtrees are dropped
+    # whole.
+    _DROPPED_ELEMENTS = {"dialog", "math", "svg"}
 
     # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
     # submitter reaches is a free hand over the rendered page: fixed position,
@@ -996,11 +1032,16 @@ class _StaticHTMLSanitizer(HTMLParser):
         self.declarations = set(declarations)
         self.found_declarations: set[str] = set()
         self.script_depth = 0
-        self.dropped_depth = 0
+        # The dropped elements this position is inside, innermost last. A stack
+        # rather than a depth: `<svg></math>` must not be read as closing
+        # anything, or serialization resumes inside a subtree that is still
+        # open and the drop is only apparent.
+        self.dropped: list[str] = []
+        self.mismatched_drop = False
 
     @property
     def _suppressed(self) -> bool:
-        return bool(self.script_depth or self.dropped_depth)
+        return bool(self.script_depth or self.dropped)
 
     @staticmethod
     def _rewrite_url(attribute: str, raw: str) -> str:
@@ -1024,15 +1065,15 @@ class _StaticHTMLSanitizer(HTMLParser):
         self, tag: str, attrs: list[tuple[str, str | None]], *, closed: bool
     ) -> None:
         tag = tag.lower()
-        if self.dropped_depth:
+        if self.dropped:
             if tag in self._DROPPED_ELEMENTS and not closed:
-                self.dropped_depth += 1
+                self.dropped.append(tag)
             return
         if self.script_depth:
             return
         if tag in self._DROPPED_ELEMENTS:
             if not closed:
-                self.dropped_depth = 1
+                self.dropped.append(tag)
             return
         if tag == "script":
             if not closed:
@@ -1058,6 +1099,8 @@ class _StaticHTMLSanitizer(HTMLParser):
             name = name.lower()
             if name.startswith("on") or name in self._STRIPPED_ATTRIBUTES:
                 continue
+            if name == "open" and tag != self._OPEN_ELEMENT:
+                continue
             if name == "style" and (
                 value is None or not self._ALLOWED_STYLE.fullmatch(value)
             ):
@@ -1080,9 +1123,16 @@ class _StaticHTMLSanitizer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if self.dropped_depth:
-            if tag in self._DROPPED_ELEMENTS:
-                self.dropped_depth -= 1
+        if tag in self._DROPPED_ELEMENTS:
+            if self.dropped and self.dropped[-1] == tag:
+                self.dropped.pop()
+            else:
+                # Either nothing opened this, or it closes across a subtree
+                # that is still open. Refuse the document instead of guessing
+                # what it ends, and stay inside the drop until it is refused.
+                self.mismatched_drop = True
+            return
+        if self.dropped:
             return
         if self.script_depth:
             if tag == "script":
@@ -1129,8 +1179,10 @@ def static_html_sanitize(
     if sanitizer.rawdata:
         raise VerificationError("generated HTML ends with incomplete markup")
     sanitizer.close()
-    if sanitizer.dropped_depth:
-        raise VerificationError("generated HTML leaves a foreign subtree unclosed")
+    if sanitizer.mismatched_drop:
+        raise VerificationError("generated HTML closes a subtree it did not open")
+    if sanitizer.dropped:
+        raise VerificationError("generated HTML leaves a dropped subtree unclosed")
     if sanitizer.bases != [expected_base]:
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
@@ -1151,11 +1203,13 @@ def static_html_sanitize(
         value = html.escape(declaration_json, quote=True)
         return f'<body{attributes} data-palomar-declarations="{value}">'
 
-    text, body_count = re.subn(
-        r"<body(\s[^>]*)?>", annotate_body, text, count=1, flags=re.IGNORECASE
-    )
-    if body_count != 1:
+    # Count before substituting: `count=1` stops at the first match, so a
+    # replacement count of one only says there was at least one body. A second
+    # one matters, because the browser folds its attributes into the first.
+    body_pattern = r"<body(\s[^>]*)?>"
+    if len(re.findall(body_pattern, text, flags=re.IGNORECASE)) != 1:
         raise VerificationError("generated HTML does not contain exactly one body element")
+    text = re.sub(body_pattern, annotate_body, text, count=1, flags=re.IGNORECASE)
 
     policy = "; ".join(
         [
@@ -1184,15 +1238,16 @@ def static_html_sanitize(
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
-    text, count = re.subn(
-        r"(<head\b[^>]*>)",
+    head_pattern = r"(<head\b[^>]*>)"
+    if len(re.findall(head_pattern, text, flags=re.IGNORECASE)) != 1:
+        raise VerificationError("generated HTML does not contain exactly one head element")
+    text = re.sub(
+        head_pattern,
         rf"\1\n    {meta}\n    {scripts}",
         text,
         count=1,
         flags=re.IGNORECASE,
     )
-    if count != 1:
-        raise VerificationError("generated HTML does not contain exactly one head element")
     surface_style = """<style id="palomar-declaration-style">
       html { height: auto !important; min-height: 100%; overflow: auto !important;
         overscroll-behavior: contain; }
@@ -1234,9 +1289,11 @@ def static_html_sanitize(
       }
       .palomar-render-error { margin: 1rem; font-family: sans-serif; }
     </style>"""
-    text = re.sub(
+    text, closed_heads = re.subn(
         r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
     )
+    if closed_heads != 1:
+        raise VerificationError("generated HTML does not close its head element")
     return text
 
 
