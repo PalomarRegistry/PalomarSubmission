@@ -108,13 +108,33 @@ ALLOWED_EXTENSIONS = {
 
 RUNTIME_SANITIZER = r'''(() => {
   "use strict";
+  // SVG and MathML carry their own presentation and geometry attributes, and a
+  // `dialog` draws itself over the document without needing any. The
+  // literate-code genre emits none of the three, so their subtrees go rather
+  // than being filtered attribute by attribute. Foreign tag names keep their
+  // own case, so match on the folded one.
   const blocked = new Set([
-    "APPLET", "BASE", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
-    "META", "OBJECT", "SCRIPT"
+    "APPLET", "BASE", "DIALOG", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
+    "MATH", "META", "OBJECT", "SCRIPT", "SVG"
   ]);
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
+  // Presentation and visibility without a stylesheet: the legacy colour
+  // attributes, the sizing pair, the top-layer controls, and the one that
+  // hides honest content so that dishonest content can stand in for it. Verso
+  // emits none of them here, `<meta name="viewport">` being a meta element and
+  // dropped whole.
+  const presentationAttributes = new Set([
+    "alink", "background", "bgcolor", "height", "hidden", "link", "popover",
+    "popovertarget", "popovertargetaction", "text", "vlink", "width"
+  ]);
+  // Verso's literate-code output needs one inline declaration, the indent
+  // custom property its stylesheet reads, whose value is the source column the
+  // documentation starts at. Any other one is enough to reposition or repaint
+  // a page served with `style-src 'unsafe-inline'`. The whitespace is spelled
+  // out because `\s` does not mean the same thing here as it does in Python.
+  const allowedStyle = /^[ \t\r\n\f]*--indent:[ \t\r\n\f]*[0-9]{1,2}[ \t\r\n\f]*;?[ \t\r\n\f]*$/;
 
   function safeUrl(value, attribute) {
     const trimmed = value.trim();
@@ -134,17 +154,24 @@ RUNTIME_SANITIZER = r'''(() => {
 
   function sanitize(root) {
     for (const element of Array.from(root.querySelectorAll("*"))) {
-      if (blocked.has(element.tagName)) {
+      if (blocked.has(element.tagName.toUpperCase())) {
         element.remove();
         continue;
       }
       for (const attribute of Array.from(element.attributes)) {
         const name = attribute.name.toLowerCase();
-        if (name.startsWith("on") || activeAttributes.has(name)) {
+        if (name.startsWith("on") || activeAttributes.has(name)
+            || presentationAttributes.has(name)) {
+          element.removeAttribute(attribute.name);
+        } else if (name === "open" && element.tagName.toUpperCase() !== "DETAILS") {
+          // Verso emits `open` only on `<details>`: the module tree's, and the
+          // trace ones it leaves expanded.
           element.removeAttribute(attribute.name);
         } else if (name === "src" && !safeUrl(attribute.value, name)) {
           element.removeAttribute(attribute.name);
         } else if (name === "href" && !safeUrl(attribute.value, name)) {
+          element.removeAttribute(attribute.name);
+        } else if (name === "style" && !allowedStyle.test(attribute.value)) {
           element.removeAttribute(attribute.name);
         } else if (name === "target") {
           element.removeAttribute(attribute.name);
@@ -952,7 +979,53 @@ class _StaticHTMLSanitizer(HTMLParser):
         "formaction",
         "ping",
         "target",
+        # Presentation and visibility without a stylesheet: the legacy colour
+        # attributes, the sizing pair, the top-layer controls, and the one that
+        # hides honest content so that dishonest content can stand in for it.
+        # Verso emits none of these here. Its only `width` and `height` are in
+        # `<meta name="viewport">`, and meta elements are dropped whole.
+        "alink",
+        "background",
+        "bgcolor",
+        "height",
+        "hidden",
+        "link",
+        "popover",
+        "popovertarget",
+        "popovertargetaction",
+        "text",
+        "vlink",
+        "width",
     }
+
+    # Verso emits `open` only on `<details>`, both in the module tree and on
+    # the `<details class="trace">` it leaves expanded, so the attribute is
+    # kept there and stripped everywhere else.
+    _OPEN_ELEMENT = "details"
+
+    # SVG and MathML give presentation and geometry their own attributes, so a
+    # single `<rect>` covers the page as effectively as a positioned `style`
+    # does, and a `dialog` draws itself over the document without needing any.
+    # The literate-code genre Verso builds here emits none of the three (its
+    # only SVG is the manual genre's diagram files, `latexMath` renders to
+    # nothing, and no genre emits a dialog), so their subtrees are dropped
+    # whole.
+    _DROPPED_ELEMENTS = {"dialog", "math", "svg"}
+
+    # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
+    # submitter reaches is a free hand over the rendered page: fixed position,
+    # colour and size are enough to cover the surrounding text with a
+    # convincing imitation of it. Verso's literate-code output needs exactly
+    # one declaration, since `code.css` indents prose with
+    # `calc(var(--indent, 0) * 1ch)`, so the attribute is filtered down to that
+    # custom property rather than dropped outright. Its value is the source
+    # column the documentation starts at, which two digits already covers with
+    # room to spare, and an unbounded one would be a shove off the page. The
+    # whitespace is spelled out because `\s` does not mean the same thing in
+    # the browser sanitizer as it does here.
+    _ALLOWED_STYLE = re.compile(
+        r"[ \t\r\n\f]*--indent:[ \t\r\n\f]*[0-9]{1,2}[ \t\r\n\f]*;?[ \t\r\n\f]*"
+    )
 
     def __init__(self, declarations: list[str]) -> None:
         super().__init__(convert_charrefs=False)
@@ -961,6 +1034,16 @@ class _StaticHTMLSanitizer(HTMLParser):
         self.declarations = set(declarations)
         self.found_declarations: set[str] = set()
         self.script_depth = 0
+        # The dropped elements this position is inside, innermost last. A stack
+        # rather than a depth: `<svg></math>` must not be read as closing
+        # anything, or serialization resumes inside a subtree that is still
+        # open and the drop is only apparent.
+        self.dropped: list[str] = []
+        self.mismatched_drop = False
+
+    @property
+    def _suppressed(self) -> bool:
+        return bool(self.script_depth or self.dropped)
 
     @staticmethod
     def _rewrite_url(attribute: str, raw: str) -> str:
@@ -984,7 +1067,15 @@ class _StaticHTMLSanitizer(HTMLParser):
         self, tag: str, attrs: list[tuple[str, str | None]], *, closed: bool
     ) -> None:
         tag = tag.lower()
+        if self.dropped:
+            if tag in self._DROPPED_ELEMENTS and not closed:
+                self.dropped.append(tag)
+            return
         if self.script_depth:
+            return
+        if tag in self._DROPPED_ELEMENTS:
+            if not closed:
+                self.dropped.append(tag)
             return
         if tag == "script":
             if not closed:
@@ -1010,6 +1101,12 @@ class _StaticHTMLSanitizer(HTMLParser):
             name = name.lower()
             if name.startswith("on") or name in self._STRIPPED_ATTRIBUTES:
                 continue
+            if name == "open" and tag != self._OPEN_ELEMENT:
+                continue
+            if name == "style" and (
+                value is None or not self._ALLOWED_STYLE.fullmatch(value)
+            ):
+                continue
             if value is None:
                 rendered.append(name)
                 continue
@@ -1028,6 +1125,17 @@ class _StaticHTMLSanitizer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag in self._DROPPED_ELEMENTS:
+            if self.dropped and self.dropped[-1] == tag:
+                self.dropped.pop()
+            else:
+                # Either nothing opened this, or it closes across a subtree
+                # that is still open. Refuse the document instead of guessing
+                # what it ends, and stay inside the drop until it is refused.
+                self.mismatched_drop = True
+            return
+        if self.dropped:
+            return
         if self.script_depth:
             if tag == "script":
                 self.script_depth = 0
@@ -1036,27 +1144,27 @@ class _StaticHTMLSanitizer(HTMLParser):
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(data)
 
     def handle_entityref(self, name: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<!--{data}-->")
 
     def handle_decl(self, decl: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<!{decl}>")
 
     def handle_pi(self, data: str) -> None:
-        if not self.script_depth:
+        if not self._suppressed:
             self.parts.append(f"<?{data}>")
 
 
@@ -1073,6 +1181,10 @@ def static_html_sanitize(
     if sanitizer.rawdata:
         raise VerificationError("generated HTML ends with incomplete markup")
     sanitizer.close()
+    if sanitizer.mismatched_drop:
+        raise VerificationError("generated HTML closes a subtree it did not open")
+    if sanitizer.dropped:
+        raise VerificationError("generated HTML leaves a dropped subtree unclosed")
     if sanitizer.bases != [expected_base]:
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
@@ -1093,11 +1205,13 @@ def static_html_sanitize(
         value = html.escape(declaration_json, quote=True)
         return f'<body{attributes} data-palomar-declarations="{value}">'
 
-    text, body_count = re.subn(
-        r"<body(\s[^>]*)?>", annotate_body, text, count=1, flags=re.IGNORECASE
-    )
-    if body_count != 1:
+    # Count before substituting: `count=1` stops at the first match, so a
+    # replacement count of one only says there was at least one body. A second
+    # one matters, because the browser folds its attributes into the first.
+    body_pattern = r"<body(\s[^>]*)?>"
+    if len(re.findall(body_pattern, text, flags=re.IGNORECASE)) != 1:
         raise VerificationError("generated HTML does not contain exactly one body element")
+    text = re.sub(body_pattern, annotate_body, text, count=1, flags=re.IGNORECASE)
 
     policy = "; ".join(
         [
@@ -1126,15 +1240,16 @@ def static_html_sanitize(
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
-    text, count = re.subn(
-        r"(<head\b[^>]*>)",
+    head_pattern = r"(<head\b[^>]*>)"
+    if len(re.findall(head_pattern, text, flags=re.IGNORECASE)) != 1:
+        raise VerificationError("generated HTML does not contain exactly one head element")
+    text = re.sub(
+        head_pattern,
         rf"\1\n    {meta}\n    {scripts}",
         text,
         count=1,
         flags=re.IGNORECASE,
     )
-    if count != 1:
-        raise VerificationError("generated HTML does not contain exactly one head element")
     surface_style = """<style id="palomar-declaration-style">
       /* The registry page that frames this document follows the browser's
          light and dark preference, so this document has to follow with it.
@@ -1308,9 +1423,11 @@ def static_html_sanitize(
       .breadcrumbs .current,
       .breadcrumbs li:not(:last-child)::after { color: var(--palomar-ink); }
     </style>"""
-    text = re.sub(
+    text, closed_heads = re.subn(
         r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
     )
+    if closed_heads != 1:
+        raise VerificationError("generated HTML does not close its head element")
     return text
 
 
