@@ -210,9 +210,34 @@ and build-write probes and negative outside-read, outside-write, sibling
 process-environment, and outbound-network probes. It also runs a positive nested
 Landrun probe. If a positive operation is denied, a negative operation succeeds,
 or either confinement layer cannot be established, verification fails closed.
-The verifier and post-acceptance renderer use one positive-build-write and
-negative-outside-write probe contract, which removes its owned probe files even
-when the sandbox runner fails.
+
+Compatibility mode is what makes those probes load-bearing rather than
+decorative. The pinned Landrun asks the kernel to handle every access right
+up to Landlock ABI v9, including the v9 Unix-socket resolution right that the
+runner kernels do not yet provide. Refusing the downgrade would therefore not
+make the boundary strict, it would make every confined command fail to start
+on every host in use. The downgrade is measured instead: rights the kernel
+does not support are dropped silently, and a policy degraded far enough to
+permit a denied read, write, or connection is caught by these probes before
+any submitted Lean or Lake configuration runs. Landlock being absent
+altogether degrades the policy to nothing, which the write and read denial
+probes reject.
+
+The post-acceptance renderer runs the same probe contract as the verifier,
+under its own narrower policy, and fails closed on the same conditions. That
+matters more there than anywhere else, because compile-time Lean in the
+submitted Challenge, its macros and elaborators, execute during the render
+build. The renderer has no network-enabled confined phase to except. Every
+outbound step it takes is a trusted one outside Landrun: before the probe it
+clones the pinned Verso revision and fetches each revision the submitted Lake
+manifest pins, using Git directly rather than `lake update` so that no package
+post-update hook runs; after the probe, trusted `curl` fetches Mathlib cache
+archives. None of them load submitted Lake configuration, and every phase
+Landrun confines, on both sides of that download, is network-disabled, so
+outbound-network denial is proved for each of them. The renderer has no frozen
+trusted build directories, so the verifier's frozen-write probe has nothing to
+assert there and is not run. Both callers use a probe contract that removes
+its owned probe files even when the sandbox runner fails.
 
 Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
 protected Comparator configuration, and the verifier script are outside the

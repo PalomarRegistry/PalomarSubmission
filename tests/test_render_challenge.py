@@ -6,6 +6,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -28,7 +29,7 @@ from scripts.render_challenge import (
     static_html_sanitize,
     toolchain_verso_commit,
     trusted_lakefile,
-    verify_filesystem_confinement,
+    verify_sandbox_confinement,
 )
 from scripts.render_report import AcceptedRenderPaths
 from scripts.verification_errors import VerificationError
@@ -209,18 +210,48 @@ class RenderChallengeTests(unittest.TestCase):
         self.assertEqual(result, {"requested": 1, "downloaded": 0, "bytes": 0})
         sandbox.assert_not_called()
 
+    def renderer_probe_paths(self, root: Path) -> dict[str, Path]:
+        """Lay out the probe set the renderer's confinement call owns."""
+        writable = root / "writable"
+        writable.mkdir()
+        workspace = root / "workspace"
+        workspace.mkdir()
+        challenge = workspace / "Challenge.lean"
+        challenge.write_text("theorem probe : True := by trivial\n")
+        return {
+            "writable": writable,
+            "readable": workspace,
+            "positive_read": challenge,
+            "write_denied": root / "render-landrun-write-denial-probe",
+            "read_denied": root / "render-landrun-read-denial-probe",
+            "allowed": writable / ".palomar-landrun-write-probe",
+            "nested": writable / ".palomar-nested-landrun-probe",
+        }
+
+    def run_renderer_confinement(self, paths: dict[str, Path]) -> None:
+        verify_sandbox_confinement(
+            paths["write_denied"],
+            paths["read_denied"],
+            positive_read=paths["positive_read"],
+            python=Path(sys.executable),
+            touch=Path("/usr/bin/touch"),
+            cwd=paths["readable"],
+            environment={},
+            landrun=Path("/tools/landrun"),
+            writable_directories=[paths["writable"]],
+            readable_paths=[paths["readable"]],
+            executable_paths=[],
+            tools={},
+        )
+
     def test_renderer_confinement_cleans_probe_artifacts_on_runner_failure(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            writable = root / "writable"
-            writable.mkdir()
-            denied = root / "render-write-denied"
-            allowed = writable / ".palomar-landrun-write-probe"
+            paths = self.renderer_probe_paths(Path(directory))
 
             def fail_after_creation(command, **_kwargs):
                 path = Path(command[-1])
                 path.touch()
-                if path == allowed:
+                if path == paths["allowed"]:
                     return subprocess.CompletedProcess(command, 0, "", "")
                 raise VerificationError("renderer probe runner failed")
 
@@ -233,35 +264,21 @@ class RenderChallengeTests(unittest.TestCase):
                     VerificationError, "renderer probe runner failed"
                 ),
             ):
-                verify_filesystem_confinement(
-                    denied,
-                    touch=Path("/usr/bin/touch"),
-                    cwd=root,
-                    environment={},
-                    landrun=Path("/tools/landrun"),
-                    writable_directories=[writable],
-                    readable_paths=[],
-                    executable_paths=[],
-                    tools={},
-                )
+                self.run_renderer_confinement(paths)
 
-            self.assertFalse(allowed.exists())
-            self.assertFalse(denied.exists())
+            for name in ("allowed", "nested", "write_denied", "read_denied"):
+                self.assertFalse(paths[name].exists(), name)
 
     def test_renderer_confinement_rejects_a_created_denied_write(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            writable = root / "writable"
-            writable.mkdir()
-            denied = root / "render-write-denied"
-            allowed = writable / ".palomar-landrun-write-probe"
+            paths = self.renderer_probe_paths(Path(directory))
 
             def escape_write(command, **_kwargs):
                 path = Path(command[-1])
                 path.touch()
                 return subprocess.CompletedProcess(
                     command,
-                    0 if path == allowed else 1,
+                    0 if path in {paths["allowed"], paths["nested"]} else 1,
                     "",
                     "",
                 )
@@ -273,23 +290,102 @@ class RenderChallengeTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     VerificationError,
-                    "outer Landrun filesystem policy was not enforced",
+                    "outer sandbox write policy was not enforced",
                 ),
             ):
-                verify_filesystem_confinement(
-                    denied,
-                    touch=Path("/usr/bin/touch"),
-                    cwd=root,
-                    environment={},
-                    landrun=Path("/tools/landrun"),
-                    writable_directories=[writable],
-                    readable_paths=[],
-                    executable_paths=[],
-                    tools={},
-                )
+                self.run_renderer_confinement(paths)
 
-            self.assertFalse(allowed.exists())
-            self.assertFalse(denied.exists())
+            for name in ("allowed", "nested", "write_denied", "read_denied"):
+                self.assertFalse(paths[name].exists(), name)
+
+    def test_renderer_confinement_rejects_a_readable_denial_probe(self):
+        # The control the render path did not have: a boundary that permits
+        # every write it should and still reads outside its allowlist.
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.renderer_probe_paths(Path(directory))
+
+            def permit_every_read(command, **_kwargs):
+                path = Path(command[-1])
+                if path in {paths["allowed"], paths["nested"]}:
+                    path.touch()
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if path == paths["write_denied"]:
+                    return subprocess.CompletedProcess(command, 1, "", "denied")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=permit_every_read,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError, "outer sandbox read policy was not enforced"
+                ),
+            ):
+                self.run_renderer_confinement(paths)
+
+            for name in ("allowed", "nested", "write_denied", "read_denied"):
+                self.assertFalse(paths[name].exists(), name)
+
+    def test_renderer_confinement_rejects_reachable_outbound_network(self):
+        # The renderer's confined phases are all network-disabled: only
+        # trusted curl runs with egress, outside Landrun.
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.renderer_probe_paths(Path(directory))
+
+            def permit_network(command, **_kwargs):
+                path = Path(command[-1])
+                if path in {paths["allowed"], paths["nested"]}:
+                    path.touch()
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if path in {paths["write_denied"], paths["read_denied"]} or str(
+                    path
+                ).startswith("/proc/"):
+                    return subprocess.CompletedProcess(command, 1, "", "denied")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=permit_network,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "normal sandbox phase unexpectedly reached the network",
+                ),
+            ):
+                self.run_renderer_confinement(paths)
+
+            for name in ("allowed", "nested", "write_denied", "read_denied"):
+                self.assertFalse(paths[name].exists(), name)
+
+    def test_renderer_confinement_rejects_a_sibling_process_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.renderer_probe_paths(Path(directory))
+
+            def permit_proc(command, **_kwargs):
+                path = Path(command[-1])
+                if path in {paths["allowed"], paths["nested"]}:
+                    path.touch()
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if path in {paths["write_denied"], paths["read_denied"]}:
+                    return subprocess.CompletedProcess(command, 1, "", "denied")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=permit_proc,
+                ),
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "outer sandbox exposed another process environment",
+                ),
+            ):
+                self.run_renderer_confinement(paths)
+
+            for name in ("allowed", "nested", "write_denied", "read_denied"):
+                self.assertFalse(paths[name].exists(), name)
 
     def test_workspace_uses_accepted_paths_without_touching_fixed_name_decoys(self):
         with tempfile.TemporaryDirectory() as directory:
