@@ -1136,18 +1136,128 @@ def static_html_sanitize(
     if count != 1:
         raise VerificationError("generated HTML does not contain exactly one head element")
     surface_style = """<style id="palomar-declaration-style">
+      /* The registry page that frames this document follows the browser's
+         light and dark preference, so this document has to follow with it.
+         Nothing is passed across the origin boundary to make that happen: the
+         frame is laid out by the same browser, so the query below answers the
+         same way the page's does.
+
+         Verso's stylesheets name light colours directly, and a published
+         bundle is immutable, so the answers are frozen here as a palette
+         rather than read from the page. The dark values are the page's own, so
+         the frame sits on the paper it is drawn on. Every rule below this block
+         spends a token, never a literal.
+
+         The light values are Verso's own wherever a reader meets them: the
+         code surface, the docstring frames, the signature popup and the tactic
+         marks all render exactly as before. Where Verso reached for a colour
+         off its own scale — `black` popup borders, a `red` error underline,
+         `#e5e5e5` message panels, Bootstrap greys in the page shell — the
+         token takes over and light shifts a shade. Those are the diagnostic
+         panels and the shell a reader sees only with scripts disabled.
+         Carrying a second light value for each of them would have doubled a
+         palette that every future bundle is stuck with, to preserve choices
+         that were incidental. */
+      :root {
+        color-scheme: light dark;
+        --palomar-paper: #ffffff;
+        --palomar-ink: #24292e;
+        --palomar-line: #dddddd;
+        --palomar-edge: #888888;
+        --palomar-raise: #eeeeee;
+        --palomar-panel: #ffffff;
+        --palomar-rule: #e1e4e8;
+        --palomar-link: #0066cc;
+        --palomar-alarm: #b42318;
+        --palomar-alarm-paper: #ffb3b3;
+        --palomar-info: #4777ff;
+        --palomar-info-paper: #4777ff;
+        --palomar-mark: #bbbbbb;
+        --palomar-mark-on: #999999;
+        --palomar-shadow: rgb(0 0 0 / 22%);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --palomar-paper: #101216;
+          --palomar-ink: #e8eaee;
+          --palomar-line: #686f7c;
+          --palomar-edge: #8e96a3;
+          --palomar-raise: #242933;
+          --palomar-panel: #1c2027;
+          --palomar-rule: #3a404b;
+          --palomar-link: #8ab4f8;
+          --palomar-alarm: #ff9e91;
+          --palomar-alarm-paper: #3a1c1a;
+          --palomar-info: #8ab4f8;
+          --palomar-info-paper: #1c3a6b;
+          --palomar-mark: #686f7c;
+          --palomar-mark-on: #8e96a3;
+          --palomar-shadow: rgb(0 0 0 / 55%);
+        }
+      }
       html { height: auto !important; min-height: 100%; overflow: auto !important;
         overscroll-behavior: contain; }
       body { height: auto !important; min-height: 100%; margin: 0;
         overflow: visible !important; }
+      html, body { background: var(--palomar-paper); color: var(--palomar-ink); }
       .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
       .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
       .palomar-declaration-surface .md-text::before,
       .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
+      /* code.css paints the code surface and its docstring frames outright,
+         and this stylesheet is the last one in the head, so restating them at
+         equal specificity is enough to take them over. */
+      .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
+      .code-content .verso-text,
+      .code-content .md-text { border-color: var(--palomar-line); }
+      /* Each of these repeats a Verso selector exactly rather than writing a
+         shorter one that happens to reach the same elements. `:has()` and
+         `:not()` take the specificity of their argument, so a hand-shortened
+         selector loses to the original and the rule silently does nothing;
+         repeating it makes source order the only thing that decides, and this
+         stylesheet is last. */
+      @media (hover: hover) {
+        .hl.lean .token.binding-hl,
+        .hl.lean .literal:hover,
+        .hl.lean .token.typed:hover { background-color: var(--palomar-raise); }
+        .hl.lean .has-info.error:hover { background-color: var(--palomar-alarm-paper); }
+        .hl.lean .has-info.information:hover { background-color: var(--palomar-info-paper); }
+        .hl.lean .tactic:has(> .tactic-toggle:not(:checked))
+          > label:hover:not(:has(.tactic > label:hover)) {
+          background-color: var(--palomar-raise); }
+      }
+      .hl.lean .token .hover-info,
+      .hl.lean .has-info .hover-info { background-color: var(--palomar-panel);
+        border-color: var(--palomar-edge); }
+      .hl.lean .hover-info code { color: inherit; }
+      .hl.lean .hover-info .sep { border-top-color: var(--palomar-rule); }
+      .hl.lean .hover-info.messages > code.error { background-color: var(--palomar-panel);
+        border-left-color: var(--palomar-alarm); }
+      .hl.lean .hover-info.messages > code.information { background-color: var(--palomar-panel);
+        border-left-color: var(--palomar-info); }
+      .hl.lean .has-info.error :not(.tactic-state):not(.tactic-state *) {
+        text-decoration-color: var(--palomar-alarm); }
+      /* Verso's own fallback here is the keyword `blue`, which on dark paper is
+         an underline nobody can see. */
+      .hl.lean .has-info.information :not(.tactic-state):not(.tactic-state *) {
+        text-decoration-color: var(--palomar-info); }
+      .hl.lean .tactic-state { background-color: var(--palomar-panel);
+        border-color: var(--palomar-edge); }
+      .hl.lean.popup .tactic-state { background-color: var(--palomar-panel); }
+      /* The pill that says a tactic block can be opened, and the triangle that
+         says a case can. Verso draws the pill faintly on purpose, so the two
+         marks keep their own tokens rather than borrowing the border ones; the
+         triangle it draws in `black`, which is text, so it spends the ink. */
+      .hl.lean .tactic > label::after { border-color: var(--palomar-mark); }
+      .hl.lean .tactic > label:has(+ .tactic-toggle:checked)::after {
+        border-color: var(--palomar-mark-on); background-color: var(--palomar-mark-on); }
+      .hl.lean .case-label:has(input[type="checkbox"])::before {
+        background-color: var(--palomar-ink); }
       .palomar-hover {
-        padding: .65rem !important; border: 1px solid #888 !important;
-        border-radius: .35rem; background: #fff !important; color: #24292e !important;
-        box-shadow: 0 .25rem 1rem rgb(0 0 0 / 22%);
+        padding: .65rem !important; border: 1px solid var(--palomar-edge) !important;
+        border-radius: .35rem; background: var(--palomar-panel) !important;
+        color: var(--palomar-ink) !important;
+        box-shadow: 0 .25rem 1rem var(--palomar-shadow);
         /* The pointer must never land on the popup. If it does, it has left
            the token, so the popup hides, so the pointer is over the token
            again, so it shows: a flicker that sustains itself. */
@@ -1161,7 +1271,8 @@ def static_html_sanitize(
       .palomar-hover .hover-info { white-space: pre-wrap; }
       .palomar-hover .popup,
       .palomar-hover .hover-info,
-      .palomar-hover .docstring { background: #fff !important; color: #24292e !important; }
+      .palomar-hover .docstring { background: var(--palomar-panel) !important;
+        color: var(--palomar-ink) !important; }
       /* Verso separates a signature from its docstring with an empty span and
          leaves the spacing to a stylesheet we do not ship, so the two ran
          together: "... : Type (max u_7 u_8)The standard real/complex Euclidean
@@ -1172,9 +1283,30 @@ def static_html_sanitize(
         display: block;
         margin-top: .55rem;
         padding-top: .55rem;
-        border-top: 1px solid #e1e4e8;
+        border-top: 1px solid var(--palomar-rule);
       }
       .palomar-render-error { margin: 1rem; font-family: sans-serif; }
+      /* Verso's page shell, which a reader sees only where this document's
+         scripts do not run: the runtime replaces the whole body on both its
+         success and its failure path. It is answered broadly rather than rule
+         by rule, because normalising a shell nobody reaches is not worth
+         freezing a dozen more declarations into every published bundle. */
+      .sidebar { background: var(--palomar-raise); }
+      .title-bar, .hamburger { background: var(--palomar-paper); }
+      .sidebar, .title-bar, .hamburger { border-color: var(--palomar-line); }
+      .hamburger span { background: var(--palomar-ink); }
+      .module-tree summary a, .module-tree .leaf a,
+      .breadcrumbs a { color: var(--palomar-link); }
+      .module-tree summary:hover,
+      .breadcrumbs a:hover { background-color: var(--palomar-raise); }
+      .module-tree summary::before { color: var(--palomar-ink); }
+      .module-tree summary.current,
+      .module-tree .current { background-color: var(--palomar-link);
+        color: var(--palomar-paper); }
+      .module-tree summary.current a,
+      .module-tree .current a { color: var(--palomar-paper); }
+      .breadcrumbs .current,
+      .breadcrumbs li:not(:last-child)::after { color: var(--palomar-ink); }
     </style>"""
     text = re.sub(
         r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
