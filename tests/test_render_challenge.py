@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import html
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -939,7 +940,7 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
         self.assertIn("html { height: auto !important", sanitized)
         self.assertIn("overflow: visible !important", sanitized)
         self.assertIn("white-space: nowrap", sanitized)
-        self.assertIn("background: #fff !important", sanitized)
+        self.assertIn("background: var(--palomar-panel) !important", sanitized)
         self.assertIn("palomar-declaration-style", sanitized)
 
     def test_declaration_metadata_is_injected_after_url_rewriting(self):
@@ -1140,6 +1141,168 @@ class CallSignatureTests(unittest.TestCase):
                 )
             checked += 1
         self.assertGreater(checked, 10, "no cross-module calls were checked")
+
+
+def _injected_surface_style() -> str:
+    """The stylesheet Palomar adds to a rendered Challenge, as it is shipped."""
+    sanitized = static_html_sanitize(
+        '<!doctype html><html><head><base href="../"></head><body></body></html>',
+        "../palomar-sanitize.js",
+        "../palomar-verso.js",
+    )
+    match = re.search(
+        r'<style id="palomar-declaration-style">(.*?)</style>', sanitized, re.DOTALL
+    )
+    if match is None:
+        raise AssertionError("the sanitized page carries no declaration stylesheet")
+    return match.group(1)
+
+
+def _blocks(css: str) -> list[str]:
+    """The bodies of the innermost braced blocks, comments already gone."""
+    return re.findall(r"\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL))
+
+
+def _declarations(body: str) -> list[tuple[str, str]]:
+    pairs = []
+    for chunk in body.split(";"):
+        name, separator, value = chunk.partition(":")
+        if separator:
+            pairs.append((name.strip().lower(), value.strip()))
+    return pairs
+
+
+def _is_palette(body: str) -> bool:
+    """A block that only binds tokens, plus the `color-scheme` that opens the light one."""
+    pairs = _declarations(body)
+    return bool(pairs) and all(
+        name.startswith("--") or name == "color-scheme" for name, _ in pairs
+    )
+
+
+def _palettes(css: str) -> tuple[dict[str, str], dict[str, str]]:
+    """The light palette, and the dark block that overrides it. Tokens only."""
+    blocks = [
+        {name: value for name, value in _declarations(body) if name.startswith("--")}
+        for body in _blocks(css)
+        if _is_palette(body)
+    ]
+    if len(blocks) != 2:
+        raise AssertionError(f"expected a light and a dark palette, found {len(blocks)}")
+    return blocks[0], blocks[1]
+
+
+def _luminance(colour: str) -> float:
+    raw = colour.lstrip("#")
+    if len(raw) == 3:
+        raw = "".join(channel * 2 for channel in raw)
+    channels = [int(raw[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+    linear = [
+        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(one: str, other: str) -> float:
+    high, low = sorted((_luminance(one), _luminance(other)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+class RenderSurfaceAppearanceTests(unittest.TestCase):
+    """The framed render follows the browser's light and dark preference.
+
+    The frame is a separate document on a separate origin, so nothing hands it
+    a theme: it answers `prefers-color-scheme` itself, exactly as the page
+    around it does. What is checkable here is that the stylesheet Palomar
+    injects is in a position to answer, that no rule in it quietly names a
+    light colour instead of spending a palette token, and that both answers are
+    readable. A published bundle is immutable, so a palette that goes out wrong
+    stays wrong for that record.
+    """
+
+    # Text, and the surfaces it is set on. WCAG AA for body text.
+    READABLE = (
+        ("--palomar-ink", "--palomar-paper"),
+        ("--palomar-ink", "--palomar-panel"),
+        ("--palomar-ink", "--palomar-raise"),
+        ("--palomar-ink", "--palomar-alarm-paper"),
+        ("--palomar-link", "--palomar-paper"),
+        # The selected node in Verso's module tree reverses the two.
+        ("--palomar-paper", "--palomar-link"),
+        ("--palomar-alarm", "--palomar-paper"),
+    )
+    # Borders that carry meaning: they are what separates a popup from the code
+    # underneath it. WCAG AA for non-text.
+    VISIBLE = (
+        ("--palomar-edge", "--palomar-paper"),
+        ("--palomar-edge", "--palomar-panel"),
+    )
+    # Properties that put a colour on the page. `border` and `box-shadow` are
+    # shorthands that carry one.
+    COLOUR_PROPERTIES = frozenset(
+        {
+            "background",
+            "background-color",
+            "border",
+            "border-color",
+            "border-left-color",
+            "border-top-color",
+            "box-shadow",
+            "color",
+            "text-decoration-color",
+        }
+    )
+    # A colour property may decline to name a colour at all.
+    DEFERRED = frozenset({"inherit", "currentcolor", "transparent", "none", "unset"})
+
+    def test_the_surface_style_answers_the_browser_colour_preference(self):
+        style = _injected_surface_style()
+        self.assertIn("color-scheme: light dark", style)
+        self.assertIn("@media (prefers-color-scheme: dark)", style)
+        light, override = _palettes(style)
+        # A token bound in light and left out of dark is the whole bug this
+        # change fixes, one declaration at a time.
+        self.assertEqual(
+            sorted(light),
+            sorted(override),
+            "the dark palette must answer every token the light one binds",
+        )
+        self.assertEqual(
+            [],
+            [name for name, value in override.items() if light[name] == value],
+            "a dark token that repeats its light value says nothing",
+        )
+
+    def test_every_surface_colour_is_a_palette_token(self):
+        style = _injected_surface_style()
+        rules = [body for body in _blocks(style) if not _is_palette(body)]
+        for body in rules:
+            for name, value in _declarations(body):
+                if name.startswith("--") or name not in self.COLOUR_PROPERTIES:
+                    continue
+                cleaned = value.replace("!important", "").strip().lower()
+                self.assertTrue(
+                    "var(--palomar-" in cleaned or cleaned in self.DEFERRED,
+                    f"{name}: {value} names a colour instead of spending a token",
+                )
+        outside = "".join(rules)
+        self.assertNotRegex(outside, r"#[0-9a-fA-F]{3,8}\b")
+        self.assertNotRegex(outside, r"\b(?:rgba?|hsla?)\(")
+
+    def test_both_palettes_are_readable(self):
+        light, override = _palettes(_injected_surface_style())
+        for mode, palette in (("light", light), ("dark", {**light, **override})):
+            for ink, paper in self.READABLE:
+                ratio = _contrast(palette[ink], palette[paper])
+                self.assertGreaterEqual(
+                    ratio, 4.5, f"{mode}: {ink} on {paper} is only {ratio:.2f}:1"
+                )
+            for edge, paper in self.VISIBLE:
+                ratio = _contrast(palette[edge], palette[paper])
+                self.assertGreaterEqual(
+                    ratio, 3.0, f"{mode}: {edge} on {paper} is only {ratio:.2f}:1"
+                )
 
 
 if __name__ == "__main__":
