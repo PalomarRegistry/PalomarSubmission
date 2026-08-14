@@ -44,7 +44,10 @@ request starts one. There is one job, `verify`, and its `permissions` block is
 id, a closed `preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
 allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
-relationship with its optional evidence and free-text context. There is no
+relationship with its optional evidence. Nothing the submitter wrote in prose
+travels this way: a dispatch input on a public repository is readable by
+anyone, so the allowlist carries no free-text field, and a payload offering one
+is refused rather than published. There is no
 input for the submitter's GitHub identity, and none for an editorial review,
 which happens elsewhere and afterwards. The run uploads exactly one mode-specific artifact,
 `preflight-report-<request_id>` or `mechanical-report-<request_id>`, holding the bounded
@@ -285,7 +288,9 @@ a 1 MiB cap on the single regular UTF-8 root licence file. Licensee reads only
 that selected file, with package and README detection disabled and bounded
 subprocess output and runtime. Standard fresh Lake build locations are also
 required. The
-verifier itself supports a twelve-hour wall-clock allowance and applies no CPU
+verifier enforces the wall-clock allowance its caller passes, which
+[`.github/workflows/submission.yml`](.github/workflows/submission.yml) sets to
+19,800 seconds, five and a half hours, and applies no CPU
 quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
 descriptors, and files up to 1 TiB. These are emergency host-containment
 ceilings, not acceptance criteria; deployments may raise them on larger

@@ -67,12 +67,16 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
+# Dispatch inputs are world-readable on a public repository, so nothing a
+# submitter wrote for the reviewer's eyes belongs here. The retired `context`
+# field carried the submission form's free-text notes; the submission server no
+# longer sends it, and a payload that still does is refused below rather than
+# quietly published, which is what keeps it from returning unnoticed.
 OPTIONAL_FIELDS = frozenset(
     {
         "existing_id",
         "authorization_relationship",
         "authorization_evidence",
-        "context",
         "project_path",
         "comparator_config_path",
         "formalization_metadata_path",

@@ -3011,21 +3011,41 @@ class SubmissionRequestTests(unittest.TestCase):
             self.dispatch(options=json.dumps({
                 "project_path": "sub",
                 "comparator_config_path": "sub/comparator.json",
-                "context": "notes",
+                "existing_id": "PALOMAR-2026-01-01-000001",
             }))
         )
         self.assertEqual(values["repository_url"], "https://github.com/owner/repo")
         self.assertEqual(values["commit_sha"], "b" * 40)
         self.assertEqual(values["project_path"], "sub")
         self.assertEqual(values["comparator_config_path"], "sub/comparator.json")
-        self.assertEqual(values["context"], "notes")
+        self.assertEqual(values["existing_id"], "PALOMAR-2026-01-01-000001")
         self.assertEqual(submission_id, "abc123def456")
 
-    def test_every_optional_field_can_be_supplied(self):
-        """A field missing from the allowlist is dropped, not refused.
+    def test_free_text_context_is_refused_rather_than_republished(self):
+        """The submission form's notes are private, and a dispatch input is not.
 
-        That is the worse failure: the submitter believes they told us
-        something and nobody ever sees it.
+        `context` used to carry them into this public repository, where every
+        dispatch input can be read by anyone. The field is gone from both ends
+        now, and the allowlist is what stops it coming back: a payload still
+        carrying it fails loudly instead of publishing what it holds.
+        """
+        self.assertNotIn("context", OPTIONAL_FIELDS)
+        with self.assertRaisesRegex(
+            VerificationError, "Unrecognized submission options: context"
+        ):
+            submission_request(
+                self.dispatch(options=json.dumps({
+                    "comparator_config_path": "sub/comparator.json",
+                    "context": "private notes the submitter wrote for the reviewer",
+                }))
+            )
+
+    def test_every_optional_field_can_be_supplied(self):
+        """Every allowlisted field survives intake and reaches the verifier.
+
+        A field the allowlist knows about but intake quietly discarded is the
+        worse failure: the submitter believes they told us something and nobody
+        ever sees it.
         """
         supplied = {name: "x" for name in OPTIONAL_FIELDS}
         values, _ = submission_request(

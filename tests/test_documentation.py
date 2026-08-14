@@ -8,7 +8,8 @@ from scripts.submission_contract import OPTIONAL_FIELDS, REPAIRABLE_FORMALIZATIO
 
 ROOT = Path(__file__).resolve().parent.parent
 SECURITY = (ROOT / "SECURITY.md").read_text()
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/submission.yml").read_text())
+WORKFLOW_TEXT = (ROOT / ".github/workflows/submission.yml").read_text()
+WORKFLOW = yaml.safe_load(WORKFLOW_TEXT)
 
 
 def triggers(workflow):
@@ -46,7 +47,6 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
                 "authorization_evidence",
                 "authorization_relationship",
                 "comparator_config_path",
-                "context",
                 "existing_id",
                 "formalization_metadata_path",
                 "project_path",
@@ -54,6 +54,12 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         )
         self.assertIn("fixed `OPTIONAL_FIELDS`", SECURITY)
         self.assertIn("There is no\ninput for the submitter's GitHub identity", SECURITY)
+
+    def test_the_documented_wall_clock_allowance_is_the_one_dispatched(self):
+        # The verifier's own default is larger than what this workflow asks
+        # for, so the number a reader can check is the one on the command line.
+        self.assertIn("--execution-budget-seconds 19800", WORKFLOW_TEXT)
+        self.assertIn("19,800 seconds", SECURITY)
 
     def test_the_only_output_is_the_bounded_report_artifact(self):
         uploads = [
