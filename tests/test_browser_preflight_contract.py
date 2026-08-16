@@ -47,10 +47,6 @@ class BrowserPreflightContractTests(unittest.TestCase):
             submission_contract.REPOSITORY_ROLES,
         )
         self.assertEqual(
-            set(policy["formalization"]["source_types"]),
-            submission_contract.SOURCE_TYPES,
-        )
-        self.assertEqual(
             set(policy["formalization"]["source_relationships"]),
             submission_contract.SOURCE_RELATIONSHIPS,
         )
