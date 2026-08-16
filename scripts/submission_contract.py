@@ -67,6 +67,8 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
+CLASSIFICATION_REPAIR_MAXIMUMS = {"arxiv": 2, "msc2020": 8}
+
 # Every dispatch input is visible on the run page of this public repository, so
 # a submitter's private prose stays private only by the server never sending it.
 # `context` carried the submission form's free-text notes until the server
@@ -551,14 +553,19 @@ def _required_classifications(
     *,
     allowed: frozenset[str],
     minimum: int,
-    maximum: int,
+    maximum: int | None,
 ) -> list[str]:
-    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
-        count = (
-            f"{minimum} or {maximum}"
-            if minimum + 1 == maximum
-            else f"{minimum}–{maximum}"
-        )
+    too_short = not isinstance(value, list) or len(value) < minimum
+    too_long = isinstance(value, list) and maximum is not None and len(value) > maximum
+    if too_short or too_long:
+        if maximum is None:
+            count = f"at least {minimum}"
+        else:
+            count = (
+                f"{minimum} or {maximum}"
+                if minimum + 1 == maximum
+                else f"{minimum}–{maximum}"
+            )
         raise VerificationError(
             f"formalization.yaml field {path} must contain {count} classification codes"
         )
@@ -596,11 +603,11 @@ def _safe_string_list(value: Any) -> list[str] | None:
 
 def _safe_source(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
-        return None
+        return {}
     title = value.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return None
-    result: dict[str, Any] = {"title": title.strip()}
+    result: dict[str, Any] = {}
+    if isinstance(title, str) and title.strip():
+        result["title"] = title.strip()
     authors = _safe_people(value.get("authors"))
     if authors is None and "author" in value:
         authors = _safe_people(
@@ -612,12 +619,10 @@ def _safe_source(value: Any) -> dict[str, Any] | None:
         item = value.get(field)
         if isinstance(item, str) and item.strip():
             result[field] = item.strip()
-    if value.get("type") in SOURCE_TYPES:
-        result["type"] = value["type"]
-    if value.get("relationship") in SOURCE_RELATIONSHIPS:
-        result["relationship"] = value["relationship"]
-    if value.get("author_endorsement") in SOURCE_ENDORSEMENTS:
-        result["author_endorsement"] = value["author_endorsement"]
+    for field, maximum in (("type", 200), ("relationship", 500), ("author_endorsement", 100)):
+        item = value.get(field)
+        if isinstance(item, str) and item.strip() and len(item.strip()) <= maximum:
+            result[field] = item.strip()
     return result
 
 
@@ -660,7 +665,7 @@ def formalization_repair_draft(data: dict[str, Any]) -> dict[str, Any]:
             items = _safe_string_list(classification.get(name))
             if items:
                 field = f"classification.{name}"
-                values[field] = items
+                values[field] = items[:CLASSIFICATION_REPAIR_MAXIMUMS[name]]
                 origins[field] = field
 
     raw_sources = data.get("sources")
@@ -806,15 +811,15 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             "classification.arxiv",
             allowed=ARXIV_CATEGORIES,
             minimum=1,
-            maximum=2,
+            maximum=None,
         )
     )
     check(
         lambda: _required_classifications(
-            classification.get("msc2020"),
+            classification.get("msc2020", []),
             "classification.msc2020",
             allowed=MSC2020_CODES,
-            minimum=1,
+            minimum=0,
             maximum=8,
         )
     )
