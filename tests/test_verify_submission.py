@@ -1172,7 +1172,7 @@ review:
             self.assertNotIn("declared", report["provenance"])
             self.assertIn(report["provenance"]["result_origin"], {"original", "source-based"})
 
-    def test_formalization_metadata_rejects_unknown_or_too_many_classifications(self):
+    def test_formalization_metadata_accepts_many_arxiv_but_rejects_unknown_classifications(self):
         valid = """\
 project:
   name: Example result
@@ -1203,9 +1203,21 @@ review:
             path.write_text(valid.replace("[math.LO]", "[{code: math.LO}]"))
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
-            path.write_text(valid.replace("[math.LO]", "[math.LO, cs.LO, math.CO]"))
-            with self.assertRaisesRegex(VerificationError, "1 or 2 classification codes"):
-                load_formalization_metadata(path)
+            path.write_text(
+                valid.replace("[math.LO]", "[math.LO, cs.LO, math.CO]")
+                .replace("[03B35]", "[]")
+            )
+            metadata = load_formalization_metadata(path)
+            self.assertEqual(
+                metadata["classification"]["arxiv"],
+                ["math.LO", "cs.LO", "math.CO"],
+            )
+            self.assertEqual(
+                submission_contract.formalization_repair_draft(metadata)["values"][
+                    "classification.arxiv"
+                ],
+                ["math.LO", "cs.LO"],
+            )
             path.write_text(valid.replace("03B35", "99Z99"))
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
@@ -1689,8 +1701,7 @@ review:
                 {
                     "project.name", "project.authors", "project.license",
                     "project.responsible_maintainers", "classification.arxiv",
-                    "classification.msc2020", "sources", "automation.methods",
-                    "review.status",
+                    "sources", "automation.methods", "review.status",
                 },
             )
 
@@ -3201,8 +3212,7 @@ class MetadataShapeTests(unittest.TestCase):
             {
                 "project.name", "project.authors", "project.license",
                 "project.responsible_maintainers", "classification.arxiv",
-                "classification.msc2020", "sources", "automation.methods",
-                "review.status",
+                "sources", "automation.methods", "review.status",
             },
         )
         self.assertTrue(all(issue.repairable for issue in caught.exception.issues))
@@ -3231,6 +3241,7 @@ class MetadataShapeTests(unittest.TestCase):
             "title": "A source theorem",
             "authors": ["Emmy Noether"],
             "id": "arXiv:1234.5678",
+            "type": "article",
         }])
         self.assertEqual(draft["values"]["automation.methods"], [{
             "method": "agent", "framework": "Example agent",
@@ -3240,7 +3251,6 @@ class MetadataShapeTests(unittest.TestCase):
             "classification.msc2020", "review.status",
         ):
             self.assertNotIn(inferred, draft["values"])
-        self.assertNotIn("type", draft["values"]["sources"][0])
         self.assertNotIn("relationship", draft["values"]["sources"][0])
 
     def test_a_file_with_the_sections_gets_the_specific_complaint(self):
@@ -3266,7 +3276,6 @@ class MetadataShapeTests(unittest.TestCase):
             "project.authors",
             "project.license",
             "classification.arxiv",
-            "classification.msc2020",
             "automation.methods",
             "review.status",
         ):

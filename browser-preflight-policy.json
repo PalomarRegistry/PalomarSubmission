@@ -48,8 +48,8 @@
       "supersedes"
     ],
     "classification_cardinality": {
-      "arxiv": [1, 2],
-      "msc2020": [1, 8]
+      "arxiv": [1, null],
+      "msc2020": [0, 8]
     }
   },
   "comparator": {

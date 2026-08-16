@@ -63,6 +63,10 @@ class BrowserPreflightContractTests(unittest.TestCase):
             submission_contract.RELATED_FORMALIZATION_RELATIONSHIPS,
         )
         self.assertEqual(
+            policy["formalization"]["classification_cardinality"],
+            {"arxiv": [1, None], "msc2020": [0, 8]},
+        )
+        self.assertEqual(
             set(policy["comparator"]["standard_axioms"]), verify_submission.STANDARD_AXIOMS
         )
 
