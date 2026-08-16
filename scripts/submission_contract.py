@@ -32,7 +32,6 @@ __all__ = (
     "SHA_RE",
     "SOURCE_ENDORSEMENTS",
     "SOURCE_RELATIONSHIPS",
-    "SOURCE_TYPES",
     "SUBMISSION_ID_RE",
     "UniqueKeySafeLoader",
     "load_formalization_metadata",
@@ -100,14 +99,6 @@ AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
     "I am a Palomar Technical Maintainer testing the workflow": "technical-test",
-}
-SOURCE_TYPES = {
-    "paper",
-    "book",
-    "web discussion",
-    "folklore",
-    "original-proof",
-    "other",
 }
 ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
@@ -440,11 +431,6 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
                 f"formalization.yaml field {path}.relationship must be one of: {allowed}"
             )
         source_type = _optional_text(item.get("type"), f"{path}.type", maximum=200)
-        if source_type is not None and source_type not in SOURCE_TYPES:
-            allowed = ", ".join(sorted(SOURCE_TYPES))
-            raise VerificationError(
-                f"formalization.yaml field {path}.type must be one of: {allowed}"
-            )
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
             "authors": _person_records_with_singular_alias(

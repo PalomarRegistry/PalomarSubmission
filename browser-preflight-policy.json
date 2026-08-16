@@ -17,14 +17,6 @@
       "substantive-development",
       "thin-wrapper"
     ],
-    "source_types": [
-      "book",
-      "folklore",
-      "original-proof",
-      "other",
-      "paper",
-      "web discussion"
-    ],
     "source_relationships": [
       "adapts",
       "background",

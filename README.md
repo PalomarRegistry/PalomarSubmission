@@ -137,10 +137,11 @@ least one entry is `original-proof`, every such entry uses `other`, and every
 other relationship is `background` or `other`; it is source-based exactly when
 there is no `original-proof` entry and at least one relationship is
 `formalizes`, `adapts`, or `independently-proves`. All other combinations fail.
-A supplied source `type` must be exactly `paper`, `book`, `web discussion`,
-`folklore`, `original-proof`, or `other`; it may be omitted except where
-`original-proof` is the origin declaration. Invalid or missing provenance fails
-mechanical verification with the field that needs changing.
+A supplied source `type` is a concise free-text description such as `article`,
+`paper`, `book`, `formalization`, or `web post`; it may be omitted except
+where the exact value `original-proof` is the origin declaration. Invalid or
+missing provenance fails mechanical verification with the field that needs
+changing.
 New files should not add a top-level `provenance` block: put maintainers under
 `project`, the optional thin-wrapper target under `repository`, and result origin
 in the source entries as above. For compatibility with older files, the verifier

@@ -1019,21 +1019,21 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@dc76d6dc29f16e2d7fb3c078443eb1b28506bf85.
+        # Exact snapshot of PalomarTemplate@3b6f485fd351d46d1db4676835f4f996291f7c4a.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "4583bed61e02d0b4f76bb77511c3b6989e41a0cbdcafc8776109845e7f611395",
+            "90dffa637ab88bd098986d8494e15dd5abcb9d9fbd5bcc2d71731be74aad09c3",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(template["version"], "v0.4")
         self.assertNotIn("repository", template)
         self.assertEqual(
             template["sources"][0]["type"],
-            "TEMPLATE: paper, book, web discussion, folklore, original-proof, or other",
+            "TEMPLATE: concise source kind, for example article, book, or formalization",
         )
 
         template["project"]["name"] = "Example result"
@@ -1440,11 +1440,10 @@ review:
             submission_contract.normalized_provenance(invalid_relationship)
 
         invalid_type = json.loads(json.dumps(current))
-        invalid_type["sources"][0]["type"] = "web-discussion"
+        invalid_type["sources"][0]["type"] = "x" * 201
         with self.assertRaisesRegex(
             VerificationError,
-            r"sources\[0\]\.type must be one of: book, folklore, original-proof, other, "
-            r"paper, web discussion",
+            r"sources\[0\]\.type exceeds 200 characters",
         ):
             submission_contract.normalized_provenance(invalid_type)
 
@@ -1455,17 +1454,11 @@ review:
         ):
             submission_contract.normalized_provenance(invalid_endorsement)
 
-    def test_source_types_exactly_match_the_current_template_vocabulary(self):
-        expected = {
-            "paper",
-            "book",
-            "web discussion",
-            "folklore",
-            "original-proof",
-            "other",
-        }
-        self.assertEqual(submission_contract.SOURCE_TYPES, expected)
-        for source_type in sorted(expected):
+    def test_source_types_are_bounded_free_text_with_original_proof_reserved(self):
+        for source_type in (
+            "article", "paper", "book", "formalization", "web-discussion",
+            "conversation", "original-proof",
+        ):
             with self.subTest(source_type=source_type):
                 source = {
                     "title": "A mathematical source",
