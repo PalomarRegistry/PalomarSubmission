@@ -1417,7 +1417,7 @@ review:
         self.assertEqual(provenance["repository_role"], "substantive-development")
         self.assertNotIn("substantive_formalization", provenance)
 
-    def test_unrecognized_enumerated_provenance_values_are_rejected(self):
+    def test_repository_role_remains_enumerated_while_descriptions_are_free_text(self):
         current = {
             "project": {"responsible_maintainers": ["Ada Lovelace"]},
             "repository": {"role": "substantive-development"},
@@ -1432,12 +1432,26 @@ review:
         ):
             submission_contract.normalized_provenance(invalid_role)
 
-        invalid_relationship = json.loads(json.dumps(current))
-        invalid_relationship["sources"][0]["relationship"] = "informal_proof"
-        with self.assertRaisesRegex(
-            VerificationError, r"sources\[0\]\.relationship must be one of:"
-        ):
-            submission_contract.normalized_provenance(invalid_relationship)
+        custom_relationship = json.loads(json.dumps(current))
+        custom_relationship["sources"].append({
+            "title": "An informal account",
+            "relationship": "informal proof sketch",
+            "author_endorsement": "discussed in correspondence",
+        })
+        custom_relationship["related_formalizations"] = [{
+            "id": "https://example.com/formalization",
+            "relationship": "shares its computational infrastructure",
+        }]
+        provenance = submission_contract.normalized_provenance(custom_relationship)
+        self.assertEqual(provenance["mathematical_sources"][1]["relationship"], "other")
+        self.assertEqual(
+            provenance["mathematical_sources"][1]["author_endorsement"],
+            "discussed in correspondence",
+        )
+        self.assertEqual(
+            provenance["related_formalizations"][0]["relationship"],
+            "shares its computational infrastructure",
+        )
 
         invalid_type = json.loads(json.dumps(current))
         invalid_type["sources"][0]["type"] = "x" * 201
@@ -1446,13 +1460,6 @@ review:
             r"sources\[0\]\.type exceeds 200 characters",
         ):
             submission_contract.normalized_provenance(invalid_type)
-
-        invalid_endorsement = json.loads(json.dumps(current))
-        invalid_endorsement["sources"][0]["author_endorsement"] = "unknown"
-        with self.assertRaisesRegex(
-            VerificationError, r"sources\[0\]\.author_endorsement must be one of:"
-        ):
-            submission_contract.normalized_provenance(invalid_endorsement)
 
     def test_source_types_are_bounded_free_text_with_original_proof_reserved(self):
         for source_type in (
@@ -3209,6 +3216,27 @@ class MetadataShapeTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(issue.repairable for issue in caught.exception.issues))
+
+    def test_automation_method_is_bounded_free_text(self):
+        metadata = self.load(
+            "project:\n"
+            "  name: Example\n"
+            "  authors: [Ada Lovelace]\n"
+            "  license: MIT\n"
+            "  responsible_maintainers: [Ada Lovelace]\n"
+            "classification:\n"
+            "  arxiv: [math.LO]\n"
+            "  msc2020: []\n"
+            "sources:\n"
+            "  - title: Source theorem\n"
+            "    relationship: formalizes\n"
+            "automation:\n"
+            "  methods:\n"
+            "    - method: AI-assisted\n"
+            "review:\n"
+            "  status: self-assessed\n"
+        )
+        self.assertEqual(metadata["automation"]["methods"][0]["method"], "AI-assisted")
 
     def test_legacy_values_are_safely_prefilled_without_inference(self):
         with self.assertRaises(FormalizationValidationError) as caught:

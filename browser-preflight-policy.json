@@ -17,27 +17,12 @@
       "substantive-development",
       "thin-wrapper"
     ],
-    "source_relationships": [
+    "source_relationship_categories": [
       "adapts",
       "background",
       "formalizes",
       "independently-proves",
       "other"
-    ],
-    "source_endorsements": [
-      "declined",
-      "endorsed",
-      "n/a",
-      "no-response",
-      "not-contacted",
-      "participated"
-    ],
-    "related_relationships": [
-      "adapts",
-      "builds-on",
-      "independent",
-      "other",
-      "supersedes"
     ],
     "classification_cardinality": {
       "arxiv": [1, null],

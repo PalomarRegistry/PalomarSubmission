@@ -25,13 +25,12 @@ __all__ = (
     "ORCID_RE",
     "ORIGINAL_PROOF_TYPE",
     "PALOMAR_ID_RE",
-    "RELATED_FORMALIZATION_RELATIONSHIPS",
     "REPOSITORY_RE",
     "REPOSITORY_ROLES",
     "REPAIRABLE_FORMALIZATION_FIELDS",
     "SHA_RE",
-    "SOURCE_ENDORSEMENTS",
-    "SOURCE_RELATIONSHIPS",
+    "SOURCE_RELATIONSHIP_CATEGORIES",
+    "SUBSTANTIVE_SOURCE_RELATIONSHIPS",
     "SUBMISSION_ID_RE",
     "UniqueKeySafeLoader",
     "load_formalization_metadata",
@@ -102,28 +101,16 @@ AUTHORIZATION_RELATIONSHIPS = {
 }
 ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
-SOURCE_RELATIONSHIPS = {
+SUBSTANTIVE_SOURCE_RELATIONSHIPS = frozenset({
     "formalizes",
     "adapts",
     "independently-proves",
+})
+SOURCE_RELATIONSHIP_CATEGORIES = frozenset({
+    *SUBSTANTIVE_SOURCE_RELATIONSHIPS,
     "background",
     "other",
-}
-SOURCE_ENDORSEMENTS = {
-    "participated",
-    "endorsed",
-    "no-response",
-    "not-contacted",
-    "declined",
-    "n/a",
-}
-RELATED_FORMALIZATION_RELATIONSHIPS = {
-    "builds-on",
-    "adapts",
-    "independent",
-    "supersedes",
-    "other",
-}
+})
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -424,12 +411,19 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
                 "every source needs a relationship, including original-proof entries, which "
                 "must use other"
             )
-        relationship = raw_relationship.strip()
-        if relationship not in SOURCE_RELATIONSHIPS:
-            allowed = ", ".join(sorted(SOURCE_RELATIONSHIPS))
+        relationship_text = raw_relationship.strip()
+        if len(relationship_text) > 500:
             raise VerificationError(
-                f"formalization.yaml field {path}.relationship must be one of: {allowed}"
+                f"formalization.yaml field {path}.relationship exceeds 500 characters"
             )
+        # The submitted description remains free-form. The public provenance
+        # contract has five semantic categories, so an unfamiliar description
+        # has the same provenance meaning as an explicit `other`.
+        relationship = (
+            relationship_text
+            if relationship_text in SOURCE_RELATIONSHIP_CATEGORIES
+            else "other"
+        )
         source_type = _optional_text(item.get("type"), f"{path}.type", maximum=200)
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
@@ -452,12 +446,6 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
                 record[record_key] = value
         if source_type is not None:
             record["type"] = source_type
-        endorsement = record.get("author_endorsement")
-        if endorsement is not None and endorsement not in SOURCE_ENDORSEMENTS:
-            allowed = ", ".join(sorted(SOURCE_ENDORSEMENTS))
-            raise VerificationError(
-                f"formalization.yaml field {path}.author_endorsement must be one of: {allowed}"
-            )
         sources.append(record)
 
     has_original_proof = any(
@@ -467,9 +455,8 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         result_origin = "original"
     else:
         result_origin = "source-based"
-    substantive_relationships = {"formalizes", "adapts", "independently-proves"}
     if result_origin == "source-based" and not any(
-        source["relationship"] in substantive_relationships for source in sources
+        source["relationship"] in SUBSTANTIVE_SOURCE_RELATIONSHIPS for source in sources
     ):
         raise VerificationError(
             "formalization.yaml sources for a source-based result must include a "
@@ -486,7 +473,7 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             "the substantive relationship instead"
         )
     if result_origin == "original" and any(
-        source["relationship"] in substantive_relationships for source in sources
+        source["relationship"] in SUBSTANTIVE_SOURCE_RELATIONSHIPS for source in sources
     ):
         raise VerificationError(
             "formalization.yaml declares an original-proof, so every source must use "
@@ -507,10 +494,9 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         relationship = _required_text(
             item.get("relationship"), f"{path}.relationship"
         ).strip()
-        if relationship not in RELATED_FORMALIZATION_RELATIONSHIPS:
-            allowed = ", ".join(sorted(RELATED_FORMALIZATION_RELATIONSHIPS))
+        if len(relationship) > 500:
             raise VerificationError(
-                f"formalization.yaml field {path}.relationship must be one of: {allowed}"
+                f"formalization.yaml field {path}.relationship exceeds 500 characters"
             )
         record = {
             "identifier": _required_text(item.get("id"), f"{path}.id").strip(),
@@ -852,7 +838,14 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             )
         for index, method in enumerate(methods):
             item = _required_mapping(method, f"automation.methods[{index}]")
-            _required_text(item.get("method"), f"automation.methods[{index}].method")
+            method_name = _required_text(
+                item.get("method"), f"automation.methods[{index}].method"
+            )
+            if len(method_name) > 500:
+                raise VerificationError(
+                    f"formalization.yaml field automation.methods[{index}].method "
+                    "exceeds 500 characters"
+                )
 
     check(check_automation)
 
