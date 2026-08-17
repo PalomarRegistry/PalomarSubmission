@@ -435,6 +435,7 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         for source_key, record_key, maximum in (
             ("id", "identifier", 2_048),
             ("location", "location", 1_000),
+            ("note", "note", 10_000),
             ("license", "license", 500),
             ("author_endorsement", "author_endorsement", 100),
         ):
@@ -591,7 +592,10 @@ def _safe_source(value: Any) -> dict[str, Any] | None:
         item = value.get(field)
         if isinstance(item, str) and item.strip():
             result[field] = item.strip()
-    for field, maximum in (("type", 200), ("relationship", 500), ("author_endorsement", 100)):
+    for field, maximum in (
+        ("type", 200), ("relationship", 500), ("note", 10_000),
+        ("author_endorsement", 100),
+    ):
         item = value.get(field)
         if isinstance(item, str) and item.strip() and len(item.strip()) <= maximum:
             result[field] = item.strip()
