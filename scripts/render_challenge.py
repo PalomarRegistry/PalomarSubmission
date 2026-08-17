@@ -69,7 +69,10 @@ MAX_BUILD_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CACHE_ARCHIVES = 10_000
 MAX_CACHE_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
-BUILD_TIMEOUT_SECONDS = 60 * 60
+# GitHub-hosted Actions jobs may run for at most six hours. Keep the confined
+# build's own deadline at that ceiling too; the workflow job remains the final
+# authority if setup time means it reaches GitHub's limit first.
+BUILD_TIMEOUT_SECONDS = 6 * 60 * 60
 HTML_TIMEOUT_SECONDS = 10 * 60
 SANITIZE_TIMEOUT_SECONDS = 2 * 60
 RESOURCE_PROPERTIES = (
@@ -86,6 +89,16 @@ CACHE_DOWNLOAD_PROPERTIES = (
     "LimitNOFILE=16384",
     f"LimitFSIZE={MAX_CACHE_ARCHIVE_BYTES}",
     "RuntimeMaxSec=1800",
+)
+
+# Mathlib's canonical cache moved new master-built artifacts to the
+# ``mathlib4-master`` container. The old flat ``mathlib4`` container remains a
+# read-only legacy fallback for artifacts from before the cutover. Keep this
+# fixed, trusted chain local rather than executing submitted cache policy; in
+# particular, do not read fork containers whose writers are not trusted.
+MATHLIB_CACHE_BASE_URLS = (
+    "https://lakecache.blob.core.windows.net/mathlib4-master",
+    "https://lakecache.blob.core.windows.net/mathlib4",
 )
 
 ALLOWED_EXTENSIONS = {
@@ -1705,12 +1718,6 @@ def download_mathlib_cache(
         raise VerificationError("invalid Mathlib cache download configuration path")
     if config.exists():
         config.unlink()
-    lines: list[str] = []
-    for digest in sorted(hashes):
-        url = f"https://lakecache.blob.core.windows.net/mathlib4/f/{digest}.ltar"
-        destination = cache_dir / f"{digest}.ltar"
-        lines.extend([f"url = {json.dumps(url)}", f"output = {json.dumps(str(destination))}"])
-    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
     clean_path = "/usr/bin:/bin"
     clean_env = {
         "HOME": environment["HOME"],
@@ -1718,62 +1725,82 @@ def download_mathlib_cache(
         "TMPDIR": environment["TMPDIR"],
         "LANG": "C.UTF-8",
     }
-    command = [
-        str(env_tool),
-        "-i",
-        *(f"{name}={value}" for name, value in clean_env.items()),
-        str(curl),
-        "--disable",
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--remove-on-error",
-        "--proto",
-        "=https",
-        "--proto-redir",
-        "=https",
-        "--parallel",
-        "--parallel-immediate",
-        "--parallel-max",
-        "32",
-        "--retry",
-        "3",
-        "--max-filesize",
-        str(MAX_CACHE_ARCHIVE_BYTES),
-        "--config",
-        str(config),
-    ]
-    run(
-        systemd_command(
-            command,
-            cwd=trusted_work,
-            environment=environment,
-            unrestricted_network=True,
-            resource_properties=CACHE_DOWNLOAD_PROPERTIES,
-        ),
-        cwd=trusted_work,
-        # systemd-run needs the caller's user-bus variables.  The actual curl
-        # child is still launched through ``env -i`` above.
-        env=environment,
-        timeout=1800,
-        check=False,
-    )
-    config.unlink()
-    downloaded = 0
+    downloaded: set[str] = set()
     total = 0
-    for path in cache_dir.iterdir():
-        if path.is_symlink() or not path.is_file() or not re.fullmatch(r"[0-9a-f]{16}\.ltar", path.name):
-            raise VerificationError(f"unexpected Mathlib cache download: {path.name!r}")
-        if path.stem not in hashes:
-            raise VerificationError(f"unrequested Mathlib cache download: {path.name!r}")
-        size = path.stat().st_size
-        if size == 0 or size > MAX_CACHE_ARCHIVE_BYTES:
-            raise VerificationError(f"invalid Mathlib cache archive size: {path.name}")
-        downloaded += 1
-        total += size
-        if total > MAX_CACHE_BYTES:
-            raise VerificationError("Mathlib cache downloads exceed the byte cap")
-    return downloaded, total
+    try:
+        for base_url in MATHLIB_CACHE_BASE_URLS:
+            remaining = sorted(hashes - downloaded)
+            if not remaining:
+                break
+            lines: list[str] = []
+            for digest in remaining:
+                url = f"{base_url}/f/{digest}.ltar"
+                destination = cache_dir / f"{digest}.ltar"
+                lines.extend(
+                    [f"url = {json.dumps(url)}", f"output = {json.dumps(str(destination))}"]
+                )
+            config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            command = [
+                str(env_tool),
+                "-i",
+                *(f"{name}={value}" for name, value in clean_env.items()),
+                str(curl),
+                "--disable",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--remove-on-error",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--parallel",
+                "--parallel-immediate",
+                "--parallel-max",
+                "32",
+                "--retry",
+                "3",
+                "--max-filesize",
+                str(MAX_CACHE_ARCHIVE_BYTES),
+                "--config",
+                str(config),
+            ]
+            run(
+                systemd_command(
+                    command,
+                    cwd=trusted_work,
+                    environment=environment,
+                    unrestricted_network=True,
+                    resource_properties=CACHE_DOWNLOAD_PROPERTIES,
+                ),
+                cwd=trusted_work,
+                # systemd-run needs the caller's user-bus variables. The actual
+                # curl child is still launched through ``env -i`` above.
+                env=environment,
+                timeout=1800,
+                check=False,
+            )
+            downloaded = set()
+            total = 0
+            for path in cache_dir.iterdir():
+                if (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or not re.fullmatch(r"[0-9a-f]{16}\.ltar", path.name)
+                ):
+                    raise VerificationError(f"unexpected Mathlib cache download: {path.name!r}")
+                if path.stem not in hashes:
+                    raise VerificationError(f"unrequested Mathlib cache download: {path.name!r}")
+                size = path.stat().st_size
+                if size == 0 or size > MAX_CACHE_ARCHIVE_BYTES:
+                    raise VerificationError(f"invalid Mathlib cache archive size: {path.name}")
+                downloaded.add(path.stem)
+                total += size
+                if total > MAX_CACHE_BYTES:
+                    raise VerificationError("Mathlib cache downloads exceed the byte cap")
+    finally:
+        config.unlink(missing_ok=True)
+    return len(downloaded), total
 
 
 def hydrate_mathlib_cache(

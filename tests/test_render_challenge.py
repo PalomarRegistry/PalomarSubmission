@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from scripts.render_challenge import (
+    BUILD_TIMEOUT_SECONDS,
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
     artifact_manifest,
@@ -130,6 +131,9 @@ console.log(JSON.stringify({
 
 
 class RenderChallengeTests(unittest.TestCase):
+    def test_build_timeout_matches_the_github_hosted_job_maximum(self):
+        self.assertEqual(BUILD_TIMEOUT_SECONDS, 6 * 60 * 60)
+
     def test_missing_mathlib_cache_is_an_optimization_miss(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -177,6 +181,44 @@ class RenderChallengeTests(unittest.TestCase):
                     env_tool=Path("/usr/bin/env"),
                 )
         self.assertEqual((downloaded, size), (1, len(b"archive")))
+
+    def test_mathlib_cache_tries_master_then_legacy_for_only_the_misses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+            first = "0123456789abcdef"
+            second = "fedcba9876543210"
+            configurations = []
+
+            def download(*_args, **_kwargs):
+                configurations.append((root / "mathlib-cache-download.conf").read_text())
+                digest = first if len(configurations) == 1 else second
+                (cache / f"{digest}.ltar").write_bytes(digest.encode())
+                return subprocess.CompletedProcess([], 22, "", "one archive was missing")
+
+            with mock.patch(
+                "scripts.render_challenge.run", side_effect=download
+            ), mock.patch(
+                "scripts.render_challenge.systemd_command",
+                side_effect=lambda command, **_kwargs: command,
+            ):
+                downloaded, size = download_mathlib_cache(
+                    {first, second},
+                    cache,
+                    trusted_work=root,
+                    environment=environment,
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                )
+
+        self.assertEqual(downloaded, 2)
+        self.assertEqual(size, len(first) + len(second))
+        self.assertEqual(len(configurations), 2)
+        self.assertIn(f"mathlib4-master/f/{first}.ltar", configurations[0])
+        self.assertIn(f"mathlib4-master/f/{second}.ltar", configurations[0])
+        self.assertIn(f"mathlib4/f/{second}.ltar", configurations[1])
+        self.assertNotIn(f"mathlib4/f/{first}.ltar", configurations[1])
 
     def test_zero_cache_downloads_skip_unpack_and_leave_source_build_to_follow(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3148,6 +3148,12 @@ class DispatchWorkflowTests(unittest.TestCase):
                     f"{name} shares one concurrency group across submissions: {group}",
                 )
 
+    def test_render_job_uses_the_github_hosted_execution_limit(self):
+        self.assertEqual(
+            self.render_workflow()["jobs"]["render"]["timeout-minutes"],
+            "360",
+        )
+
     def test_root_project_render_dispatch_uses_the_empty_default(self):
         """GitHub refuses an explicitly empty value for a required input.
 
