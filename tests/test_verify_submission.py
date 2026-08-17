@@ -1436,6 +1436,7 @@ review:
         custom_relationship["sources"].append({
             "title": "An informal account",
             "relationship": "informal proof sketch",
+            "note": "Suggested the key lemma without stating the final theorem.",
             "author_endorsement": "discussed in correspondence",
         })
         custom_relationship["related_formalizations"] = [{
@@ -1447,6 +1448,10 @@ review:
         self.assertEqual(
             provenance["mathematical_sources"][1]["author_endorsement"],
             "discussed in correspondence",
+        )
+        self.assertEqual(
+            provenance["mathematical_sources"][1]["note"],
+            "Suggested the key lemma without stating the final theorem.",
         )
         self.assertEqual(
             provenance["related_formalizations"][0]["relationship"],
