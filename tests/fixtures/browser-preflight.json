@@ -6,7 +6,7 @@
       "files": {
         "comparator": "palomar-template-comparator.json"
       },
-      "formalization": "version: v0.4\nproject:\n  name: Example\n  authors: [Example Author]\n  license: MIT\n  responsible_maintainers: [Example Maintainer]\nclassification:\n  arxiv: [math.LO]\n  msc2020: [03B35]\nsources:\n  - title: Original result\n    type: original-proof\n    relationship: other\nautomation:\n  methods:\n    - method: manual\nreview:\n  status: self-assessed\n",
+      "formalization": "version: v0.4\nproject:\n  name: Example\n  description: A formalization of the example result.\n  authors: [Example Author]\n  license: MIT\n  responsible_maintainers: [Example Maintainer]\nclassification:\n  arxiv: [math.LO]\n  msc2020: [03B35]\nsources:\n  - title: Original result\n    type: original-proof\n    relationship: other\nautomation:\n  methods:\n    - method: manual\nreview:\n  status: self-assessed\n",
       "toolchain": "leanprover/lean4:v99.0.0",
       "expected_codes": []
     },

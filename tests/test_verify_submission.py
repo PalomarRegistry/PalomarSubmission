@@ -957,6 +957,7 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
 version: v0.4
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -987,6 +988,7 @@ review:
                 """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainer: Ada Lovelace
@@ -1026,7 +1028,7 @@ review:
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "90dffa637ab88bd098986d8494e15dd5abcb9d9fbd5bcc2d71731be74aad09c3",
+            "351189522009d7a92486855dbc6ce45ec5e2e959f451ad19a8489f784998c19d",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(template["version"], "v0.4")
@@ -1072,6 +1074,7 @@ review:
                 """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -1176,6 +1179,7 @@ review:
         valid = """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -1704,7 +1708,7 @@ review:
             self.assertEqual(
                 {issue.field for issue in caught.exception.issues},
                 {
-                    "project.name", "project.authors", "project.license",
+                    "project.name", "project.description", "project.authors", "project.license",
                     "project.responsible_maintainers", "classification.arxiv",
                     "sources", "automation.methods", "review.status",
                 },
@@ -3221,7 +3225,7 @@ class MetadataShapeTests(unittest.TestCase):
         self.assertEqual(
             fields,
             {
-                "project.name", "project.authors", "project.license",
+                "project.name", "project.description", "project.authors", "project.license",
                 "project.responsible_maintainers", "classification.arxiv",
                 "sources", "automation.methods", "review.status",
             },
@@ -3232,6 +3236,7 @@ class MetadataShapeTests(unittest.TestCase):
         metadata = self.load(
             "project:\n"
             "  name: Example\n"
+            "  description: A formalization of the example result.\n"
             "  authors: [Ada Lovelace]\n"
             "  license: MIT\n"
             "  responsible_maintainers: [Ada Lovelace]\n"
