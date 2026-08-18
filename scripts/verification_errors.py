@@ -24,8 +24,10 @@ class VerificationError(RuntimeError):
         column: int | None = None,
         field: str | None = None,
         repairable: bool = False,
+        detail: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.detail = detail
         self.code = code
         self.owner = owner
         self.next_action = next_action
@@ -37,12 +39,17 @@ class VerificationError(RuntimeError):
         self.repairable = repairable
 
     def diagnostic(self, stage: str) -> dict[str, Any]:
+        # The reader is shown `explanation` only where it says more than
+        # `summary`, so evidence belongs here rather than in a longer sentence.
+        explanation = str(self)
+        if self.detail:
+            explanation = f"{explanation}\n\n{self.detail[:1_500]}"
         result: dict[str, Any] = {
             "code": self.code,
             "stage": stage,
             "owner": self.owner,
             "summary": str(self)[:500],
-            "explanation": str(self)[:2_000],
+            "explanation": explanation[:2_000],
             "next_action": self.next_action[:1_000],
             "retryable": self.retryable,
             "repairable": self.repairable,

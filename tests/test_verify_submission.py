@@ -34,6 +34,7 @@ from scripts.verify_submission import (
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
+    comparator_failure,
     compile_canonical_challenge,
     detect_spdx_identifier,
     ensure_lake_manifest,
@@ -2132,6 +2133,52 @@ review:
                         expected,
                     )
                 self.assertIn("--deps-json", sandbox.call_args.args[0])
+
+    def test_comparator_failure_quotes_the_lines_that_say_why(self):
+        log = "\n".join(
+            ["Building Challenge.Basic"]
+            + [f"\u2714 [{n}/2012] Built Something (1.4s)" for n in range(2011)]
+            + ["Challenge/Basic.lean:42:8: error: unknown identifier `foo`",
+               "uncaught exception: Challenge and solution theorem statement do not match: 'main'"]
+        )
+        error = comparator_failure(1, log, canonical_root=Path("/work/canonical-challenge"))
+        diagnostic = error.diagnostic("comparator")
+        self.assertEqual(diagnostic["code"], "comparator.rejected")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertIn("statement do not match", diagnostic["explanation"])
+        self.assertIn("unknown identifier", diagnostic["explanation"])
+        self.assertNotIn("Built Something", diagnostic["explanation"])
+        # The submitter is shown the explanation only where it says more.
+        self.assertNotEqual(diagnostic["explanation"], diagnostic["summary"])
+
+    def test_unreadable_canonical_challenge_is_palomars(self):
+        canonical_root = Path("/work/canonical-challenge")
+        log = (
+            "Building Challenge.Basic\nBuild completed successfully (2012 jobs).\n"
+            f"uncaught exception: failed to open file "
+            f"'{canonical_root}/Challenge/Basic.olean.server': No such file or directory\n"
+            "uncaught exception: Child exited with 1"
+        )
+        error = comparator_failure(1, log, canonical_root=canonical_root)
+        diagnostic = error.diagnostic("comparator")
+        self.assertEqual(diagnostic["code"], "palomar.canonical_challenge_unreadable")
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertTrue(diagnostic["retryable"])
+        self.assertIn("Basic.olean.server", diagnostic["explanation"])
+        self.assertNotIn("new submission", diagnostic["next_action"])
+
+    def test_comparator_sandbox_failure_stays_palomars(self):
+        error = comparator_failure(
+            1,
+            "landrun adapter: could not apply the policy",
+            canonical_root=Path("/work/canonical-challenge"),
+        )
+        self.assertEqual(error.code, "palomar.comparator_sandbox_failed")
+        self.assertEqual(error.owner, "palomar")
+
+    def test_a_diagnostic_without_detail_is_unchanged(self):
+        diagnostic = VerificationError("plain failure").diagnostic("comparator")
+        self.assertEqual(diagnostic["explanation"], diagnostic["summary"])
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
