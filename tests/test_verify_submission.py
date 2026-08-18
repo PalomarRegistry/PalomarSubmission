@@ -1034,6 +1034,11 @@ sources:
   - title: A source theorem
     authors:
       - name: Emmy Noether
+    contributors:
+      - name: Wilhelm Magnus
+        role: problem-proposer
+      - name: Evgenii Khukhro
+        role: editor
     id: doi:10.1000/example
     relationship: formalizes
 automation:
@@ -1046,6 +1051,14 @@ review:
             metadata = load_formalization_metadata(path)
             self.assertEqual(metadata["project"]["name"], "Example result")
             self.assertEqual(metadata["classification"]["arxiv"], ["math.LO", "cs.LO"])
+            provenance = submission_contract.normalized_provenance(metadata)
+            self.assertEqual(
+                provenance["mathematical_sources"][0]["contributors"],
+                [
+                    {"name": "Wilhelm Magnus", "role": "problem-proposer"},
+                    {"name": "Evgenii Khukhro", "role": "editor"},
+                ],
+            )
 
     def test_legacy_person_aliases_pass_full_metadata_loading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1087,14 +1100,14 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@0540dd6270958562a322227da4e1a6c104f60f95.
+        # Exact snapshot of PalomarTemplate@128a6c5ce5f48622e69927ccd639cbff401022e8.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "d300faaeab48cbd4fdd78ed3b23b4b2646b78db0b21c7663a8d5e9d96446a9c9",
+            "04f3c577a1315833b7cf04ac8d7c8762689067a527a9cc3ec7f64f2ffbf12e24",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(template["version"], "v0.4")
@@ -1457,6 +1470,37 @@ review:
             VerificationError, r"project\.responsible_maintainers must be a nonempty list"
         ):
             submission_contract.normalized_provenance(invalid_canonical)
+
+    def test_source_contributors_require_named_roles(self):
+        current = {
+            "project": {"responsible_maintainers": ["Ada Lovelace"]},
+            "sources": [
+                {
+                    "title": "A source theorem",
+                    "relationship": "formalizes",
+                    "contributors": [{"name": "Wilhelm Magnus", "role": "problem-proposer"}],
+                }
+            ],
+        }
+        provenance = submission_contract.normalized_provenance(current)
+        self.assertEqual(
+            provenance["mathematical_sources"][0]["contributors"],
+            [{"name": "Wilhelm Magnus", "role": "problem-proposer"}],
+        )
+
+        for contributors in (
+            ["Wilhelm Magnus"],
+            [{"name": "Wilhelm Magnus"}],
+            [{"name": "", "role": "editor"}],
+            [{"name": "Wilhelm Magnus", "role": ""}],
+        ):
+            invalid = json.loads(json.dumps(current))
+            invalid["sources"][0]["contributors"] = contributors
+            with self.subTest(contributors=contributors):
+                with self.assertRaisesRegex(
+                    VerificationError, r"sources\[0\]\.contributors"
+                ):
+                    submission_contract.normalized_provenance(invalid)
 
     def test_current_provenance_declarations_are_required(self):
         current = {

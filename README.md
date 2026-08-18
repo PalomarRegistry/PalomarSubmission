@@ -51,14 +51,15 @@ repeats every check after submission. Consumers must fail open when the policy
 is unavailable or incompatible, and compare its complete contents before using
 a browser result to ask for confirmation.
 
-Formalization profile 3 reports every missing or invalid mechanically required
+Formalization profile 4 reports every missing or invalid mechanically required
 metadata field separately and includes only safely reusable values from a
 recognized older shape. That lets the submission site explain and collect the
 complete correction in one form. It never guesses classifications,
 maintainers, source relationships, review claims, or whether a repository is a
 thin wrapper; malformed or alias-bearing YAML remains a manual correction. The
-profile adds the multiline `project.description` used as the public registry
-abstract.
+profile carries the multiline `project.description` used as the public
+registry abstract and structured `sources[].contributors` entries for
+non-author source credits.
 
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
@@ -145,7 +146,9 @@ A supplied source `type` is a concise free-text description such as `article`,
 `paper`, `book`, `formalization`, or `web post`; it may be omitted except
 where the exact value `original-proof` is the origin declaration. Invalid or
 missing provenance fails mechanical verification with the field that needs
-changing.
+changing. Source `authors` are bibliographic authors. Optional
+`contributors` records non-author credits as mappings with a nonempty `name`
+and a free-form `role` of at most 200 characters.
 
 `project.description` is the public registry abstract for the formalization as
 a whole. It must be nonempty and should concisely identify the mathematical
