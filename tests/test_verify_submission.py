@@ -1021,14 +1021,14 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@3b6f485fd351d46d1db4676835f4f996291f7c4a.
+        # Exact snapshot of PalomarTemplate@ef2dc7207d89a0c7056da5c0a43a42d569214723.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "351189522009d7a92486855dbc6ce45ec5e2e959f451ad19a8489f784998c19d",
+            "533ef37893c8f6c79f3ce202d4da344f20125d0b9f57241e0e4bcadd2e3564a3",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(template["version"], "v0.4")
