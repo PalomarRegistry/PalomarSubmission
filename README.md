@@ -56,8 +56,8 @@ recognized older shape. That lets the submission site explain and collect the
 complete correction in one form. It never guesses classifications,
 maintainers, source relationships, review claims, or whether a repository is a
 thin wrapper; malformed or alias-bearing YAML remains a manual correction. The
-profile adds the neutral multiline `project.description` used as the public
-registry abstract.
+profile adds the multiline `project.description` used as the public registry
+abstract.
 
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
@@ -145,11 +145,11 @@ where the exact value `original-proof` is the origin declaration. Invalid or
 missing provenance fails mechanical verification with the field that needs
 changing.
 
-`project.description` is the public registry abstract. It must be nonempty and
-should concisely identify the mathematical content and principal results
-selected by the submitted Comparator configuration. The browser displays it
-during preliminary checks, and an authenticated submitter may ask Palomar to
-open a pull request changing this field before full verification starts.
+`project.description` is the public registry abstract for the formalization as
+a whole. It must be nonempty and should concisely identify the mathematical
+content and principal results. The browser displays it during preliminary
+checks, and an authenticated submitter may ask Palomar to open a pull request
+changing this field before full verification starts.
 New files should not add a top-level `provenance` block: put maintainers under
 `project`, the optional thin-wrapper target under `repository`, and result origin
 in the source entries as above. For compatibility with older files, the verifier
