@@ -50,12 +50,14 @@ repeats every check after submission. Consumers must fail open when the policy
 is unavailable or incompatible, and compare its complete contents before using
 a browser result to ask for confirmation.
 
-Formalization profile 2 reports every missing or invalid mechanically required
+Formalization profile 3 reports every missing or invalid mechanically required
 metadata field separately and includes only safely reusable values from a
 recognized older shape. That lets the submission site explain and collect the
 complete correction in one form. It never guesses classifications,
 maintainers, source relationships, review claims, or whether a repository is a
-thin wrapper; malformed or alias-bearing YAML remains a manual correction.
+thin wrapper; malformed or alias-bearing YAML remains a manual correction. The
+profile adds the neutral multiline `project.description` used as the public
+registry abstract.
 
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
@@ -118,7 +120,7 @@ exactly with the SPDX identifier in `project.license`.
 
 Current metadata should declare `version: v0.4`; an omitted version follows the
 upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
-project identity, authorship, license, classification, automation-method, and
+project identity, description, authorship, license, classification, automation-method, and
 review-status fields. Classification requires one or two official arXiv subject
 classes and between one and eight distinct MSC2020 codes. The current provenance
 contract also requires a nonempty `project.responsible_maintainers` list and a
@@ -142,6 +144,12 @@ A supplied source `type` is a concise free-text description such as `article`,
 where the exact value `original-proof` is the origin declaration. Invalid or
 missing provenance fails mechanical verification with the field that needs
 changing.
+
+`project.description` is the public registry abstract. It must be nonempty and
+should concisely identify the mathematical content and principal results
+selected by the submitted Comparator configuration. The browser displays it
+during preliminary checks, and an authenticated submitter may ask Palomar to
+open a pull request changing this field before full verification starts.
 New files should not add a top-level `provenance` block: put maintainers under
 `project`, the optional thin-wrapper target under `repository`, and result origin
 in the source entries as above. For compatibility with older files, the verifier

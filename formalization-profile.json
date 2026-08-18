@@ -1,11 +1,17 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "title": "Palomar formalization.yaml repair profile",
   "fields": {
     "project.name": {
       "label": "Project name",
       "description": "The name of the formalized result or project.",
       "input": "text",
+      "repairable": true
+    },
+    "project.description": {
+      "label": "Project description",
+      "description": "A concise public account of the mathematical content and principal results selected by the submitted Comparator configuration.",
+      "input": "prose",
       "repairable": true
     },
     "project.authors": {

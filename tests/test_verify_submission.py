@@ -957,6 +957,7 @@ public /- nested /- comment -/ still -/ import TauCeti.Topology
 version: v0.4
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -987,6 +988,7 @@ review:
                 """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainer: Ada Lovelace
@@ -1019,14 +1021,14 @@ review:
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):
-        # Exact snapshot of PalomarTemplate@3b6f485fd351d46d1db4676835f4f996291f7c4a.
+        # Exact snapshot of PalomarTemplate@ef2dc7207d89a0c7056da5c0a43a42d569214723.
         # Pinning the bytes makes a cross-repository contract change deliberate rather
         # than silently turning this into a hand-written approximation of the template.
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-formalization.yaml"
         raw = fixture.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "90dffa637ab88bd098986d8494e15dd5abcb9d9fbd5bcc2d71731be74aad09c3",
+            "533ef37893c8f6c79f3ce202d4da344f20125d0b9f57241e0e4bcadd2e3564a3",
         )
         template = yaml.load(raw, Loader=submission_contract.UniqueKeySafeLoader)
         self.assertEqual(template["version"], "v0.4")
@@ -1072,6 +1074,7 @@ review:
                 """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -1176,6 +1179,7 @@ review:
         valid = """\
 project:
   name: Example result
+  description: A formalization of the example result.
   authors: [Ada Lovelace]
   license: Apache-2.0
   responsible_maintainers: [Ada Lovelace]
@@ -1704,7 +1708,7 @@ review:
             self.assertEqual(
                 {issue.field for issue in caught.exception.issues},
                 {
-                    "project.name", "project.authors", "project.license",
+                    "project.name", "project.description", "project.authors", "project.license",
                     "project.responsible_maintainers", "classification.arxiv",
                     "sources", "automation.methods", "review.status",
                 },
@@ -3221,7 +3225,7 @@ class MetadataShapeTests(unittest.TestCase):
         self.assertEqual(
             fields,
             {
-                "project.name", "project.authors", "project.license",
+                "project.name", "project.description", "project.authors", "project.license",
                 "project.responsible_maintainers", "classification.arxiv",
                 "sources", "automation.methods", "review.status",
             },
@@ -3232,6 +3236,7 @@ class MetadataShapeTests(unittest.TestCase):
         metadata = self.load(
             "project:\n"
             "  name: Example\n"
+            "  description: A formalization of the example result.\n"
             "  authors: [Ada Lovelace]\n"
             "  license: MIT\n"
             "  responsible_maintainers: [Ada Lovelace]\n"

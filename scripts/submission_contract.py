@@ -41,10 +41,11 @@ __all__ = (
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
-FORMALIZATION_PROFILE_VERSION = 2
+FORMALIZATION_PROFILE_VERSION = 3
 REPAIRABLE_FORMALIZATION_FIELDS = frozenset(
     {
         "project.name",
+        "project.description",
         "project.authors",
         "project.license",
         "project.responsible_maintainers",
@@ -238,6 +239,15 @@ def _required_text(value: Any, path: str) -> str:
             f"formalization.yaml field {path} must be a nonempty string"
         )
     return value.strip()
+
+
+def _required_bounded_text(value: Any, path: str, *, maximum: int) -> str:
+    text = _required_text(value, path)
+    if len(text) > maximum:
+        raise VerificationError(
+            f"formalization.yaml field {path} exceeds {maximum} characters"
+        )
+    return text
 
 
 def _required_people(value: Any, path: str) -> list[Any]:
@@ -617,6 +627,22 @@ def formalization_repair_draft(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, str) and value.strip():
             values[field] = value.strip()
             origins[field] = field if value is current else f"artifact.{field.split('.')[-1]}"
+    description_candidates = (
+        (project.get("description"), "project.description"),
+        (project.get("short_description"), "project.short_description"),
+        (
+            data.get("result", {}).get("statement")
+            if isinstance(data.get("result"), dict)
+            else None,
+            "result.statement",
+        ),
+        (project.get("name"), "project.name"),
+    )
+    for candidate, origin in description_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            values["project.description"] = candidate.strip()[:10_000]
+            origins["project.description"] = origin
+            break
     for field, current, legacy in (
         ("project.authors", project.get("authors"), artifact.get("authors")),
         (
@@ -769,6 +795,11 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
 
     project = data.get("project") if isinstance(data.get("project"), dict) else {}
     check(lambda: _required_text(project.get("name"), "project.name"))
+    check(
+        lambda: _required_bounded_text(
+            project.get("description"), "project.description", maximum=10_000
+        )
+    )
     check(lambda: _required_people(project.get("authors"), "project.authors"))
     check(lambda: _required_text(project.get("license"), "project.license"))
     maintainers = project.get("responsible_maintainers")

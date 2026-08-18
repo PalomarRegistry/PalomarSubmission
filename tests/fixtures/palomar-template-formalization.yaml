@@ -6,6 +6,9 @@ version: "v0.4"
 
 project:
   name: "TEMPLATE: name of the formalization"
+  description: >-
+    TEMPLATE: concise public account of the mathematical content and principal
+    results selected by comparator.json
   # Required nonempty list of name strings or mappings with a nonempty name.
   authors:
     - "TEMPLATE: formalizer name"
@@ -43,7 +46,7 @@ sources:
   # - Otherwise, omit type: original-proof and give at least one source a
   #   formalizes, adapts, or independently-proves relationship. A new proof of
   #   a known published result is source-based and uses independently-proves.
-  # Type, authors, id, location, license, and author_endorsement are optional;
+  # Type, authors, id, location, note, license, and author_endorsement are optional;
   # remove them when genuinely inapplicable. Type is a concise free-text
   # description such as article, paper, book, formalization, web post, folklore,
   # conversation, or other. The exact value original-proof is reserved for the
@@ -59,8 +62,9 @@ sources:
     type: "TEMPLATE: concise source kind, for example article, book, or formalization"
     location: "TEMPLATE: stable URL or bibliographic location, if available"
     relationship: "TEMPLATE: formalizes, adapts, independently-proves, background, or other"
+    note: "TEMPLATE: explain relationship or author_endorsement: other; otherwise remove"
     license: "TEMPLATE: source license or unknown"
-    author_endorsement: "TEMPLATE: participated, endorsed, no-response, not-contacted, declined, or n/a"
+    author_endorsement: "TEMPLATE: participated, endorsed, no-response, not-contacted, declined, n/a, or other"
 
 related_formalizations:
   # Remove this field or use [] when none are known.
@@ -92,7 +96,7 @@ automation:
     - method: "TEMPLATE: manual, copilot, agent, autonomous, or other"
       models: ["TEMPLATE: model names, or replace this list with []"]
       framework: "TEMPLATE: framework name, or n/a"
-      tool_setup: "TEMPLATE: editors, tactics, agents, or other tools used"
+      tool_setup: "TEMPLATE: exact detail, such as AI-assisted, editors, tactics, agents, or other tools used"
       cost:
         wall_time: "TEMPLATE: approximate elapsed effort"
         spend_usd: "TEMPLATE: amount, subscription-based, or not tracked"
