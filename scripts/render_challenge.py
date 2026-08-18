@@ -34,8 +34,8 @@ from scripts.submission_contract import GITHUB_RE, SHA_RE  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
     MAX_SOURCE_BYTES,
+    LeanHeader,
     clone_commit,
-    direct_imports,
     ensure_lake_manifest,
     github_repository,
     load_comparator_config,
@@ -44,6 +44,7 @@ from scripts.verify_submission import (  # noqa: E402
     module_source_suffix,
     normalized_repository_path,
     now,
+    parse_lean_header,
     require_protected_paths,
     resolve_release_commit,
     resolve_repository_path,
@@ -467,6 +468,8 @@ def parsed_challenge_metadata(
     comparator: Path,
     *,
     challenge_module: str,
+    lean: Path,
+    environment: dict[str, str],
 ) -> dict[str, Any]:
     for path in (challenge, solution, comparator):
         if path.is_symlink() or not path.is_file():
@@ -478,13 +481,31 @@ def parsed_challenge_metadata(
     declarations = [*config["theorem_names"], *config.get("definition_names", [])]
     if len(declarations) != len(set(declarations)):
         raise VerificationError("comparator declaration names must be unique")
+    # The header is read by Lean rather than by a parser of our own, so the
+    # rendered page lists what the compiler sees. This step already runs inside
+    # the render sandbox, which permits the toolchain.
     return {
         "schema_version": 2,
-        "imports": direct_imports(source),
+        "imports": list(source_header(challenge, lean=lean, environment=environment).imports),
         "module_doc": extract_module_doc(source),
         "declarations": declarations,
-        "solution_imports": direct_imports(solution.read_text(encoding="utf-8")),
+        "solution_imports": list(
+            source_header(solution, lean=lean, environment=environment).imports
+        ),
     }
+
+
+def source_header(lean_source: Path, *, lean: Path, environment: dict[str, str]) -> LeanHeader:
+    """Read one Lean source header with the compiler's own parser."""
+    proc = run(
+        [str(lean), "--deps-json", str(lean_source)],
+        cwd=lean_source.parent,
+        env=environment,
+        check=False,
+    )
+    if proc.returncode:
+        raise VerificationError(f"Lean could not read the header of {lean_source.name}")
+    return parse_lean_header(proc.stdout)
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -1587,6 +1608,8 @@ def sanitize_command(args: argparse.Namespace) -> int:
         Path(args.solution).resolve(),
         Path(args.comparator).resolve(),
         challenge_module=args.challenge_module,
+        lean=Path(args.lean).resolve(strict=True),
+        environment=os.environ.copy(),
     )
     sanitize_bundle(
         Path(args.input_dir).resolve(),
@@ -2113,6 +2136,8 @@ def execute(args: argparse.Namespace) -> int:
                 str(render_workspace.comparator),
                 "--challenge-module",
                 render_workspace.challenge_module,
+                "--lean",
+                str(lean),
             ],
             cwd=workspace,
             environment=env,
@@ -2204,6 +2229,7 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser.add_argument("--solution", required=True)
     sanitize_parser.add_argument("--comparator", required=True)
     sanitize_parser.add_argument("--challenge-module", required=True)
+    sanitize_parser.add_argument("--lean", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result
 

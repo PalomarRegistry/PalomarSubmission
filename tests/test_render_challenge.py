@@ -879,10 +879,10 @@ end Audit.Task
             for action in parser()._actions
             if isinstance(action, argparse._SubParsersAction)
         ).choices["sanitize"]
-        self.assertIn(
-            "challenge_module",
-            {action.dest for action in sanitize._actions if action.required},
-        )
+        required = {action.dest for action in sanitize._actions if action.required}
+        self.assertIn("challenge_module", required)
+        # The header is read by the compiler, so sanitize needs the toolchain.
+        self.assertIn("lean", required)
 
     def test_execute_marks_a_legacy_report_as_a_contract_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1278,12 +1278,35 @@ end Example
                 ),
                 encoding="utf-8",
             )
-            metadata = parsed_challenge_metadata(
-                challenge,
-                solution,
-                comparator,
-                challenge_module="Challenge",
-            )
+            headers = {
+                challenge.name: ["Init", "Init", "Mathlib", "Batteries"],
+                solution.name: ["Init", "Init", "ErdosUnitDistance"],
+            }
+
+            def deps_json(command, **_kwargs):
+                modules = headers[Path(command[2]).name]
+                payload = {
+                    "imports": [
+                        {
+                            "errors": [],
+                            "result": {
+                                "isModule": False,
+                                "imports": [{"module": name} for name in modules],
+                            },
+                        }
+                    ]
+                }
+                return mock.Mock(stdout=json.dumps(payload), stderr="", returncode=0)
+
+            with mock.patch("scripts.render_challenge.run", side_effect=deps_json):
+                metadata = parsed_challenge_metadata(
+                    challenge,
+                    solution,
+                    comparator,
+                    challenge_module="Challenge",
+                    lean=Path("/tools/lean"),
+                    environment={},
+                )
             self.assertEqual(metadata["schema_version"], 2)
             self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
             self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
