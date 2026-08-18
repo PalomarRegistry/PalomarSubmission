@@ -20,7 +20,8 @@ declarations is verified and reviewed as a whole. CI then:
    sandbox, permitting at most the three standard axioms, and forces every
    exported proof through both Lean's kernel and the pinned independent NanoDa
    kernel;
-4. compiles the Challenge against frozen, canonical Mathlib/Tau Ceti output;
+4. compiles the Challenge against frozen, canonical Mathlib, Tau Ceti, or
+   CSLib output;
 5. computes the transitive source closure of the Challenge and verifies every
    byte in it;
 6. publishes a machine-readable report as a run artifact.
@@ -73,9 +74,10 @@ allowlisted dependencies; its protected module is the statement Comparator
 exports. Common submitted prebuilt artifacts are rejected early, and no
 candidate build output can replace the protected statement or frozen trusted
 dependency modules. Only this statement surface is restricted; arbitrary pinned
-dependencies remain available to the proof in `Solution.lean`. A Tau Ceti import
-is recorded as a qualified trust surface; no other statement dependency is
-accepted, including one from a project Palomar has already indexed.
+dependencies remain available to the proof in `Solution.lean`. Tau Ceti and
+CSLib imports are recorded as qualified trust surfaces; no other statement
+dependency is accepted, including one from a project Palomar has already
+indexed.
 
 NanoDa replay is a registry invariant, not a submitter option. The optional
 `enable_nanoda` field in a submitted `comparator.json` is retained for upstream

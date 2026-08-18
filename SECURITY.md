@@ -103,8 +103,8 @@ not this credential-free verification workflow.
   repositories containing submodules are rejected; an inert dependency
   submodule gitlink is allowed only because the verifier never initializes or
   reads it and the native fork preserves the exact ordinary Git object.
-- An allowlisted Mathlib or Tau Ceti revision is trusted only if Git proves that
-  it is an ancestor of the configured branch in the canonical repository.
+- An allowlisted Mathlib, Tau Ceti, or CSLib revision is trusted only if Git
+  proves that it is an ancestor of the configured branch in the canonical repository.
   A compatibility exception may name an exact historical commit explicitly;
   it does not make adjacent history trusted. Known repository moves are handled
   as explicit aliases, not as arbitrary URL equivalence.
