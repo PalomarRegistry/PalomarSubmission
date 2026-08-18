@@ -55,12 +55,16 @@ COMPILED_ARTIFACT_SUFFIXES = {
     ".dll",
     ".dylib",
     ".ilean",
+    ".ir",
     ".o",
     ".obj",
     ".olean",
     ".so",
     ".trace",
 }
+# The module system's sidecars are double-suffixed, so `Path.suffix` reports
+# `.private`/`.server` and the table above cannot match them on its own.
+COMPILED_ARTIFACT_NAME_SUFFIXES = (".olean.private", ".olean.server")
 # A Lean toolchain, as a comparable version. Release candidates sort before the
 # release they lead to, so v4.31.0-rc2 < v4.31.0, and anything that does not
 # parse is refused rather than guessed at.
@@ -2011,7 +2015,10 @@ def reject_committed_build_artifacts(package_dir: Path) -> None:
         directories[:] = [name for name in directories if name not in {".git", ".lake"}]
         for filename in filenames:
             path = Path(current) / filename
-            if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
+            lowered = path.name.lower()
+            if path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES or lowered.endswith(
+                COMPILED_ARTIFACT_NAME_SUFFIXES
+            ):
                 raise VerificationError(
                     "committed build artifact is not permitted outside fresh .lake state: "
                     f"{path}"
@@ -2980,6 +2987,53 @@ def source_matches_checkout(path: Path, package_dir: Path) -> bool:
     )
 
 
+def lean_module_header_is_module(
+    source: Path,
+    *,
+    challenge_source: Path,
+    lean: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    writable_directories: list[Path],
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> bool:
+    """Ask Lean whether the Challenge uses the module system.
+
+    ``--deps-json`` runs the compiler's own header parser, the one Lake uses to
+    decide which artifacts a module produces, so Palomar's expectation cannot
+    drift from what the compiler actually emits. The header is parsed, never
+    elaborated, so this reads the candidate's source without running it.
+    """
+    proc = sandboxed_run(
+        [str(lean), "--deps-json", str(challenge_source)],
+        cwd=source,
+        environment=environment,
+        landrun=landrun,
+        writable_directories=writable_directories,
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    try:
+        payload = json.loads(lines[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise VerificationError("Lean did not report a parsable Challenge header") from error
+    entries = payload.get("imports") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise VerificationError("Lean reported no single Challenge header")
+    reported = entries[0]
+    errors = reported.get("errors") or []
+    if errors:
+        raise VerificationError(f"Lean rejected the Challenge header: {str(errors[0])[:500]}")
+    result = reported.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("isModule"), bool):
+        raise VerificationError("Lean did not report whether the Challenge is a module")
+    return result["isModule"]
+
+
 def lean_source_dependencies(
     source: Path,
     *,
@@ -3154,6 +3208,25 @@ def protected_lean_path(
     return os.pathsep.join(str(path) for path in dict.fromkeys(ordered))
 
 
+def canonical_challenge_artifacts(olean: Path, *, module_system: bool) -> tuple[Path, ...]:
+    """Every file the trusted Challenge compilation is expected to publish.
+
+    A module-system source compiles to a public module plus private, server and
+    IR sidecars, and importing it fails unless all four travel together. A
+    pre-module-system source compiles to the single module. Deriving the set
+    from the source rather than from whatever the sandbox happens to contain
+    keeps hostile elaboration from adding a file to the protected directory.
+    """
+    if not module_system:
+        return (olean,)
+    return (
+        olean,
+        olean.parent / f"{olean.name}.private",
+        olean.parent / f"{olean.name}.server",
+        olean.parent / f"{olean.stem}.ir",
+    )
+
+
 def compile_canonical_challenge(
     work: Path,
     source: Path,
@@ -3244,8 +3317,42 @@ def compile_canonical_challenge(
     )
     if compiled_olean.is_symlink() or not compiled_olean.is_file():
         raise VerificationError("trusted Challenge compilation produced no module")
+    module_system = lean_module_header_is_module(
+        source,
+        challenge_source=challenge_source,
+        lean=lean,
+        environment=canonical_env,
+        landrun=landrun,
+        writable_directories=[scratch.resolve()],
+        readable_paths=canonical_readable_paths,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+    compiled_artifacts = canonical_challenge_artifacts(
+        compiled_olean, module_system=module_system
+    )
+    for artifact in compiled_artifacts:
+        if artifact.is_symlink() or not artifact.is_file():
+            raise VerificationError(
+                f"trusted Challenge compilation did not publish {artifact.name}"
+            )
+    # A source that Lean treats as a module but the header check does not would
+    # otherwise lose its sidecars silently, and a source that is not a module
+    # has no business carrying them.
+    surplus = [
+        artifact
+        for artifact in canonical_challenge_artifacts(compiled_olean, module_system=True)
+        if artifact not in compiled_artifacts and (artifact.exists() or artifact.is_symlink())
+    ]
+    if surplus:
+        raise VerificationError(
+            "trusted Challenge compilation published unexpected module artifacts: "
+            + ", ".join(sorted(artifact.name for artifact in surplus))
+        )
+    compiled_artifacts = tuple(artifact.resolve() for artifact in compiled_artifacts)
     compiled_olean = compiled_olean.resolve()
-    tools[compiled_olean] = sha256(compiled_olean)
+    for artifact in compiled_artifacts:
+        tools[artifact] = sha256(artifact)
     dependencies = lean_source_dependencies(
         source,
         challenge_source=challenge_source,
@@ -3263,18 +3370,23 @@ def compile_canonical_challenge(
     output_dir.mkdir()
     canonical_olean = output_dir.joinpath(*module_suffix.parts)
     canonical_olean.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(compiled_olean, canonical_olean)
-    if canonical_olean.is_symlink() or not canonical_olean.is_file():
-        raise VerificationError("protected Challenge module is not a regular file")
+    canonical_artifacts = canonical_challenge_artifacts(
+        canonical_olean, module_system=module_system
+    )
+    for compiled, canonical in zip(compiled_artifacts, canonical_artifacts, strict=True):
+        shutil.copyfile(compiled, canonical)
+        if canonical.is_symlink() or not canonical.is_file():
+            raise VerificationError(f"protected Challenge artifact {canonical.name} is not a regular file")
     protected_files = {
         path.resolve()
         for path in output_dir.rglob("*")
         if path.is_file() or path.is_symlink()
     }
-    if protected_files != {canonical_olean.resolve()}:
+    if protected_files != {artifact.resolve() for artifact in canonical_artifacts}:
         raise VerificationError("protected Challenge directory contains unexpected files")
     canonical_olean = canonical_olean.resolve()
-    tools[canonical_olean] = sha256(canonical_olean)
+    for artifact in canonical_artifacts:
+        tools[artifact.resolve()] = sha256(artifact)
     return canonical_olean, dependencies, lean_paths
 
 
@@ -3627,7 +3739,9 @@ def execute(args: argparse.Namespace) -> int:
         )
         canonical_root = (work / "canonical-challenge").resolve()
         readable_paths = sorted({*readable_paths, canonical_root})
-        require_protected_paths([canonical_olean], candidate_writable)
+        # The whole protected directory, so every module-system sidecar beside
+        # the Challenge olean is covered, not just the olean itself.
+        require_protected_paths([canonical_root, canonical_olean], candidate_writable)
         report["stage"] = "challenge-provenance"
         audit = audit_challenge_sources(
             source,

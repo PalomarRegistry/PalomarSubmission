@@ -224,6 +224,89 @@ class SandboxIntegrationTests(unittest.TestCase):
                 text=True,
             )
 
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
+    )
+    def test_module_system_challenge_publishes_every_artifact(self):
+        # A module-system source compiles to a public module plus private,
+        # server and IR sidecars. Importing it fails unless all four reach the
+        # protected search path, so Comparator would reject the project.
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            work = Path(directory).resolve()
+            source = work / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text(
+                "module\n\npublic theorem probe : True := by trivial\n"
+            )
+            lean, lean_prefix, landrun, environment, executable_paths = canonical_toolchain()
+            canonical, _dependencies, trusted_paths = compile_canonical_challenge(
+                work,
+                source,
+                checkout=source,
+                lean=lean,
+                lean_prefix=lean_prefix,
+                allowlist={},
+                environment=environment,
+                landrun=landrun,
+                readable_paths=sorted({source.resolve(), *system_readable_paths()}),
+                executable_paths=executable_paths,
+                tools=tool_snapshot([lean, landrun]),
+            )
+            self.assertEqual(
+                sorted(path.name for path in canonical.parent.iterdir()),
+                [
+                    "Challenge.ir",
+                    "Challenge.olean",
+                    "Challenge.olean.private",
+                    "Challenge.olean.server",
+                ],
+            )
+
+            check_source = work / "CheckProtected.lean"
+            check_source.write_text("import Challenge\nexample : True := probe\n")
+            protected_environment = environment.copy()
+            protected_environment["LEAN_PATH"] = protected_lean_path(
+                canonical,
+                trusted_paths,
+                "",
+            )
+            subprocess.run(
+                [str(lean), str(check_source)],
+                check=True,
+                env=protected_environment,
+                capture_output=True,
+                text=True,
+            )
+
+
+def canonical_toolchain() -> tuple[Path, Path, Path, dict[str, str], list[Path]]:
+    """Resolve the real Lean and Landrun binaries the canonical compile needs."""
+    lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
+    lean_prefix = Path(
+        subprocess.run(
+            [str(lean), "--print-prefix"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    ).resolve(strict=True)
+    landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
+    python = Path(sys.executable).resolve(strict=True)
+    executable_paths = [lean_prefix, python.parent.parent, lean, landrun]
+    for raw in ("/usr", "/bin", "/lib", "/lib64", "/nix/store"):
+        path = Path(raw)
+        if path.exists():
+            executable_paths.append(path.resolve())
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{lean_prefix / 'bin'}:{os.environ['PATH']}",
+            "LEAN_ABORT_ON_PANIC": "1",
+        }
+    )
+    return lean, lean_prefix, landrun, environment, sorted(set(executable_paths))
+
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
     try:
