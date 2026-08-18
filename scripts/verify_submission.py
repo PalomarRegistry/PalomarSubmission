@@ -3213,6 +3213,69 @@ def resolve_module_source(
     raise VerificationError(f"configured module {module!r} has no source file in Lake's source path")
 
 
+COMPARATOR_FAILURE_MARKERS = ("uncaught exception", "error:", "error]", "failed")
+
+
+def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
+    """The lines of a Comparator log that say why it stopped.
+
+    A submitter should not have to read a build log of several thousand lines
+    to find the one line that matters, so the lines that name a failure are
+    carried into the report. The whole tail is kept separately for an operator.
+    """
+    lines = [line.rstrip() for line in log.splitlines() if line.strip()]
+    marked = [
+        line for line in lines
+        if any(marker in line.lower() for marker in COMPARATOR_FAILURE_MARKERS)
+    ]
+    chosen = (marked or lines)[-limit:]
+    return "\n".join(line[:400] for line in chosen)
+
+
+def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> VerificationError:
+    """Say what a nonzero Comparator exit means, and whose problem it is.
+
+    Comparator judges a submission, but it can also fail without judging one.
+    The protected Challenge module is Palomar's own artifact, so a run that
+    could not read it has established nothing about the submission and must not
+    be reported as a rejection of it.
+    """
+    excerpt = comparator_failure_excerpt(log)
+    if "landrun adapter:" in log:
+        return VerificationError(
+            "Comparator sandbox adapter failed",
+            code="palomar.comparator_sandbox_failed",
+            owner="palomar",
+            detail=excerpt,
+            next_action=(
+                "Do not change the repository. Retry the same commit later; report the "
+                "workflow URL if the problem recurs."
+            ),
+            retryable=True,
+        )
+    if str(canonical_root) in log:
+        return VerificationError(
+            "Comparator could not read the Challenge module that Palomar compiled",
+            code="palomar.canonical_challenge_unreadable",
+            owner="palomar",
+            detail=excerpt,
+            next_action=(
+                "Do not change the repository. This is Palomar's to fix; the same commit "
+                "can be verified again once it is."
+            ),
+            retryable=True,
+        )
+    return VerificationError(
+        f"Comparator rejected the project (exit {returncode})",
+        code="comparator.rejected",
+        detail=excerpt,
+        next_action=(
+            "Correct the Lean or Comparator failure quoted above, commit it, and make "
+            "a new submission."
+        ),
+    )
+
+
 def protected_lean_path(
     canonical_olean: Path,
     trusted_lean_paths: list[Path],
@@ -3875,28 +3938,8 @@ def execute(args: argparse.Namespace) -> int:
         log = (proc.stdout + "\n" + proc.stderr).strip()
         report["comparator_log_tail"] = log[-20000:]
         if proc.returncode:
-            if "landrun adapter:" in log:
-                report["status"] = "error"
-                error = VerificationError(
-                    "Comparator sandbox adapter failed",
-                    code="palomar.comparator_sandbox_failed",
-                    owner="palomar",
-                    next_action=(
-                        "Do not change the repository. Retry the same commit later; report the "
-                        "workflow URL if the problem recurs."
-                    ),
-                    retryable=True,
-                )
-            else:
-                report["status"] = "fail"
-                error = VerificationError(
-                    f"Comparator rejected the project (exit {proc.returncode})",
-                    code="comparator.rejected",
-                    next_action=(
-                        "Open the workflow log, correct the reported Lean or Comparator failure, "
-                        "commit it, and make a new submission."
-                    ),
-                )
+            error = comparator_failure(proc.returncode, log, canonical_root=canonical_root)
+            report["status"] = "error" if error.owner == "palomar" else "fail"
             report["errors"].append(str(error))
             report_diagnostic(report, error, stage="comparator")
             report["stage"] = "comparator"
