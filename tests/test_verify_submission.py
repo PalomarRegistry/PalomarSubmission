@@ -734,6 +734,14 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_allowlisted_repository_aliases(self):
         roots, aliases = allowed_roots()
         self.assertEqual(
+            {root["repository"] for root in roots},
+            {
+                "leanprover-community/mathlib4",
+                "TauCetiProject/TauCeti",
+                "leanprover/cslib",
+            },
+        )
+        self.assertEqual(
             {root["official_ref"] for root in roots},
             {"refs/heads/master", "refs/heads/main"},
         )
@@ -745,6 +753,17 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertEqual(
             tauceti["accepted_revisions"],
             ["221bb56a017bb794421eac4fa543d7a5e85add75"],
+        )
+        cslib = next(
+            root for root in roots if root["repository"] == "leanprover/cslib"
+        )
+        self.assertEqual(cslib["repository_aliases"], [])
+        self.assertEqual(cslib["official_ref"], "refs/heads/main")
+        self.assertEqual(cslib["trust_level"], "qualified")
+        self.assertNotIn("accepted_revisions", cslib)
+        self.assertEqual(
+            canonical_repository("LeanProver/CSLib", aliases),
+            "leanprover/cslib",
         )
 
     def test_imports(self):

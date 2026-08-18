@@ -19,6 +19,13 @@
       ],
       "include_pinned_manifest_closure": true,
       "trust_level": "qualified"
+    },
+    {
+      "repository": "leanprover/cslib",
+      "repository_aliases": [],
+      "official_ref": "refs/heads/main",
+      "include_pinned_manifest_closure": true,
+      "trust_level": "qualified"
     }
   ]
 }
