@@ -42,6 +42,7 @@ from scripts.verify_submission import (
     github_repository,
     lake_environment_value,
     landrun_command,
+    lean_module_header_is_module,
     load_comparator_config,
     materialize_packages,
     normalized_repository_path,
@@ -66,6 +67,17 @@ from scripts.verify_submission import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+# Captured from `lean --deps-json` on a module-system and a plain source.
+MODULE_HEADER_JSON = (
+    '{"imports":[{"errors":[],"result":{"imports":[{"importAll":false,'
+    '"isExported":true,"isMeta":false,"module":"Init"}],"isModule":true}}]}'
+)
+PLAIN_HEADER_JSON = (
+    '{"imports":[{"errors":[],"result":{"imports":[{"importAll":false,'
+    '"isExported":true,"isMeta":false,"module":"Init"}],"isModule":false}}]}'
+)
 
 
 class VerifySubmissionTests(unittest.TestCase):
@@ -1916,6 +1928,8 @@ review:
             (lean_prefix / "lib" / "lean").mkdir(parents=True)
 
             def fake_sandbox(command, **_kwargs):
+                if "--deps-json" in command:
+                    return mock.Mock(stdout=PLAIN_HEADER_JSON, stderr="", returncode=0)
                 if "-o" in command:
                     output = Path(command[command.index("-o") + 1])
                     output.write_bytes(b"canonical")
@@ -1940,6 +1954,174 @@ review:
             self.assertEqual([path.name for path in canonical.parent.iterdir()], ["Challenge.olean"])
             self.assertEqual(dependencies, [])
             self.assertEqual(trusted_paths, [(lean_prefix / "lib" / "lean").resolve()])
+
+    def test_module_system_challenge_publishes_every_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text(
+                "module\n\npublic theorem result : True := by trivial\n"
+            )
+            lean_prefix = work / "toolchain"
+            (lean_prefix / "lib" / "lean").mkdir(parents=True)
+
+            def fake_sandbox(command, **_kwargs):
+                if "--deps-json" in command:
+                    return mock.Mock(stdout=MODULE_HEADER_JSON, stderr="", returncode=0)
+                if "-o" in command:
+                    output = Path(command[command.index("-o") + 1])
+                    output.write_bytes(b"canonical")
+                    output.with_name(f"{output.name}.private").write_bytes(b"private")
+                    output.with_name(f"{output.name}.server").write_bytes(b"server")
+                    output.with_name(f"{output.stem}.ir").write_bytes(b"ir")
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with mock.patch("scripts.verify_submission.sandboxed_run", side_effect=fake_sandbox):
+                canonical, _dependencies, _trusted = compile_canonical_challenge(
+                    work,
+                    source,
+                    checkout=source,
+                    lean=Path("/tools/lean"),
+                    lean_prefix=lean_prefix,
+                    allowlist={},
+                    environment={},
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(
+                sorted(path.name for path in canonical.parent.iterdir()),
+                [
+                    "Challenge.ir",
+                    "Challenge.olean",
+                    "Challenge.olean.private",
+                    "Challenge.olean.server",
+                ],
+            )
+
+    def test_module_system_challenge_missing_a_sidecar_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text(
+                "module\n\npublic theorem result : True := by trivial\n"
+            )
+            lean_prefix = work / "toolchain"
+            (lean_prefix / "lib" / "lean").mkdir(parents=True)
+
+            def fake_sandbox(command, **_kwargs):
+                if "--deps-json" in command:
+                    return mock.Mock(stdout=MODULE_HEADER_JSON, stderr="", returncode=0)
+                if "-o" in command:
+                    output = Path(command[command.index("-o") + 1])
+                    output.write_bytes(b"canonical")
+                    output.with_name(f"{output.name}.private").write_bytes(b"private")
+                    output.with_name(f"{output.stem}.ir").write_bytes(b"ir")
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with mock.patch("scripts.verify_submission.sandboxed_run", side_effect=fake_sandbox):
+                with self.assertRaises(VerificationError) as caught:
+                    compile_canonical_challenge(
+                        work,
+                        source,
+                        checkout=source,
+                        lean=Path("/tools/lean"),
+                        lean_prefix=lean_prefix,
+                        allowlist={},
+                        environment={},
+                        landrun=Path("/tools/landrun"),
+                        readable_paths=[source],
+                        executable_paths=[],
+                        tools={},
+                    )
+            self.assertIn("Challenge.olean.server", str(caught.exception))
+
+    def test_sidecars_beside_a_plain_challenge_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text("theorem result : True := by trivial\n")
+            lean_prefix = work / "toolchain"
+            (lean_prefix / "lib" / "lean").mkdir(parents=True)
+
+            def fake_sandbox(command, **_kwargs):
+                if "--deps-json" in command:
+                    return mock.Mock(stdout=PLAIN_HEADER_JSON, stderr="", returncode=0)
+                if "-o" in command:
+                    output = Path(command[command.index("-o") + 1])
+                    output.write_bytes(b"canonical")
+                    # Hostile elaboration plants a sidecar the compiler did not write.
+                    output.with_name(f"{output.name}.private").write_bytes(b"planted")
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with mock.patch("scripts.verify_submission.sandboxed_run", side_effect=fake_sandbox):
+                with self.assertRaises(VerificationError) as caught:
+                    compile_canonical_challenge(
+                        work,
+                        source,
+                        checkout=source,
+                        lean=Path("/tools/lean"),
+                        lean_prefix=lean_prefix,
+                        allowlist={},
+                        environment={},
+                        landrun=Path("/tools/landrun"),
+                        readable_paths=[source],
+                        executable_paths=[],
+                        tools={},
+                    )
+            self.assertIn("unexpected module artifacts", str(caught.exception))
+
+    def test_module_header_is_read_from_lean(self):
+        for payload, expected in ((MODULE_HEADER_JSON, True), (PLAIN_HEADER_JSON, False)):
+            with self.subTest(expected=expected):
+                with mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    return_value=mock.Mock(stdout=payload, stderr="", returncode=0),
+                ) as sandbox:
+                    self.assertIs(
+                        lean_module_header_is_module(
+                            Path("/source"),
+                            challenge_source=Path("/source/Challenge.lean"),
+                            lean=Path("/tools/lean"),
+                            environment={},
+                            landrun=Path("/tools/landrun"),
+                            writable_directories=[],
+                            readable_paths=[],
+                            executable_paths=[],
+                            tools={},
+                        ),
+                        expected,
+                    )
+                self.assertIn("--deps-json", sandbox.call_args.args[0])
+
+    def test_unreadable_module_header_is_refused(self):
+        for payload, message in (
+            ("not json", "parsable Challenge header"),
+            ('{"imports":[]}', "no single Challenge header"),
+            ('{"imports":[{"errors":["bad header"]}]}', "rejected the Challenge header"),
+            ('{"imports":[{"errors":[],"result":{}}]}', "whether the Challenge is a module"),
+        ):
+            with self.subTest(payload=payload):
+                with mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    return_value=mock.Mock(stdout=payload, stderr="", returncode=0),
+                ):
+                    with self.assertRaisesRegex(VerificationError, message):
+                        lean_module_header_is_module(
+                            Path("/source"),
+                            challenge_source=Path("/source/Challenge.lean"),
+                            lean=Path("/tools/lean"),
+                            environment={},
+                            landrun=Path("/tools/landrun"),
+                            writable_directories=[],
+                            readable_paths=[],
+                            executable_paths=[],
+                            tools={},
+                        )
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2390,6 +2572,16 @@ review:
                 materialize_packages(
                     package, checkout=package, base_env={"PATH": "/usr/bin"}
                 )
+
+    def test_module_system_sidecars_count_as_committed_build_artifacts(self):
+        for name in ("Stale.olean.private", "Stale.olean.server", "Stale.ir"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory)
+                artifact = package / "lib" / name
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b"prebuilt")
+                with self.assertRaisesRegex(VerificationError, "committed build artifact"):
+                    reject_committed_build_artifacts(package)
 
     def test_fresh_lake_artifacts_are_removed_not_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
