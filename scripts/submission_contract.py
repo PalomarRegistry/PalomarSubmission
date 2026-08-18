@@ -41,7 +41,7 @@ __all__ = (
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
-FORMALIZATION_PROFILE_VERSION = 3
+FORMALIZATION_PROFILE_VERSION = 4
 REPAIRABLE_FORMALIZATION_FIELDS = frozenset(
     {
         "project.name",
@@ -334,6 +334,30 @@ def _person_records_with_singular_alias(
     return _person_records(value, f"{path}.{singular}", required=required)
 
 
+def _source_contributor_records(value: Any, path: str) -> list[dict[str, str]]:
+    if value in (None, []):
+        return []
+    if not isinstance(value, list):
+        raise VerificationError(
+            f"formalization.yaml field {path} must be a list"
+        )
+    records: list[dict[str, str]] = []
+    for index, contributor in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(contributor, dict):
+            raise VerificationError(
+                f"formalization.yaml field {item_path} must be a mapping with a name and role"
+            )
+        name = _required_text(contributor.get("name"), f"{item_path}.name").strip()
+        role = _required_text(contributor.get("role"), f"{item_path}.role").strip()
+        if len(role) > 200:
+            raise VerificationError(
+                f"formalization.yaml field {item_path}.role exceeds 200 characters"
+            )
+        records.append({"name": name, "role": role})
+    return records
+
+
 def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize the current Palomar provenance contract."""
     project = _required_mapping(data.get("project"), "project")
@@ -442,6 +466,11 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
             ),
             "relationship": relationship,
         }
+        contributors = _source_contributor_records(
+            item.get("contributors"), f"{path}.contributors"
+        )
+        if contributors:
+            record["contributors"] = contributors
         for source_key, record_key, maximum in (
             ("id", "identifier", 2_048),
             ("location", "location", 1_000),
@@ -598,6 +627,22 @@ def _safe_source(value: Any) -> dict[str, Any] | None:
         )
     if authors:
         result["authors"] = authors
+    contributors = value.get("contributors")
+    if isinstance(contributors, list):
+        safe_contributors = []
+        for contributor in contributors:
+            if not isinstance(contributor, dict):
+                continue
+            name = contributor.get("name")
+            role = contributor.get("role")
+            if (
+                isinstance(name, str) and name.strip()
+                and isinstance(role, str) and role.strip()
+                and len(role.strip()) <= 200
+            ):
+                safe_contributors.append({"name": name.strip(), "role": role.strip()})
+        if safe_contributors:
+            result["contributors"] = safe_contributors
     for field in ("id", "location", "license"):
         item = value.get(field)
         if isinstance(item, str) and item.strip():

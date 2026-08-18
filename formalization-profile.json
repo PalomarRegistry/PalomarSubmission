@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "title": "Palomar formalization.yaml repair profile",
   "fields": {
     "project.name": {
@@ -46,7 +46,7 @@
     },
     "sources": {
       "label": "Mathematical sources",
-      "description": "A nonempty list of sources for the result. Every source needs a title and an accurate relationship.",
+      "description": "A nonempty list of sources for the result. Every source needs a title and an accurate relationship; non-author credits use named contributor roles.",
       "input": "sources",
       "repairable": true
     },
