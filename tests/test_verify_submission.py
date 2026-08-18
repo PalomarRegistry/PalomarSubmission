@@ -36,17 +36,17 @@ from scripts.verify_submission import (
     canonical_repository,
     compile_canonical_challenge,
     detect_spdx_identifier,
-    direct_imports,
     ensure_lake_manifest,
     execute,
     github_repository,
     lake_environment_value,
     landrun_command,
-    lean_module_header_is_module,
+    lean_header,
     load_comparator_config,
     materialize_packages,
     normalized_repository_path,
     package_allowlist,
+    parse_lean_header,
     project_tree_url,
     protected_comparator_config,
     protected_lean_path,
@@ -778,12 +778,47 @@ class VerifySubmissionTests(unittest.TestCase):
             "leanprover/cslib",
         )
 
-    def test_imports(self):
-        source = """/- leading block comment -/ import Mathlib -- trailing comment
-public /- nested /- comment -/ still -/ import TauCeti.Topology
--- import NotReal
-"""
-        self.assertEqual(direct_imports(source), ["Mathlib", "TauCeti.Topology"])
+    def test_header_reports_what_the_author_wrote(self):
+        # Lean injects `Init` into every header without `prelude`; the report is
+        # about the modules a Challenge names for itself.
+        payload = json.dumps(
+            {
+                "imports": [
+                    {
+                        "errors": [],
+                        "result": {
+                            "isModule": True,
+                            "imports": [
+                                {"module": "Init"},
+                                {"module": "Init"},
+                                {"module": "TauCeti.Topology"},
+                                {"module": "Mathlib"},
+                                {"module": "Mathlib"},
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+        header = parse_lean_header(payload)
+        self.assertTrue(header.is_module)
+        self.assertEqual(header.imports, ("Mathlib", "TauCeti.Topology"))
+
+    def test_header_rejects_an_unreadable_report(self):
+        for payload, message in (
+            ("not json", "parsable header"),
+            ('{"imports":[]}', "no single header"),
+            ('{"imports":[{"errors":["bad header"]}]}', "rejected the header"),
+            ('{"imports":[{"errors":[],"result":{}}]}', "whether the source is a module"),
+            ('{"imports":[{"errors":[],"result":{"isModule":false}}]}', "the header imports"),
+            (
+                '{"imports":[{"errors":[],"result":{"isModule":false,"imports":[{}]}}]}',
+                "unreadable header import",
+            ),
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(VerificationError, message):
+                    parse_lean_header(payload)
 
     def test_comparator_config(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2039,9 +2074,9 @@ review:
                     return_value=mock.Mock(stdout=payload, stderr="", returncode=0),
                 ) as sandbox:
                     self.assertIs(
-                        lean_module_header_is_module(
+                        lean_header(
                             Path("/source"),
-                            challenge_source=Path("/source/Challenge.lean"),
+                            lean_source=Path("/source/Challenge.lean"),
                             lean=Path("/tools/lean"),
                             environment={},
                             landrun=Path("/tools/landrun"),
@@ -2049,35 +2084,10 @@ review:
                             readable_paths=[],
                             executable_paths=[],
                             tools={},
-                        ),
+                        ).is_module,
                         expected,
                     )
                 self.assertIn("--deps-json", sandbox.call_args.args[0])
-
-    def test_unreadable_module_header_is_refused(self):
-        for payload, message in (
-            ("not json", "parsable Challenge header"),
-            ('{"imports":[]}', "no single Challenge header"),
-            ('{"imports":[{"errors":["bad header"]}]}', "rejected the Challenge header"),
-            ('{"imports":[{"errors":[],"result":{}}]}', "whether the Challenge is a module"),
-        ):
-            with self.subTest(payload=payload):
-                with mock.patch(
-                    "scripts.verify_submission.sandboxed_run",
-                    return_value=mock.Mock(stdout=payload, stderr="", returncode=0),
-                ):
-                    with self.assertRaisesRegex(VerificationError, message):
-                        lean_module_header_is_module(
-                            Path("/source"),
-                            challenge_source=Path("/source/Challenge.lean"),
-                            lean=Path("/tools/lean"),
-                            environment={},
-                            landrun=Path("/tools/landrun"),
-                            writable_directories=[],
-                            readable_paths=[],
-                            executable_paths=[],
-                            tools={},
-                        )
 
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:

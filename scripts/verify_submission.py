@@ -187,7 +187,6 @@ LICENSE_FILE_RE = re.compile(
     r"^(?:licen[cs]e|copying|unlicense|ofl)(?:\.(?:md|markdown|txt))?$",
     re.IGNORECASE,
 )
-IMPORT_RE = re.compile(r"^\s*(?:public\s+)?import\s+(.+?)\s*$")
 MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*$")
 OFFICIAL_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+$")
 SANDBOX_ENVIRONMENT = (
@@ -832,16 +831,6 @@ def strip_lean_comments(text: str) -> str:
     if block_depth:
         raise VerificationError("unterminated Lean block comment")
     return "".join(result)
-
-
-def direct_imports(text: str) -> list[str]:
-    imports: list[str] = []
-    for line in strip_lean_comments(text).splitlines():
-        match = IMPORT_RE.match(line)
-        if not match:
-            continue
-        imports.extend(token for token in match.group(1).split() if token)
-    return sorted(set(imports))
 
 
 def unique_comparator_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2987,10 +2976,54 @@ def source_matches_checkout(path: Path, package_dir: Path) -> bool:
     )
 
 
-def lean_module_header_is_module(
+@dataclass(frozen=True)
+class LeanHeader:
+    """A Lean source header, as the compiler's own parser reports it."""
+
+    is_module: bool
+    imports: tuple[str, ...]
+
+
+def parse_lean_header(stdout: str) -> LeanHeader:
+    """Read one `lean --deps-json` report.
+
+    The compiler injects `Init` into every header that does not say `prelude`,
+    so those entries are dropped: this reports the modules an author wrote. A
+    Challenge that imports `Init` by hand is therefore not credited with it,
+    which costs nothing that a reviewer reads.
+    """
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    try:
+        payload = json.loads(lines[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise VerificationError("Lean did not report a parsable header") from error
+    entries = payload.get("imports") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise VerificationError("Lean reported no single header")
+    reported = entries[0]
+    errors = reported.get("errors") or []
+    if errors:
+        raise VerificationError(f"Lean rejected the header: {str(errors[0])[:500]}")
+    result = reported.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("isModule"), bool):
+        raise VerificationError("Lean did not report whether the source is a module")
+    reported_imports = result.get("imports")
+    if not isinstance(reported_imports, list):
+        raise VerificationError("Lean did not report the header imports")
+    modules: list[str] = []
+    for entry in reported_imports:
+        if not isinstance(entry, dict) or not isinstance(entry.get("module"), str):
+            raise VerificationError("Lean reported an unreadable header import")
+        module = entry["module"]
+        if module != "Init":
+            modules.append(module)
+    return LeanHeader(is_module=result["isModule"], imports=tuple(sorted(set(modules))))
+
+
+def lean_header(
     source: Path,
     *,
-    challenge_source: Path,
+    lean_source: Path,
     lean: Path,
     environment: dict[str, str],
     landrun: Path,
@@ -2998,16 +3031,16 @@ def lean_module_header_is_module(
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
-) -> bool:
-    """Ask Lean whether the Challenge uses the module system.
+) -> LeanHeader:
+    """Ask Lean to read a source header.
 
-    ``--deps-json`` runs the compiler's own header parser, the one Lake uses to
-    decide which artifacts a module produces, so Palomar's expectation cannot
-    drift from what the compiler actually emits. The header is parsed, never
+    ``--deps-json`` runs the compiler's own parser, the one Lake uses to decide
+    which artifacts a module produces and which modules it imports, so
+    Palomar's reading cannot drift from Lean's. The header is parsed, never
     elaborated, so this reads the candidate's source without running it.
     """
     proc = sandboxed_run(
-        [str(lean), "--deps-json", str(challenge_source)],
+        [str(lean), "--deps-json", str(lean_source)],
         cwd=source,
         environment=environment,
         landrun=landrun,
@@ -3016,22 +3049,7 @@ def lean_module_header_is_module(
         executable_paths=executable_paths,
         tools=tools,
     )
-    lines = [line for line in proc.stdout.splitlines() if line.strip()]
-    try:
-        payload = json.loads(lines[-1])
-    except (IndexError, json.JSONDecodeError) as error:
-        raise VerificationError("Lean did not report a parsable Challenge header") from error
-    entries = payload.get("imports") if isinstance(payload, dict) else None
-    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-        raise VerificationError("Lean reported no single Challenge header")
-    reported = entries[0]
-    errors = reported.get("errors") or []
-    if errors:
-        raise VerificationError(f"Lean rejected the Challenge header: {str(errors[0])[:500]}")
-    result = reported.get("result")
-    if not isinstance(result, dict) or not isinstance(result.get("isModule"), bool):
-        raise VerificationError("Lean did not report whether the Challenge is a module")
-    return result["isModule"]
+    return parse_lean_header(proc.stdout)
 
 
 def lean_source_dependencies(
@@ -3317,9 +3335,9 @@ def compile_canonical_challenge(
     )
     if compiled_olean.is_symlink() or not compiled_olean.is_file():
         raise VerificationError("trusted Challenge compilation produced no module")
-    module_system = lean_module_header_is_module(
+    module_system = lean_header(
         source,
-        challenge_source=challenge_source,
+        lean_source=challenge_source,
         lean=lean,
         environment=canonical_env,
         landrun=landrun,
@@ -3327,7 +3345,7 @@ def compile_canonical_challenge(
         readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
         tools=tools,
-    )
+    ).is_module
     compiled_artifacts = canonical_challenge_artifacts(
         compiled_olean, module_system=module_system
     )
@@ -3660,12 +3678,23 @@ def execute(args: argparse.Namespace) -> int:
             report["warnings"].append(
                 "configured Challenge source exceeds the preferred 32 KiB / 300-line review surface"
             )
+        challenge_header = lean_header(
+            source,
+            lean_source=challenge_source,
+            lean=lean,
+            environment=env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+        )
         report["challenge"].update(
             {
                 "path": repository_relative_path(checkout, challenge_source),
                 "bytes": challenge_bytes,
                 "lines": challenge_lines,
-                "direct_imports": direct_imports(challenge_text),
+                "direct_imports": list(challenge_header.imports),
                 "sha256": sha256(challenge_source),
             }
         )
