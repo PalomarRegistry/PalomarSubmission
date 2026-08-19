@@ -613,6 +613,27 @@ def _safe_string_list(value: Any) -> list[str] | None:
     return [item.strip() for item in value]
 
 
+def _canonicalize_classification_keys(data: dict[str, Any]) -> None:
+    """Accept classification scheme names without making their casing significant."""
+    classification = data.get("classification")
+    if not isinstance(classification, dict):
+        return
+    for canonical in ("arxiv", "msc2020"):
+        matches = [
+            key
+            for key in classification
+            if isinstance(key, str) and key.casefold() == canonical
+        ]
+        if len(matches) > 1:
+            raise VerificationError(
+                "formalization.yaml contains duplicate classification keys "
+                f"differing only by case: {canonical!r}",
+                code="formalization.invalid_yaml",
+            )
+        if matches and matches[0] != canonical:
+            classification[canonical] = classification.pop(matches[0])
+
+
 def _safe_source(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return {}
@@ -804,6 +825,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             code="formalization.wrong_root_type",
             path=path.name,
         )
+    _canonicalize_classification_keys(data)
 
     issues: list[VerificationError] = []
 

@@ -11,6 +11,11 @@
       "expected_codes": []
     },
     {
+      "id": "case-insensitive-classification-keys",
+      "formalization": "version: v0.4\nproject:\n  name: Example\n  description: A formalization of the example result.\n  authors: [Example Author]\n  license: MIT\n  responsible_maintainers: [Example Maintainer]\nclassification:\n  arXiv: [math.LO]\n  MSC2020: [03B35]\nsources:\n  - title: Original result\n    type: original-proof\n    relationship: other\nautomation:\n  methods:\n    - method: manual\nreview:\n  status: self-assessed\n",
+      "expected_codes": []
+    },
+    {
       "id": "duplicate-yaml-key",
       "formalization": "project:\n  name: First\n  name: Second\n",
       "expected_codes": ["formalization.invalid_yaml"]

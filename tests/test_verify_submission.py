@@ -1306,6 +1306,39 @@ review:
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)
 
+    def test_formalization_metadata_accepts_case_insensitive_classification_keys(self):
+        valid = """\
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arXiv: [math.LO]
+  MSC2020: [03B35]
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(valid)
+            metadata = load_formalization_metadata(path)
+            self.assertEqual(
+                metadata["classification"],
+                {"arxiv": ["math.LO"], "msc2020": ["03B35"]},
+            )
+
+            path.write_text(valid.replace("  arXiv:", "  arxiv: [math.CO]\n  arXiv:"))
+            with self.assertRaisesRegex(VerificationError, "differing only by case"):
+                load_formalization_metadata(path)
+
     def test_provenance_derives_an_original_result_from_its_source_entry(self):
         provenance = submission_contract.normalized_provenance(
             {
