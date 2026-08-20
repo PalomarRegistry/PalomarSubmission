@@ -124,8 +124,8 @@ exactly with the SPDX identifier in `project.license`.
 Current metadata should declare `version: v0.4`; an omitted version follows the
 upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
 project identity, description, authorship, license, classification, automation-method, and
-review-status fields. Classification requires one or two official arXiv subject
-classes and between one and eight distinct MSC2020 codes. The current provenance
+review-status fields. Classification requires at least one official arXiv
+subject class and permits up to eight distinct MSC2020 codes. The current provenance
 contract also requires a nonempty `project.responsible_maintainers` list and a
 nonempty `sources` list. The submitted repository is the substantive proof
 development by default, so ordinary submissions need no `repository` section.
