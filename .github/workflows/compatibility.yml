@@ -135,7 +135,7 @@ jobs:
       - name: Build pinned Comparator, lean4export, and NanoDa
         run: |
           git clone --filter=blob:none https://github.com/leanprover/comparator.git comparator
-          git -C comparator checkout 68a064109f01c08f47c8edc9f51d6a2bbffaa188
+          git -C comparator checkout 575674928e239f5bc452aab72d1dd7b0f1326494
           test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.33.0-rc1"
           (cd comparator && lake build comparator)
           git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export
