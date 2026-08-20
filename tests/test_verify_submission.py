@@ -1397,8 +1397,17 @@ review:
                 submission_contract.formalization_repair_draft(metadata)["values"][
                     "classification.arxiv"
                 ],
-                ["math.LO", "cs.LO"],
+                ["math.LO", "cs.LO", "math.CO"],
             )
+            path.write_text(
+                valid.replace(
+                    "[math.LO]",
+                    "[math.LO, cs.LO, math.CO, math.PR, stat.CO, cs.DS, math.NT, "
+                    "math.AG, math.AT]",
+                )
+            )
+            with self.assertRaisesRegex(VerificationError, "1\u20138 classification codes"):
+                load_formalization_metadata(path)
             path.write_text(valid.replace("03B35", "99Z99"))
             with self.assertRaisesRegex(VerificationError, "not a recognized classification"):
                 load_formalization_metadata(path)

@@ -34,7 +34,7 @@
     },
     "classification.arxiv": {
       "label": "arXiv classifications",
-      "description": "At least one arXiv category code describing the mathematical content.",
+      "description": "One to eight arXiv category codes describing the mathematical content.",
       "input": "text-list",
       "repairable": true
     },
