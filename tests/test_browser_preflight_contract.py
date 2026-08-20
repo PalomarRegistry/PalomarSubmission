@@ -1,19 +1,27 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import submission_contract, verify_submission
+from scripts import browser_preflight_policy, submission_contract, verify_submission
 from scripts.verification_errors import FormalizationValidationError, VerificationError
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class BrowserPreflightContractTests(unittest.TestCase):
-    def test_policy_matches_authoritative_constants(self) -> None:
-        policy = json.loads(
-            (ROOT / "browser-preflight-policy.json").read_text(encoding="utf-8")
+    def test_published_policy_is_the_projection_of_the_contract(self) -> None:
+        # The intake page compares this document key by key against its own
+        # bundled copy, so the projection has to reproduce the committed text
+        # exactly, ordering included.
+        self.assertEqual(
+            (ROOT / "browser-preflight-policy.json").read_text(encoding="utf-8"),
+            browser_preflight_policy.policy_document(),
         )
+
+    def test_projection_reads_the_authoritative_constants(self) -> None:
+        policy = browser_preflight_policy.browser_preflight_policy()
 
         self.assertEqual(policy["schema_version"], 1)
         self.assertEqual(
@@ -32,8 +40,6 @@ class BrowserPreflightContractTests(unittest.TestCase):
             policy["toolchain"]["minimum"],
             json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))["minimum"],
         )
-        self.assertEqual(policy["toolchain"]["normalization"], "strip")
-        self.assertEqual(policy["toolchain"]["prerelease_ordering"], "rc-before-release")
         self.assertEqual(
             set(policy["comparator"]["required_keys"]),
             verify_submission.COMPARATOR_REQUIRED_KEYS,
@@ -60,6 +66,29 @@ class BrowserPreflightContractTests(unittest.TestCase):
         self.assertEqual(
             set(policy["comparator"]["standard_axioms"]), verify_submission.STANDARD_AXIOMS
         )
+
+    def test_published_toolchain_pattern_accepts_what_the_verifier_accepts(self) -> None:
+        # The published pattern is TOOLCHAIN_RE with its group names removed,
+        # which is only safe while the two accept exactly the same toolchains.
+        published = re.compile(
+            browser_preflight_policy.browser_preflight_policy()["toolchain"]["pattern"]
+        )
+        self.assertNotIn("?P<", published.pattern)
+        for candidate in (
+            "leanprover/lean4:v4.28.0",
+            "leanprover/lean4:v4.31.0-rc2",
+            "leanprover/lean4:v4.280.13",
+            "leanprover/lean4:v4.28",
+            "leanprover/lean4:4.28.0",
+            "leanprover/lean4:v4.28.0-rc",
+            "leanprover/lean4:v4.28.0 ",
+            "leanprover/lean4:v4.28.0\nnightly",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    published.fullmatch(candidate) is not None,
+                    verify_submission.TOOLCHAIN_RE.fullmatch(candidate) is not None,
+                )
 
     def test_fixture_contract_is_bounded_and_unique(self) -> None:
         fixtures = json.loads(
