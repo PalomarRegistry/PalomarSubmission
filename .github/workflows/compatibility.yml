@@ -129,14 +129,14 @@ jobs:
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.31.0-rc2
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.33.0-rc1
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.34.0-rc1
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Build pinned Comparator, lean4export, and NanoDa
         run: |
           git clone --filter=blob:none https://github.com/leanprover/comparator.git comparator
-          git -C comparator checkout 68a064109f01c08f47c8edc9f51d6a2bbffaa188
-          test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.33.0-rc1"
+          git -C comparator checkout 575674928e239f5bc452aab72d1dd7b0f1326494
+          test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.34.0-rc1"
           (cd comparator && lake build comparator)
           git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export
           LEAN4EXPORT_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import resolve_release_commit, supported_toolchain; print(resolve_release_commit("leanprover/lean4export", supported_toolchain("leanprover/lean4:v4.31.0-rc2")))')"

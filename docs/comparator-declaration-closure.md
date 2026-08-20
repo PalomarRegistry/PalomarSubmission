@@ -1,9 +1,9 @@
 # Comparator declaration-closure note
 
-Date: 2026-08-01
+Date: 2026-08-20
 
 Palomar pins Comparator commit
-`68a064109f01c08f47c8edc9f51d6a2bbffaa188`. At that revision,
+`575674928e239f5bc452aab72d1dd7b0f1326494`. At that revision,
 `Comparator.compareAt` first requires every configured theorem to have the same
 kind and type in the exported Challenge and Solution environments. It adds all
 constants used by those theorem types to a worklist. `Compare.loop` then walks
@@ -16,6 +16,15 @@ Comparator requires a named hole to be a definition of the same kind and type
 on both sides, follows the constants used by that type, and permits its body to
 differ. The axiom pass separately traverses the Solution proof and named
 definition bodies and rejects axioms outside `permitted_axioms`.
+
+Configured `theorem_names` are holes in the same sense, and the walk treats
+them so wherever it reaches them. A named theorem is compared by statement,
+and its proof is not compared even when some other declaration's value
+mentions it. A Challenge may therefore state a supporting lemma and leave its
+proof to the Solution, provided the lemma is named in `theorem_names`; a
+`sorry` on a declaration that is not named is still a mismatch. The axiom pass
+and the kernel replay of the Solution are what establish that the Solution
+proves each named statement.
 
 Consequently, declarations used to determine a compared theorem's type do not
 all need to be listed individually in `comparator.json`: Comparator follows the

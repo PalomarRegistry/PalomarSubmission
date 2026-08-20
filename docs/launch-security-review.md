@@ -149,7 +149,7 @@ gate is sufficient for the documentation paths described above.
 ### Comparator
 
 The workflow pins Comparator commit
-`68a064109f01c08f47c8edc9f51d6a2bbffaa188`. The reviewed path separately
+`575674928e239f5bc452aab72d1dd7b0f1326494`. The reviewed path separately
 exports Challenge and Solution environments, checks configured declarations and
 their dependency closures, enforces the permitted-axiom set, and replays the
 comparison through both Lean's kernel and the pinned independent NanoDa kernel.
