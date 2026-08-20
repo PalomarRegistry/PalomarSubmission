@@ -66,7 +66,7 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
-CLASSIFICATION_REPAIR_MAXIMUMS = {"arxiv": 2, "msc2020": 8}
+CLASSIFICATION_REPAIR_MAXIMUMS = {"arxiv": 8, "msc2020": 8}
 
 # Every dispatch input is visible on the run page of this public repository, so
 # a submitter's private prose stays private only by the server never sending it.
@@ -885,7 +885,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             "classification.arxiv",
             allowed=ARXIV_CATEGORIES,
             minimum=1,
-            maximum=None,
+            maximum=8,
         )
     )
     check(

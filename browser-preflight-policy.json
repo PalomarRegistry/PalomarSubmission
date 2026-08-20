@@ -25,7 +25,7 @@
       "other"
     ],
     "classification_cardinality": {
-      "arxiv": [1, null],
+      "arxiv": [1, 8],
       "msc2020": [0, 8]
     }
   },
