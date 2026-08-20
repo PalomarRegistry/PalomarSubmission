@@ -15,6 +15,7 @@ __all__ = (
     "ARXIV_CATEGORIES",
     "ARXIV_CATEGORY_NAMES",
     "AUTHORIZATION_RELATIONSHIPS",
+    "CLASSIFICATION_CARDINALITY",
     "GITHUB_LOGIN_RE",
     "GITHUB_RE",
     "FORMALIZATION_PROFILE_VERSION",
@@ -66,7 +67,10 @@ MSC2020_NAMES = json.loads(
 )
 ARXIV_CATEGORIES = frozenset(ARXIV_CATEGORY_NAMES)
 MSC2020_CODES = frozenset(MSC2020_NAMES)
-CLASSIFICATION_REPAIR_MAXIMUMS = {"arxiv": 8, "msc2020": 8}
+# What load_formalization_metadata requires and what a repair draft may carry
+# are the same bounds; browser-preflight-policy.json publishes them so the
+# intake page can apply them before a submission reaches the verifier.
+CLASSIFICATION_CARDINALITY = {"arxiv": (1, 8), "msc2020": (0, 8)}
 
 # Every dispatch input is visible on the run page of this public repository, so
 # a submitter's private prose stays private only by the server never sending it.
@@ -733,7 +737,7 @@ def formalization_repair_draft(data: dict[str, Any]) -> dict[str, Any]:
             items = _safe_string_list(classification.get(name))
             if items:
                 field = f"classification.{name}"
-                values[field] = items[:CLASSIFICATION_REPAIR_MAXIMUMS[name]]
+                values[field] = items[: CLASSIFICATION_CARDINALITY[name][1]]
                 origins[field] = field
 
     raw_sources = data.get("sources")
@@ -879,13 +883,15 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
     classification = (
         data.get("classification") if isinstance(data.get("classification"), dict) else {}
     )
+    arxiv_minimum, arxiv_maximum = CLASSIFICATION_CARDINALITY["arxiv"]
+    msc2020_minimum, msc2020_maximum = CLASSIFICATION_CARDINALITY["msc2020"]
     check(
         lambda: _required_classifications(
             classification.get("arxiv"),
             "classification.arxiv",
             allowed=ARXIV_CATEGORIES,
-            minimum=1,
-            maximum=8,
+            minimum=arxiv_minimum,
+            maximum=arxiv_maximum,
         )
     )
     check(
@@ -893,8 +899,8 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             classification.get("msc2020", []),
             "classification.msc2020",
             allowed=MSC2020_CODES,
-            minimum=0,
-            maximum=8,
+            minimum=msc2020_minimum,
+            maximum=msc2020_maximum,
         )
     )
 
