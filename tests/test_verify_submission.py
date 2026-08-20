@@ -1255,6 +1255,103 @@ review:
             self.assertNotIn("declared", report["provenance"])
             self.assertIn(report["provenance"]["result_origin"], {"original", "source-based"})
 
+    def test_prepared_report_records_no_msc2020_codes_when_the_key_is_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            (fixture / "lakefile.toml").write_text('name = "Example"\n')
+            (fixture / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+            (fixture / "LICENSE").write_text("Apache License Version 2.0\n")
+            (fixture / "formalization.yaml").write_text(
+                """\
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+repository:
+  role: substantive-development
+classification:
+  arxiv: [math.LO]
+sources:
+  - title: A source theorem
+    authors: [Emmy Noether]
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+            )
+            (fixture / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["example"],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                )
+            )
+            event = root / "event.json"
+            event.write_text(
+                json.dumps(
+                    {
+                        "inputs": {
+                            "repository": "owner/repo",
+                            "commit": "b" * 40,
+                            "request_id": "abc123def456",
+                            "options": json.dumps(
+                                {
+                                    "authorization_relationship": (
+                                        "I am a Palomar Technical Maintainer testing the workflow"
+                                    ),
+                                    "comparator_config_path": "comparator.json",
+                                }
+                            ),
+                        }
+                    }
+                )
+            )
+            work = root / "work"
+            work.mkdir()
+            output = root / "report.json"
+            args = Namespace(
+                event=str(event),
+                output=str(output),
+                work_dir=str(work),
+                licensee=str(root / "licensee"),
+            )
+
+            def clone_fixture(_url, _commit, destination):
+                shutil.copytree(fixture, destination)
+
+            with (
+                mock.patch("scripts.verify_submission.clone_commit", side_effect=clone_fixture),
+                mock.patch("scripts.verify_submission.validate_preservable_git_checkout"),
+                mock.patch(
+                    "scripts.verify_submission.detect_spdx_identifier",
+                    return_value="Apache-2.0",
+                ),
+                mock.patch(
+                    "scripts.verify_submission.resolve_release_commit",
+                    return_value="c" * 40,
+                ),
+                mock.patch("scripts.verify_submission.workflow_output"),
+            ):
+                self.assertEqual(verifier.prepare(args), 0)
+
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "pending", report["errors"])
+            self.assertEqual(report["classification"]["msc2020"], [])
+            self.assertEqual(
+                [entry["code"] for entry in report["classification"]["arxiv"]], ["math.LO"]
+            )
+
     def test_formalization_metadata_accepts_many_arxiv_but_rejects_unknown_classifications(self):
         valid = """\
 project:
