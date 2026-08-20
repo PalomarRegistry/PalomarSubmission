@@ -1,0 +1,47 @@
+# PalomarServer vendors the contract this repository publishes: the browser
+# preflight policy, the repair profile, and the classification taxonomies. It
+# compares its copy against this repository, but only while building itself, so
+# publishing a change here would otherwise leave its deployed intake page
+# declining to certify its own preflight results until something unrelated
+# happened there. Telling it directly closes that window.
+#
+# The paths below are the published artifacts rather than the constants behind
+# them, which is the same thing: browser-preflight-policy.json is projected from
+# those constants, so a change that reaches a consumer always changes a file
+# named here.
+name: notify contract consumers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - browser-preflight-policy.json
+      - formalization-profile.json
+      - taxonomies/**
+      - tests/fixtures/browser-preflight.json
+      - tests/fixtures/palomar-template-comparator.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # PALOMAR_SERVER_DISPATCH_TOKEN needs exactly one permission: creating a
+      # repository dispatch on PalomarRegistry/PalomarServer. Failing when it is
+      # absent is deliberate, because a silent no-op restores the staleness this
+      # workflow exists to prevent. PalomarServer also rechecks on a timer, so a
+      # red run here delays that notification rather than losing it.
+      - name: Ask PalomarServer to recheck its copy of the contract
+        env:
+          GH_TOKEN: ${{ secrets.PALOMAR_SERVER_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::PALOMAR_SERVER_DISPATCH_TOKEN is not set"
+            exit 1
+          fi
+          gh api --method POST repos/PalomarRegistry/PalomarServer/dispatches \
+            -f event_type=palomar-submission-contract-changed
