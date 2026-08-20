@@ -49,7 +49,10 @@ bounded subset of preparation rules that the submission page can repeat at an
 exact commit. It is advisory only: the workflow remains authoritative and
 repeats every check after submission. Consumers must fail open when the policy
 is unavailable or incompatible, and compare its complete contents before using
-a browser result to ask for confirmation.
+a browser result to ask for confirmation. The file is generated: it is what
+`python -m scripts.browser_preflight_policy` projects from this repository's
+constants, so change the constant and rerun that script with `--write` rather
+than editing the document.
 
 Formalization profile 4 reports every missing or invalid mechanically required
 metadata field separately and includes only safely reusable values from a
