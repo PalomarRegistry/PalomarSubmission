@@ -34,13 +34,13 @@
     },
     "classification.arxiv": {
       "label": "arXiv classifications",
-      "description": "One or two arXiv category codes describing the mathematical content.",
+      "description": "At least one arXiv category code describing the mathematical content.",
       "input": "text-list",
       "repairable": true
     },
     "classification.msc2020": {
       "label": "MSC 2020 classifications",
-      "description": "Between one and eight MSC 2020 classification codes.",
+      "description": "Up to eight MSC 2020 classification codes; leave empty if none apply.",
       "input": "text-list",
       "repairable": true
     },
