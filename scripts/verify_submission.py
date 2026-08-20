@@ -1217,7 +1217,7 @@ def prepare(args: argparse.Namespace) -> int:
                             "code": code,
                             "name": submission_contract.MSC2020_NAMES[code],
                         }
-                        for code in formalization["classification"]["msc2020"]
+                        for code in formalization["classification"].get("msc2020", [])
                     ],
                 },
                 "provenance": provenance,
