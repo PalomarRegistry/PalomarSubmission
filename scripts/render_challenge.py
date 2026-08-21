@@ -518,10 +518,11 @@ def load_json_object(path: Path) -> dict[str, Any]:
 def toolchain_verso_commit(toolchain: str) -> str:
     """The Verso release matching this toolchain, resolved to a commit.
 
-    Verso publishes a tag for every Lean release, so the revision is derived
-    from the toolchain rather than looked up in a table that has to be edited
-    for every release. The resolved commit is what gets recorded, so a render
-    always says exactly which Verso built it.
+    The revision is derived from the toolchain rather than looked up in a
+    table that has to be edited for every release. Verso does not tag every
+    Lean patch release, so resolve_release_commit falls back to the newest
+    tag in the same release line. The resolved commit is what gets recorded,
+    so a render always says exactly which Verso built it.
     """
     return resolve_release_commit("leanprover/verso", supported_toolchain(toolchain))
 

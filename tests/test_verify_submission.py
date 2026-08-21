@@ -3470,6 +3470,80 @@ review:
             )
 
 
+class ReleaseCommitTests(unittest.TestCase):
+    """Resolving a Lean release to the tooling revision built for it."""
+
+    @staticmethod
+    def _remote(*tags):
+        listing = "".join(f"{sha}\trefs/tags/{name}\n" for name, sha in tags)
+        return subprocess.CompletedProcess(["git"], 0, listing, "")
+
+    def _resolve(self, tag, *tags):
+        with mock.patch(
+            "scripts.verify_submission.subprocess.run", return_value=self._remote(*tags)
+        ):
+            return verifier.resolve_release_commit("leanprover/verso", tag)
+
+    def test_an_exact_tag_is_preferred(self):
+        self.assertEqual(
+            self._resolve("v4.32.0", ("v4.32.0", "a" * 40), ("v4.31.0", "b" * 40)),
+            "a" * 40,
+        )
+
+    def test_an_annotated_tag_resolves_through_its_peeled_ref(self):
+        for tags in (
+            (("v4.32.0", "a" * 40), ("v4.32.0^{}", "c" * 40)),
+            (("v4.32.0^{}", "c" * 40), ("v4.32.0", "a" * 40)),
+        ):
+            with self.subTest(tags):
+                self.assertEqual(self._resolve("v4.32.0", *tags), "c" * 40)
+
+    def test_a_patch_release_falls_back_within_its_release_line(self):
+        """Lean publishes v4.32.2; Verso's 4.32 line stops at v4.32.0."""
+        self.assertEqual(
+            self._resolve("v4.32.2", ("v4.32.0", "a" * 40), ("v4.31.0", "b" * 40)),
+            "a" * 40,
+        )
+
+    def test_the_newest_earlier_patch_in_the_line_wins(self):
+        self.assertEqual(
+            self._resolve("v4.32.2", ("v4.32.0", "a" * 40), ("v4.32.1", "d" * 40)),
+            "d" * 40,
+        )
+
+    def test_a_later_patch_is_never_used(self):
+        self.assertEqual(
+            self._resolve("v4.32.1", ("v4.32.0", "a" * 40), ("v4.32.2", "e" * 40)),
+            "a" * 40,
+        )
+
+    def test_release_lines_are_never_crossed(self):
+        with self.assertRaises(VerificationError) as caught:
+            self._resolve("v4.33.1", ("v4.32.0", "a" * 40))
+        self.assertEqual(caught.exception.code, "palomar.toolchain_release_missing")
+
+    def test_a_release_candidate_must_match_exactly(self):
+        """Release candidates are not compatibility-stable, and are tagged in full."""
+        with self.assertRaises(VerificationError) as caught:
+            self._resolve("v4.33.0-rc2", ("v4.33.0-rc1", "a" * 40))
+        self.assertEqual(caught.exception.code, "palomar.toolchain_release_missing")
+
+    def test_a_release_never_falls_back_to_a_candidate(self):
+        with self.assertRaises(VerificationError) as caught:
+            self._resolve("v4.32.1", ("v4.32.0-rc1", "a" * 40))
+        self.assertEqual(caught.exception.code, "palomar.toolchain_release_missing")
+
+    def test_an_unreadable_remote_stays_retryable(self):
+        with mock.patch(
+            "scripts.verify_submission.subprocess.run",
+            return_value=subprocess.CompletedProcess(["git"], 128, "", "boom"),
+        ):
+            with self.assertRaises(VerificationError) as caught:
+                verifier.resolve_release_commit("leanprover/verso", "v4.32.0")
+        self.assertEqual(caught.exception.code, "provider.release_lookup_failed")
+        self.assertTrue(caught.exception.retryable)
+
+
 class SubmissionRequestTests(unittest.TestCase):
     """Submissions arrive as a dispatch, and carry no submitter."""
 

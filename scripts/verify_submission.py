@@ -98,9 +98,10 @@ def parse_lean_version(value: str, pattern: re.Pattern[str]) -> tuple[int, int, 
 def toolchain_release_tag(toolchain: str) -> str:
     """The tag in Palomar's tooling repositories that matches this toolchain.
 
-    lean4export and Verso publish a tag for every Lean release, so the version
-    is derived rather than looked up in a table that has to be edited for every
-    release and is stale the moment it is not.
+    The version is derived rather than looked up in a table that has to be
+    edited for every release and is stale the moment it is not. lean4export
+    and Verso do not tag every Lean patch release, so this names the tag a
+    release would have; resolve_release_commit settles what actually exists.
     """
     match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
     if not match:
@@ -141,16 +142,10 @@ def supported_toolchain(toolchain: str) -> str:
     return toolchain_release_tag(toolchain)
 
 
-def resolve_release_commit(repository: str, tag: str) -> str:
-    """The commit a tooling release points at.
-
-    The tag is resolved once and the commit it named is recorded in the
-    mechanical report, so a record always says exactly which revision of
-    Palomar's own tooling checked it, whatever the tag says afterwards.
-    """
+def release_tag_commits(repository: str) -> dict[str, str]:
+    """Every release tag the repository publishes, mapped to its commit."""
     proc = subprocess.run(
-        ["git", "ls-remote", f"https://github.com/{repository}", f"refs/tags/{tag}^{{}}",
-         f"refs/tags/{tag}"],
+        ["git", "ls-remote", "--tags", f"https://github.com/{repository}"],
         check=False,
         capture_output=True,
         text=True,
@@ -164,14 +159,49 @@ def resolve_release_commit(repository: str, tag: str) -> str:
             next_action="Do not change the repository. Retry the same commit later.",
             retryable=True,
         )
-    commits = {}
+    commits: dict[str, str] = {}
     for line in proc.stdout.splitlines():
         parts = line.split()
-        if len(parts) == 2 and submission_contract.SHA_RE.fullmatch(parts[0]):
-            commits[parts[1]] = parts[0]
-    # An annotated tag resolves through its peeled ref; prefer that.
-    commit = commits.get(f"refs/tags/{tag}^{{}}") or commits.get(f"refs/tags/{tag}")
-    if not commit:
+        if len(parts) != 2 or not submission_contract.SHA_RE.fullmatch(parts[0]):
+            continue
+        peeled = parts[1].endswith("^{}")
+        name = parts[1].removeprefix("refs/tags/").removesuffix("^{}")
+        # An annotated tag resolves through its peeled ref; prefer that.
+        if peeled or name not in commits:
+            commits[name] = parts[0]
+    return commits
+
+
+def resolve_release_commit(repository: str, tag: str) -> str:
+    """The commit the tooling release for this Lean release points at.
+
+    lean4export and Verso tag a Lean patch release only when that release
+    needs a change in them, so a toolchain can name a real Lean release the
+    tooling has no tag of its own for: Lean publishes v4.32.2, Verso stops
+    at v4.32.0. An exact tag always wins; otherwise the newest stable tag in
+    the same release line is used, since that is the revision the line was
+    built against. Release lines are never crossed, and a release candidate
+    is not compatibility-stable, so it must match exactly.
+
+    The tag is resolved once and the commit it named is recorded in the
+    mechanical report, so a record always says exactly which revision of
+    Palomar's own tooling checked it, whatever the tag says afterwards.
+    """
+    commits = release_tag_commits(repository)
+    if tag in commits:
+        return commits[tag]
+    fallbacks = []
+    requested = (
+        parse_lean_version(tag, VERSION_RE) if VERSION_RE.fullmatch(tag) else None
+    )
+    if requested is not None and requested[3] == 1:
+        for name, commit in commits.items():
+            if not VERSION_RE.fullmatch(name):
+                continue
+            version = parse_lean_version(name, VERSION_RE)
+            if version[:2] == requested[:2] and version[3] == 1 and version < requested:
+                fallbacks.append((version, commit))
+    if not fallbacks:
         raise VerificationError(
             f"{repository} has published no {tag} release",
             code="palomar.toolchain_release_missing",
@@ -180,7 +210,7 @@ def resolve_release_commit(repository: str, tag: str) -> str:
                 "Do not change the repository. Palomar must add support for this Lean release."
             ),
         )
-    return commit
+    return max(fallbacks)[1]
 
 
 LICENSE_FILE_RE = re.compile(
