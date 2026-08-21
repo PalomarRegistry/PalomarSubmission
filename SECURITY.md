@@ -239,6 +239,23 @@ trusted build directories, so the verifier's frozen-write probe has nothing to
 assert there and is not run. Both callers use a probe contract that removes
 its owned probe files even when the sandbox runner fails.
 
+Render metadata schema 3 adds one `audit_declarations` row for every compared
+declaration. The audit executable is built from trusted source in a separate
+project outside candidate-writable state. It loads the compiled Challenge with
+Lean environment extensions disabled, then copies only declaration types into
+a fresh environment whose pretty-printer extensions come from the Lean
+toolchain. It also disables notation unexpansion explicitly. Consequently,
+submitted delaborators, unexpanders, formatters, notation, and macros cannot
+choose what this secondary rendering says. The PalomarWeb schema-3 consumer
+must be deployed before this producer begins publishing schema 3, because old
+Web versions reject metadata versions they do not know.
+
+This view is deliberately narrower than a semantic audit. It does not expose a
+misleading instance, a silently inserted coercion, or the body hidden behind a
+plausibly named definition. A reviewer still has to read the pinned source and
+the definitions it uses; the core-notation rendering closes notation and macro
+spoofing only.
+
 Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
 protected Comparator configuration, and the verifier script are outside the
 writable allowlist. Their hashes are captured before any project configuration
