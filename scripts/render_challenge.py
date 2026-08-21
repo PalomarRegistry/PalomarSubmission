@@ -41,6 +41,7 @@ from scripts.verify_submission import (  # noqa: E402
     clone_commit,
     ensure_lake_manifest,
     github_repository,
+    lake_environment_value,
     load_comparator_config,
     manifest_packages,
     materialize_packages,
@@ -84,6 +85,9 @@ MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
 BUILD_TIMEOUT_SECONDS = 6 * 60 * 60
 HTML_TIMEOUT_SECONDS = 10 * 60
 SANITIZE_TIMEOUT_SECONDS = 2 * 60
+MAX_AUDIT_DECLARATIONS_BYTES = 512 * 1024
+CORE_NOTATION_AUDIT_SOURCE = ROOT / "scripts" / "core_notation_audit.lean"
+TRUSTED_TOOLCHAIN_MODULE_ROOTS = ("Init", "Lake", "Lean", "Std")
 RESOURCE_PROPERTIES = (
     "MemoryMax=12G",
     "TasksMax=512",
@@ -478,6 +482,7 @@ def parsed_challenge_metadata(
     challenge_module: str,
     lean: Path,
     environment: dict[str, str],
+    audit_declarations: Any,
 ) -> dict[str, Any]:
     for path in (challenge, solution, comparator):
         if path.is_symlink() or not path.is_file():
@@ -489,18 +494,39 @@ def parsed_challenge_metadata(
     declarations = [*config["theorem_names"], *config.get("definition_names", [])]
     if len(declarations) != len(set(declarations)):
         raise VerificationError("comparator declaration names must be unique")
+    audit_declarations = validated_audit_declarations(audit_declarations, declarations)
     # The header is read by Lean rather than by a parser of our own, so the
     # rendered page lists what the compiler sees. This step already runs inside
     # the render sandbox, which permits the toolchain.
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "imports": list(source_header(challenge, lean=lean, environment=environment).imports),
         "module_doc": extract_module_doc(source),
         "declarations": declarations,
+        "audit_declarations": audit_declarations,
         "solution_imports": list(
             source_header(solution, lean=lean, environment=environment).imports
         ),
     }
+
+
+def validated_audit_declarations(value: Any, declarations: list[str]) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) != len(declarations):
+        raise VerificationError("audit declarations must correspond to comparator declarations")
+    result: list[dict[str, str]] = []
+    total_bytes = 0
+    for expected_name, row in zip(declarations, value, strict=True):
+        if not isinstance(row, dict) or set(row) != {"name", "declaration"}:
+            raise VerificationError("audit declaration rows must contain exactly name and declaration")
+        name = row["name"]
+        declaration = row["declaration"]
+        if name != expected_name or not isinstance(declaration, str) or not declaration.strip():
+            raise VerificationError("audit declarations must correspond to comparator declarations")
+        total_bytes += len(declaration.encode("utf-8"))
+        if total_bytes > MAX_AUDIT_DECLARATIONS_BYTES:
+            raise VerificationError("audit declarations exceed the 512 KiB limit")
+        result.append({"name": name, "declaration": declaration})
+    return result
 
 
 def source_header(lean_source: Path, *, lean: Path, environment: dict[str, str]) -> LeanHeader:
@@ -1790,6 +1816,7 @@ def sanitize_bundle(
 def sanitize_command(args: argparse.Namespace) -> int:
     diagnostic_out = Path(args.diagnostic_out).resolve()
     diagnostic_out.unlink(missing_ok=True)
+    audit_declarations = json.loads(Path(args.audit_declarations).read_text(encoding="utf-8"))
     try:
         metadata = parsed_challenge_metadata(
             Path(args.challenge).resolve(),
@@ -1798,6 +1825,7 @@ def sanitize_command(args: argparse.Namespace) -> int:
             challenge_module=args.challenge_module,
             lean=Path(args.lean).resolve(strict=True),
             environment=os.environ.copy(),
+            audit_declarations=audit_declarations,
         )
         sanitize_bundle(
             Path(args.input_dir).resolve(),
@@ -2105,6 +2133,136 @@ def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
     return tuple(result)
 
 
+def build_core_notation_audit(
+    work: Path,
+    *,
+    environment: dict[str, str],
+    lake: Path,
+    landrun: Path,
+    writable_directories: list[Path],
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> Path:
+    """Build the trusted audit executable away from candidate-writable state."""
+
+    if CORE_NOTATION_AUDIT_SOURCE.is_symlink() or not CORE_NOTATION_AUDIT_SOURCE.is_file():
+        raise VerificationError("trusted core-notation audit source is missing or invalid")
+    project = work / "core-notation-audit-build"
+    executable = work / "palomar-core-notation-audit"
+    if project.exists() or project.is_symlink() or executable.exists() or executable.is_symlink():
+        raise VerificationError("core-notation audit build path already exists")
+    project.mkdir()
+    replace_workspace_file(project / "PalomarAudit.lean", CORE_NOTATION_AUDIT_SOURCE.read_bytes())
+    replace_workspace_file(
+        project / "lakefile.toml",
+        b'''name = "PalomarCoreNotationAudit"
+defaultTargets = ["palomar-audit"]
+
+[[lean_exe]]
+name = "palomar-audit"
+root = "PalomarAudit"
+supportInterpreter = true
+''',
+    )
+    write_json(
+        project / "lake-manifest.json",
+        {
+            "version": "1.1.0",
+            "packagesDir": ".lake/packages",
+            "packages": [],
+            "name": "PalomarCoreNotationAudit",
+            "lakeDir": ".lake",
+            "fixedToolchain": False,
+        },
+    )
+    audit_build = project / ".lake" / "build"
+    audit_config = project / ".lake" / "config"
+    audit_build.mkdir(parents=True)
+    audit_config.mkdir()
+    try:
+        sandboxed_run(
+            [str(lake), "build", "palomar-audit"],
+            cwd=project,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=[*writable_directories, audit_build, audit_config],
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=10 * 60,
+            resource_properties=RESOURCE_PROPERTIES,
+        )
+        built = audit_build / "bin" / "palomar-audit"
+        if built.is_symlink() or not built.is_file():
+            raise VerificationError("trusted core-notation audit executable was not built")
+        replace_workspace_file(executable, built.read_bytes())
+        executable.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
+    require_protected_paths([executable], writable_directories)
+    return executable.resolve(strict=True)
+
+
+def core_notation_audit_lean_path(
+    lake_environment: str,
+    *,
+    workspace: Path,
+    challenge_module: str,
+    lean_prefix: Path,
+) -> str:
+    """Put the rendered root module first and reject toolchain shadow modules."""
+
+    module_suffix = module_source_suffix(challenge_module).with_suffix(".olean")
+    module_root = challenge_module.split(".", 1)[0]
+    if module_root in TRUSTED_TOOLCHAIN_MODULE_ROOTS:
+        raise VerificationError("Challenge module may not use a trusted toolchain namespace")
+
+    root_lib_path = workspace / ".lake" / "build" / "lib" / "lean"
+    if root_lib_path.resolve() != root_lib_path.absolute():
+        raise VerificationError("Challenge build library path is redirected")
+    root_lib = root_lib_path.resolve(strict=True)
+    challenge_olean = root_lib.joinpath(*module_suffix.parts)
+    if challenge_olean.is_symlink() or not challenge_olean.is_file():
+        raise VerificationError("rendered Challenge module is missing from its root build")
+
+    paths = [Path(value).resolve() for value in lake_environment.split(os.pathsep)]
+    if root_lib not in paths:
+        raise VerificationError("Lake omitted the root Challenge build from LEAN_PATH")
+    for path in paths:
+        try:
+            path.relative_to(lean_prefix.resolve())
+            continue
+        except ValueError:
+            pass
+        for root in TRUSTED_TOOLCHAIN_MODULE_ROOTS:
+            directory = path / root
+            olean = (path / root).with_suffix(".olean")
+            if directory.exists() or directory.is_symlink() or olean.exists() or olean.is_symlink():
+                raise VerificationError(
+                    f"candidate build shadows trusted Lean module namespace {root}"
+                )
+    return os.pathsep.join(str(path) for path in dict.fromkeys([root_lib, *paths]))
+
+
+def write_core_notation_audit_handoff(
+    work: Path,
+    audit_declarations: list[dict[str, str]],
+    writable_directories: list[Path],
+) -> Path:
+    """Store trusted audit text where no later candidate phase can replace it."""
+
+    path = work / "palomar-core-notation-audit.json"
+    if path.exists() or path.is_symlink():
+        raise VerificationError("core-notation audit handoff path already exists")
+    require_protected_paths([path], writable_directories)
+    replace_workspace_file(
+        path,
+        (json.dumps(audit_declarations, ensure_ascii=False) + "\n").encode("utf-8"),
+    )
+    return path.resolve(strict=True)
+
+
 def validate_build_metadata_files(paths: tuple[Path, ...]) -> None:
     for path in paths:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024:
@@ -2258,6 +2416,18 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=allowed_exec,
             tools=tools,
         )
+        audit_executable = build_core_notation_audit(
+            work,
+            environment=env,
+            lake=lake,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=allowed_exec,
+            tools=tools,
+        )
+        allowed_exec = sorted({*allowed_exec, audit_executable})
+        tools[audit_executable] = sha256(audit_executable)
         report["mathlib_cache"] = hydrate_mathlib_cache(
             workspace,
             trusted_work=work,
@@ -2291,6 +2461,59 @@ def execute(args: argparse.Namespace) -> int:
         if tree_bytes(workspace / ".lake", stop_after=MAX_RENDER_WORK_BYTES) > MAX_RENDER_WORK_BYTES:
             raise VerificationError("render workspace exceeds the disk cap")
         validate_build_metadata_files(writable_files)
+
+        lake_environment = lake_environment_value(
+            "LEAN_PATH",
+            source=workspace,
+            lake=lake,
+            printenv=printenv,
+            environment=env,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            readable_paths=readable_paths,
+            executable_paths=allowed_exec,
+            tools=tools,
+            allowed_roots=[workspace_checkout, lean_prefix],
+        )
+        audit_environment = env.copy()
+        audit_environment["LEAN_PATH"] = core_notation_audit_lean_path(
+            lake_environment,
+            workspace=workspace,
+            challenge_module=render_workspace.challenge_module,
+            lean_prefix=lean_prefix,
+        )
+        comparator_config = load_comparator_config(render_workspace.comparator)
+        declaration_kinds = [
+            *(("theorem", name) for name in comparator_config["theorem_names"]),
+            *(("def", name) for name in comparator_config.get("definition_names", [])),
+        ]
+        audit_command = [
+            str(audit_executable),
+            render_workspace.challenge_module,
+            *(item for pair in declaration_kinds for item in pair),
+        ]
+        audit_result = sandboxed_run(
+            audit_command,
+            cwd=workspace,
+            environment=audit_environment,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            writable_files=writable_files,
+            readable_paths=readable_paths,
+            executable_paths=allowed_exec,
+            tools=tools,
+            timeout=SANITIZE_TIMEOUT_SECONDS,
+            resource_properties=RESOURCE_PROPERTIES,
+        )
+        declarations = [name for _kind, name in declaration_kinds]
+        audit_declarations = validated_audit_declarations(
+            json.loads(audit_result.stdout), declarations
+        )
+        audit_declarations_path = write_core_notation_audit_handoff(
+            work,
+            audit_declarations,
+            writable_directories,
+        )
 
         raw_output = workspace / ".lake" / "build" / "palomar-render-raw"
         clean_output = workspace / ".lake" / "build" / "palomar-render-clean"
@@ -2343,13 +2566,15 @@ def execute(args: argparse.Namespace) -> int:
                 str(lean),
                 "--diagnostic-out",
                 str(sanitize_diagnostic),
+                "--audit-declarations",
+                str(audit_declarations_path),
             ],
             cwd=workspace,
             environment=env,
             landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
-            readable_paths=readable_paths,
+            readable_paths=[*readable_paths, audit_declarations_path],
             executable_paths=allowed_exec,
             tools=tools,
             timeout=SANITIZE_TIMEOUT_SECONDS,
@@ -2448,6 +2673,7 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser.add_argument("--challenge-module", required=True)
     sanitize_parser.add_argument("--lean", required=True)
     sanitize_parser.add_argument("--diagnostic-out", required=True)
+    sanitize_parser.add_argument("--audit-declarations", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result
 

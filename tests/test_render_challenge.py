@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -18,6 +19,7 @@ from scripts.render_challenge import (
     VERSO_RUNTIME,
     artifact_manifest,
     compatible_verso_toolchain,
+    core_notation_audit_lean_path,
     download_mathlib_cache,
     execute,
     extract_module_doc,
@@ -32,7 +34,9 @@ from scripts.render_challenge import (
     static_html_sanitize,
     toolchain_verso_commit,
     trusted_lakefile,
+    validated_audit_declarations,
     verify_sandbox_confinement,
+    write_core_notation_audit_handoff,
 )
 from scripts.render_report import AcceptedRenderPaths
 from scripts.verification_errors import VerificationError
@@ -1639,12 +1643,108 @@ end Example
                     challenge_module="Challenge",
                     lean=Path("/tools/lean"),
                     environment={},
+                    audit_declarations=[
+                        {
+                            "name": "Example.headline",
+                            "declaration": "theorem Example.headline : True",
+                        }
+                    ],
                 )
-            self.assertEqual(metadata["schema_version"], 2)
+            self.assertEqual(metadata["schema_version"], 3)
             self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
             self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
             self.assertEqual(metadata["declarations"], ["Example.headline"])
+            self.assertEqual(
+                metadata["audit_declarations"],
+                [
+                    {
+                        "name": "Example.headline",
+                        "declaration": "theorem Example.headline : True",
+                    }
+                ],
+            )
             self.assertEqual(metadata["solution_imports"], ["ErdosUnitDistance"])
+
+    def test_audit_declarations_are_an_exact_bounded_correspondence(self):
+        declarations = ["Example.first", "Example.second"]
+        rows = [
+            {"name": "Example.first", "declaration": "theorem Example.first : True"},
+            {"name": "Example.second", "declaration": "def Example.second : Nat"},
+        ]
+        self.assertEqual(validated_audit_declarations(rows, declarations), rows)
+
+        invalid = [
+            rows[:1],
+            [rows[1], rows[0]],
+            [{**rows[0], "source": "submitted"}, rows[1]],
+            [{"name": "Example.first", "declaration": " \n"}, rows[1]],
+            [
+                {"name": "Example.first", "declaration": "x" * (512 * 1024)},
+                rows[1],
+            ],
+        ]
+        for value in invalid:
+            with self.subTest(value=value[0] if value else value):
+                with self.assertRaises(VerificationError):
+                    validated_audit_declarations(value, declarations)
+
+    def test_audit_lean_path_pins_the_root_module_and_rejects_toolchain_shadows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            root_lib = workspace / ".lake" / "build" / "lib" / "lean"
+            dependency_lib = workspace / ".lake" / "packages" / "dep" / ".lake" / "build" / "lib" / "lean"
+            toolchain = root / "toolchain"
+            toolchain_lib = toolchain / "lib" / "lean"
+            for path in (root_lib, dependency_lib, toolchain_lib):
+                path.mkdir(parents=True)
+            (root_lib / "Challenge.olean").write_bytes(b"challenge")
+            lake_path = os.pathsep.join((str(dependency_lib), str(root_lib), str(toolchain_lib)))
+
+            protected = core_notation_audit_lean_path(
+                lake_path,
+                workspace=workspace,
+                challenge_module="Challenge",
+                lean_prefix=toolchain,
+            )
+            self.assertEqual(Path(protected.split(os.pathsep)[0]), root_lib)
+
+            (dependency_lib / "Lean").mkdir()
+            with self.assertRaisesRegex(VerificationError, "shadows trusted Lean"):
+                core_notation_audit_lean_path(
+                    lake_path,
+                    workspace=workspace,
+                    challenge_module="Challenge",
+                    lean_prefix=toolchain,
+                )
+
+    def test_audit_lean_path_rejects_a_toolchain_namespace_as_the_challenge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(VerificationError, "trusted toolchain namespace"):
+                core_notation_audit_lean_path(
+                    str(root),
+                    workspace=root,
+                    challenge_module="Lean.Challenge",
+                    lean_prefix=root / "toolchain",
+                )
+
+    def test_audit_handoff_is_outside_every_candidate_writable_directory(self):
+        rows = [{"name": "Example.headline", "declaration": "theorem Example.headline : True"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            writable = root / "workspace" / ".lake" / "build"
+            work.mkdir()
+            writable.mkdir(parents=True)
+            handoff = write_core_notation_audit_handoff(work, rows, [writable])
+            self.assertEqual(handoff.parent, work)
+            self.assertEqual(json.loads(handoff.read_text(encoding="utf-8")), rows)
+
+            hostile_work = writable / "handoff"
+            hostile_work.mkdir()
+            with self.assertRaisesRegex(VerificationError, "sandbox-writable"):
+                write_core_notation_audit_handoff(hostile_work, rows, [writable])
 
     def test_module_doc_parser_skips_strings_and_nested_regular_comments(self):
         source = '''def fake := "/-! nope -/"\n/- outer /-! nested -/ -/\n/-! real doc -/'''
@@ -1760,6 +1860,8 @@ instPartialOrderElement</span></body></html>'''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             channel = root / "diagnostic.json"
+            audit_declarations = root / "audit-declarations.json"
+            audit_declarations.write_text("[]", encoding="utf-8")
             args = argparse.Namespace(
                 challenge=str(root / "Challenge.lean"),
                 solution=str(root / "Solution.lean"),
@@ -1769,6 +1871,7 @@ instPartialOrderElement</span></body></html>'''
                 input_dir=str(root / "raw"),
                 output_dir=str(root / "clean"),
                 diagnostic_out=str(channel),
+                audit_declarations=str(audit_declarations),
             )
             with (
                 mock.patch(
