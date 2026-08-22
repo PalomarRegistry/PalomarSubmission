@@ -3283,10 +3283,86 @@ def protected_lean_path(
     *,
     protected_root: Path | None = None,
 ) -> str:
-    """Resolve protected statement imports before any candidate build output."""
+    """Resolve protected statement imports before any candidate build output.
+
+    Lean resolves a module by the first search-path entry that holds a
+    directory named after the module's root component, and then expects the
+    whole module under that entry. The protected root therefore has to carry
+    every candidate module that shares the Challenge's root component, or
+    those modules become unreadable; `overlay_candidate_root_package` puts
+    them there before Comparator runs.
+    """
     candidate_paths = [Path(value) for value in candidate_lean_path.split(os.pathsep) if value]
     ordered = [protected_root or canonical_olean.parent, *trusted_lean_paths, *candidate_paths]
     return os.pathsep.join(str(path) for path in dict.fromkeys(ordered))
+
+
+# What Lean reads for a module from LEAN_PATH: the module, and for a
+# module-system source its private, server and IR sidecars (see
+# `canonical_challenge_artifacts`). Lake's `.ilean`, `.trace` and `.hash`
+# files are not loaded.
+LOADED_MODULE_SUFFIXES = (".olean", ".olean.private", ".olean.server", ".ir")
+
+
+def overlay_candidate_root_package(
+    protected_root: Path,
+    canonical_olean: Path,
+    *,
+    challenge_module: str,
+    candidate_lean_path: str,
+) -> list[Path]:
+    """Carry the candidate's modules under the Challenge's root into the protected root.
+
+    `protected_root` comes first on Comparator's LEAN_PATH so the Challenge
+    there cannot be replaced by candidate build output. Lean picks the search
+    path entry for a module by its root component alone (`SearchPath.findWithExt`
+    takes the first entry where `<root>` is a directory), so with only the
+    Challenge published under `<root>/`, every other `<root>.*` module, the
+    Solution included, is looked up in the protected root and does not exist
+    there. A Challenge at the top level of the project is unaffected: its
+    module is a file, not a directory, and other modules fall through.
+
+    The candidate's own modules under that root are copied in, from the first
+    candidate search path entry holding the directory, which is the entry Lean
+    would have chosen. Only the files Lean loads for a module travel: the
+    module itself and its module-system sidecars, not `.ilean`, trace or hash
+    files. Nothing named after the Challenge module may land beside it, so the
+    canonical Challenge and its sidecars are never overwritten and no sidecar
+    can be forged next to them, whatever sidecar kinds a Lean release adds.
+    Existing files are left alone and symbolic links are not followed.
+
+    The copies are taken after the candidate build and before Comparator runs.
+    Comparator's own Lake invocation is expected to find everything up to date;
+    a module it rebuilt under this root would be read here as built before.
+    Returns the paths written.
+    """
+    module_path = module_source_suffix(challenge_module)
+    root_name = module_path.parts[0]
+    protected_package = protected_root / root_name
+    challenge_directory = protected_root.joinpath(*module_path.parts[:-1])
+    challenge_stem = module_path.stem
+    written: list[Path] = []
+    for value in candidate_lean_path.split(os.pathsep):
+        if not value:
+            continue
+        candidate_package = Path(value) / root_name
+        if candidate_package.is_symlink() or not candidate_package.is_dir():
+            continue
+        for path in sorted(candidate_package.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if not any(path.name.endswith(suffix) for suffix in LOADED_MODULE_SUFFIXES):
+                continue
+            target = protected_package / path.relative_to(candidate_package)
+            if target.parent == challenge_directory and target.name.split(".")[0] == challenge_stem:
+                continue
+            if target.exists() or target.is_symlink():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            written.append(target)
+        break
+    return written
 
 
 def canonical_challenge_artifacts(olean: Path, *, module_system: bool) -> tuple[Path, ...]:
@@ -3915,6 +3991,12 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
             allowed_roots=[checkout, lean_prefix],
+        )
+        overlay_candidate_root_package(
+            canonical_root,
+            canonical_olean,
+            challenge_module=report["comparator"]["challenge_module"],
+            candidate_lean_path=env["LEAN_PATH"],
         )
         env["LEAN_PATH"] = protected_lean_path(
             canonical_olean,
