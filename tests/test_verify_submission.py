@@ -762,6 +762,15 @@ class VerifySubmissionTests(unittest.TestCase):
             canonical_repository("formalfrontier/tauceti", aliases),
             "TauCetiProject/TauCeti",
         )
+        mathlib = next(
+            root
+            for root in roots
+            if root["repository"] == "leanprover-community/mathlib4"
+        )
+        self.assertEqual(
+            mathlib["accepted_revisions"],
+            ["905b95818eb32af7874a58b427f50c1711a5e96c"],
+        )
         tauceti = next(root for root in roots if root["repository"] == "TauCetiProject/TauCeti")
         self.assertEqual(
             tauceti["accepted_revisions"],
