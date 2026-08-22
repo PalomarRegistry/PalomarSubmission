@@ -46,6 +46,7 @@ from scripts.verify_submission import (
     load_comparator_config,
     materialize_packages,
     normalized_repository_path,
+    overlay_candidate_root_package,
     package_allowlist,
     parse_lean_header,
     project_tree_url,
@@ -2092,6 +2093,85 @@ review:
                 "/source/.lake/build/lib/lean",
             ],
         )
+
+    def test_overlay_carries_candidate_modules_under_the_challenge_root(self):
+        # Lean resolves `Palomar.*` in the first search path entry holding a
+        # `Palomar/` directory. With only the Challenge published there, the
+        # Solution beside it was unreadable (PalomarSubmission#108).
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            protected = work / "canonical-challenge"
+            canonical = protected / "Palomar" / "Erdos730" / "Challenge.olean"
+            canonical.parent.mkdir(parents=True)
+            canonical.write_bytes(b"canonical")
+            candidate = work / "source" / ".lake" / "build" / "lib" / "lean"
+            package = candidate / "Palomar" / "Erdos730"
+            package.mkdir(parents=True)
+            (package / "Challenge.olean").write_bytes(b"candidate challenge")
+            (package / "Challenge.olean.private").write_bytes(b"forged sidecar")
+            (package / "Challenge.olean.future").write_bytes(b"forged sidecar of a kind not yet known")
+            (package / "Solution.olean").write_bytes(b"solution")
+            (package / "Solution.olean.private").write_bytes(b"solution private")
+            (package / "Solution.ilean").write_bytes(b"not loaded by Lean")
+            (package / "Solution.trace").write_bytes(b"not loaded by Lean")
+            (candidate / "Palomar" / "Erdos154" / "Solution.olean").parent.mkdir()
+            (candidate / "Palomar" / "Erdos154" / "Solution.olean").write_bytes(b"other entry")
+            (candidate / "ErdosProblems").mkdir()
+            (candidate / "ErdosProblems" / "Erdos730.olean").write_bytes(b"proof")
+            (package / "Linked.olean").symlink_to(package / "Solution.olean")
+            later = work / "later" / "lib" / "lean"
+            (later / "Palomar").mkdir(parents=True)
+            (later / "Palomar" / "Shadow.olean").write_bytes(b"from a later entry")
+
+            written = overlay_candidate_root_package(
+                protected,
+                canonical,
+                challenge_module="Palomar.Erdos730.Challenge",
+                candidate_lean_path=f"{candidate}:{later}",
+            )
+
+            self.assertEqual(
+                sorted(path.relative_to(protected).as_posix() for path in written),
+                [
+                    "Palomar/Erdos154/Solution.olean",
+                    "Palomar/Erdos730/Solution.olean",
+                    "Palomar/Erdos730/Solution.olean.private",
+                ],
+            )
+            # The canonical Challenge is untouched and nothing named after it
+            # may be forged beside it, of any sidecar kind.
+            self.assertEqual(canonical.read_bytes(), b"canonical")
+            self.assertEqual(
+                sorted(p.name for p in (protected / "Palomar" / "Erdos730").iterdir()),
+                ["Challenge.olean", "Solution.olean", "Solution.olean.private"],
+            )
+            # Symlinks are not followed, other roots stay where they were, and
+            # only the entry Lean would have chosen contributes.
+            self.assertFalse((protected / "Palomar" / "Erdos730" / "Linked.olean").exists())
+            self.assertFalse((protected / "ErdosProblems").exists())
+            self.assertFalse((protected / "Palomar" / "Shadow.olean").exists())
+
+    def test_overlay_is_a_no_op_for_a_top_level_challenge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            protected = work / "canonical-challenge"
+            canonical = protected / "Challenge.olean"
+            protected.mkdir()
+            canonical.write_bytes(b"canonical")
+            candidate = work / "lib" / "lean"
+            candidate.mkdir(parents=True)
+            (candidate / "Challenge.olean").write_bytes(b"candidate")
+            (candidate / "Solution.olean").write_bytes(b"solution")
+
+            written = overlay_candidate_root_package(
+                protected,
+                canonical,
+                challenge_module="Challenge",
+                candidate_lean_path=str(candidate),
+            )
+
+            self.assertEqual(written, [])
+            self.assertEqual(sorted(p.name for p in protected.iterdir()), ["Challenge.olean"])
 
     def test_hostile_canonical_build_cannot_publish_sibling_modules(self):
         with tempfile.TemporaryDirectory() as directory:
