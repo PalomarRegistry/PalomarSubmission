@@ -224,6 +224,22 @@ class RenderChallengeTests(unittest.TestCase):
     def test_zero_cache_downloads_skip_unpack_and_leave_source_build_to_follow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "mathlib",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/mathlib4",
+                                "rev": "0" * 40,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             cache = root / ".lake" / "config" / "mathlib-cache"
             cache.mkdir(parents=True)
             with (
@@ -252,6 +268,45 @@ class RenderChallengeTests(unittest.TestCase):
                 )
         self.assertEqual(result, {"requested": 1, "downloaded": 0, "bytes": 0})
         sandbox.assert_not_called()
+
+    def test_a_project_without_mathlib_skips_cache_hydration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "verso",
+                                "type": "git",
+                                "url": "https://github.com/leanprover/verso",
+                                "rev": "0" * 40,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "scripts.render_challenge.discover_mathlib_cache_hashes"
+            ) as discover:
+                result = hydrate_mathlib_cache(
+                    root,
+                    trusted_work=root,
+                    environment={"HOME": str(root), "TMPDIR": str(root)},
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    writable_directories=[],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                )
+
+        self.assertEqual(result, {"requested": 0, "downloaded": 0, "bytes": 0})
+        discover.assert_not_called()
 
     def renderer_probe_paths(self, root: Path) -> dict[str, Path]:
         """Lay out the probe set the renderer's confinement call owns."""

@@ -2031,6 +2031,12 @@ def hydrate_mathlib_cache(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> dict[str, int]:
+    # Standalone Lean projects do not provide Mathlib's ``cache`` executable.
+    # The merged renderer manifest is already validated and records the full
+    # package graph, so avoid running submitted Lake code merely to discover
+    # that there is no Mathlib cache to hydrate.
+    if not any(package["name"] == "mathlib" for package in manifest_packages(workspace)):
+        return {"requested": 0, "downloaded": 0, "bytes": 0}
     hashes, cache_dir = discover_mathlib_cache_hashes(
         workspace,
         environment=environment,
