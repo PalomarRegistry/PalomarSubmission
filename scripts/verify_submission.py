@@ -2873,6 +2873,14 @@ class StagedLakePromotion:
     metadata: tuple[tuple[Path, Path], ...]
 
 
+@dataclass(frozen=True)
+class TrustedReplayWorkspace:
+    """Verifier-authored root that configures the closure as dependencies."""
+
+    source: Path
+    lake_root: Path
+
+
 def stage_trusted_closure(
     source: Path,
     *,
@@ -3211,6 +3219,97 @@ def promote_staged_lake_state(promotions: tuple[StagedLakePromotion, ...]) -> No
             os.replace(source, destination)
 
 
+def create_trusted_replay_workspace(
+    source: Path,
+    *,
+    checkout: Path,
+    packages: list[dict[str, str]],
+    closure: set[str],
+    root_name: str,
+    destination: Path,
+) -> TrustedReplayWorkspace:
+    """Create a synthetic root that configures canonical packages as dependencies."""
+    if destination.exists() or destination.is_symlink():
+        raise VerificationError("trusted-cache replay workspace is not fresh")
+    by_name = {package["name"]: package for package in packages}
+    root_package = by_name.get(root_name)
+    if root_package is None or not closure <= by_name.keys():
+        raise VerificationError("trusted-cache replay closure is incomplete")
+    destination.mkdir()
+    destination.joinpath("lakefile.toml").write_text(
+        "\n".join(
+            (
+                'name = "palomarTrustedCacheReplay"',
+                'version = "0.0.0"',
+                "",
+                "[[require]]",
+                f"name = {json.dumps(root_name)}",
+                f"git = {json.dumps(root_package['url'])}",
+                f"rev = {json.dumps(root_package['revision'])}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    root_checkout = package_checkout(source, root_package, checkout=checkout)
+    config_files = [
+        name for name in ("lakefile.toml", "lakefile.lean") if (root_checkout / name).is_file()
+    ]
+    if len(config_files) != 1:
+        raise VerificationError("trusted-cache replay root has ambiguous Lake configuration")
+    try:
+        authoritative_manifest = json.loads(
+            (root_checkout / "lake-manifest.json").read_text(encoding="utf-8")
+        )
+        dependency_entries = authoritative_manifest["packages"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise VerificationError("trusted-cache replay root manifest is invalid") from error
+    if not isinstance(dependency_entries, list) or not all(
+        isinstance(entry, dict) for entry in dependency_entries
+    ):
+        raise VerificationError("trusted-cache replay root manifest has invalid packages")
+    normalized_dependencies = manifest_packages(root_checkout)
+    if (
+        len(normalized_dependencies) != len(dependency_entries)
+        or {package["name"] for package in normalized_dependencies} != closure - {root_name}
+    ):
+        raise VerificationError("trusted-cache replay root manifest changed its closure")
+    root_entry = {
+        "url": root_package["url"],
+        "type": "git",
+        "subDir": None,
+        "scope": "",
+        "rev": root_package["revision"],
+        "name": root_name,
+        "manifestFile": "lake-manifest.json",
+        "inputRev": root_package["revision"],
+        "inherited": False,
+        "configFile": config_files[0],
+    }
+    write_json(
+        destination / "lake-manifest.json",
+        {
+            "version": authoritative_manifest.get("version", "1.1.0"),
+            "packagesDir": ".lake/packages",
+            "packages": [root_entry, *dependency_entries],
+        },
+    )
+    lake_root = destination / ".lake"
+    packages_root = lake_root / "packages"
+    (lake_root / "build").mkdir(parents=True)
+    (lake_root / "config").mkdir()
+    packages_root.mkdir()
+    boundary = checkout.resolve()
+    for name in sorted(closure):
+        target = package_checkout(source, by_name[name], checkout=boundary)
+        if target.is_symlink() or not target.is_dir():
+            raise VerificationError(
+                f"trusted-cache replay package is not a real checkout: {name!r}"
+            )
+        (packages_root / name).symlink_to(target, target_is_directory=True)
+    return TrustedReplayWorkspace(destination.resolve(), lake_root.resolve())
+
+
 def get_mathlib_cache(
     source: Path,
     *,
@@ -3403,6 +3502,42 @@ def get_mathlib_cache(
             tools=tools,
             timeout=EXECUTION_BUDGET_SECONDS,
         )
+        # A root-scoped replay does not create Lake's dependency-scoped config
+        # entries. Build a verifier-authored empty root as well so later
+        # candidate configuration can consume those entries read-only instead
+        # of requesting writes to frozen trusted package state.
+        with tempfile.TemporaryDirectory(
+            prefix=".palomar-trusted-replay-", dir=checkout.parent
+        ) as replay_directory:
+            replay = create_trusted_replay_workspace(
+                source,
+                checkout=checkout,
+                packages=packages,
+                closure=closure,
+                root_name=mathlib["name"],
+                destination=Path(replay_directory) / "workspace",
+            )
+            replay_home = replay.lake_root / "config" / "home"
+            replay_temporary = replay.lake_root / "config" / "tmp"
+            replay_home.mkdir()
+            replay_temporary.mkdir()
+            replay_env = cache_env.copy()
+            replay_env.update(
+                {"HOME": str(replay_home.resolve()), "TMPDIR": str(replay_temporary.resolve())}
+            )
+            sandboxed_run(
+                [str(lake), "build"],
+                cwd=replay.source,
+                environment=replay_env,
+                landrun=landrun,
+                writable_directories=[replay.lake_root, *cache_writable],
+                readable_paths=sorted(
+                    {replay.source, checkout.resolve(), *system_readable_paths()}
+                ),
+                executable_paths=executable_paths,
+                tools=tools,
+                timeout=EXECUTION_BUDGET_SECONDS,
+            )
         return {"required": True, "available": cache_available}
     finally:
         if nested_packages.is_symlink():

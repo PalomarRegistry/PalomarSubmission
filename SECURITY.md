@@ -151,8 +151,11 @@ symlinks, and accepts non-build state only as generic regular
 artifact/`.trace` pairs. It validates every package before atomically moving
 those build trees and pairs into the fresh canonical `.lake` roots. The later
 network-disabled replay can write only canonical `build` and `config`
-directories and one pre-existing exact ProofWidgets replay marker. Trusted-root
-Lake URL resolution is pinned to that root's verified manifest and is accepted only
+directories and one pre-existing exact ProofWidgets replay marker. A second
+network-disabled replay from a verifier-authored empty root creates the
+dependency-scoped Lake configuration that submitted configuration later reads;
+it has the same canonical write boundary. Trusted-root Lake URL resolution is
+pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. Immediately before each qualified-root build, the verifier likewise
 deletes and recreates every `.lake` tree owned by that root. Mathlib-owned cache

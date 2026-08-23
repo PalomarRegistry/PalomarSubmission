@@ -2718,6 +2718,7 @@ review:
             mathlib = source / ".lake" / "packages" / "mathlib"
             mathlib.mkdir(parents=True)
             (mathlib / ".gitignore").write_text(".lake/\n")
+            (mathlib / "lakefile.lean").write_text("package mathlib\n")
             dependency_revision = "1" * 40
             (mathlib / "lake-manifest.json").write_text(
                 json.dumps(
@@ -2736,7 +2737,15 @@ review:
             )
             subprocess.run(["git", "init", "--quiet", mathlib], check=True)
             subprocess.run(
-                ["git", "-C", mathlib, "add", ".gitignore", "lake-manifest.json"],
+                [
+                    "git",
+                    "-C",
+                    mathlib,
+                    "add",
+                    ".gitignore",
+                    "lakefile.lean",
+                    "lake-manifest.json",
+                ],
                 check=True,
             )
             subprocess.run(
@@ -2838,9 +2847,16 @@ review:
                     (release / "generic.bundle").write_bytes(b"archive")
                     (release / "generic.bundle.trace").write_bytes(b"trace")
                 else:
-                    self.assertEqual(
-                        set(kwargs["writable_directories"]), expected_replay_writable
-                    )
+                    writable = set(kwargs["writable_directories"])
+                    self.assertTrue(expected_replay_writable <= writable)
+                    if kwargs["cwd"] == mathlib:
+                        self.assertEqual(writable, expected_replay_writable)
+                    else:
+                        self.assertEqual(len(writable - expected_replay_writable), 1)
+                        self.assertEqual(
+                            Path(kwargs["cwd"], "lakefile.toml").read_text().splitlines()[0],
+                            'name = "palomarTrustedCacheReplay"',
+                        )
                     self.assertEqual(
                         (batteries / ".lake" / "release" / "generic.bundle").read_bytes(),
                         b"archive",
@@ -2865,7 +2881,7 @@ review:
                     tools={},
                 )
 
-            self.assertEqual(sandbox.call_count, 2)
+            self.assertEqual(sandbox.call_count, 3)
 
             submitted_manifest = json.loads(
                 (source / "lake-manifest.json").read_text()
@@ -2907,7 +2923,7 @@ review:
                     executable_paths=[],
                     tools={},
                 )
-            self.assertEqual(alias_sandbox.call_count, 2)
+            self.assertEqual(alias_sandbox.call_count, 3)
             submitted_manifest["packages"][0]["url"] = canonical_mathlib_url
             (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
 

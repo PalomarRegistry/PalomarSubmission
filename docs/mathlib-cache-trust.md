@@ -113,11 +113,15 @@ an adjacent `<artifact>.trace` are promotable. Artifact names and nesting are
 otherwise generic. The verifier then moves validated build trees and artifact
 pairs into fresh canonical `.lake` roots on the same filesystem, deletes the
 disposable workspace, reconstructs the exact closure links, and builds the
-official closure with network disabled. Canonical replay can write only
-`build` and `config` (plus the already documented exact ProofWidgets lock-hash
-marker); it cannot create new release artifacts beside them. Only after replay
-succeeds can the submitted project read the compiled outputs. The checked
-cold-build route plants cache executables in Mathlib and one closure dependency after materialization,
+official closure with network disabled. It also builds an empty,
+verifier-authored synthetic root whose manifest links the same canonical
+closure. This creates Lake's dependency-scoped configuration before those files
+are frozen, without elaborating the submitted Lakefile. Both canonical replays
+can write only `build` and `config` (plus the already documented exact
+ProofWidgets lock-hash marker); they cannot create new release artifacts beside
+them. Only after replay succeeds can the submitted project read the compiled
+outputs. The checked cold-build route plants cache executables in Mathlib and
+one closure dependency after materialization,
 requires neither payload to survive the real cache and replay phases, and
 asserts both paths are clean at the network-enabled invocation. The same route
 separately plants executable and compiled output in its qualified root, as
