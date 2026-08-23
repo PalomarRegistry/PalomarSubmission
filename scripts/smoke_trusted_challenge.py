@@ -19,6 +19,7 @@ from scripts.verify_submission import (  # noqa: E402
     EXECUTION_BUDGET_SECONDS,
     audit_challenge_sources,
     build_allowlisted_roots,
+    challenge_export_lean_path,
     compile_canonical_challenge,
     get_mathlib_cache,
     install_execution_deadline,
@@ -31,8 +32,8 @@ from scripts.verify_submission import (  # noqa: E402
     package_checkout,
     package_lake_directories,
     protected_comparator_config,
-    protected_lean_path,
     reject_untrusted_package_artifacts,
+    require_distinct_challenge_root,
     require_protected_paths,
     run,
     sandboxed_run,
@@ -316,8 +317,12 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
-    readable_paths = sorted({*readable_paths, canonical.parent})
-    require_protected_paths([canonical], candidate_writable)
+    # The search path entry, not the directory holding the olean: a dotted
+    # Challenge module sits several directories below it.
+    canonical_root = (work / "canonical-challenge").resolve()
+    require_distinct_challenge_root(config["challenge_module"], trusted_lean_paths)
+    readable_paths = sorted({*readable_paths, canonical_root})
+    require_protected_paths([canonical_root, canonical], candidate_writable)
     audit = audit_challenge_sources(
         source,
         checkout=source,
@@ -373,14 +378,15 @@ def main() -> int:
         tools=tools,
         allowed_roots=[source, lean_prefix],
     )
-    environment["LEAN_PATH"] = protected_lean_path(
-        canonical,
+    # `LEAN_PATH` stays what Lake computed. The protected search path reaches
+    # the Challenge export alone, through the Landrun adapter.
+    environment["PALOMAR_CHALLENGE_LEAN_PATH"] = challenge_export_lean_path(
+        canonical_root,
         trusted_lean_paths,
-        environment["LEAN_PATH"],
     )
-    # These builds exercise arbitrary proof-dependency compatibility. Lake may
-    # put workspace directories before the inherited path while building; the
-    # protected LEAN_PATH is reapplied above and carried into Comparator below.
+    environment["PALOMAR_CHALLENGE_MODULE"] = config["challenge_module"]
+    environment["PALOMAR_SOLUTION_MODULE"] = config["solution_module"]
+    # These builds exercise arbitrary proof-dependency compatibility.
     for target in ("Challenge", "Solution"):
         sandboxed_run(
             [str(lake), "build", target],

@@ -158,12 +158,28 @@ directories of every package it owns, and runs with network disabled. Trusted
 build directories are then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
-copies only that one module into a fresh protected directory. Comparator's
-`LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
-directory before all candidate build paths. Candidate Lake
-configuration can still build arbitrary proof dependencies in its own fresh
-directories, but it cannot replace the statement module or a trusted dependency
-used to compile it. A nonstandard output layout fails closed.
+copies only that one module into a fresh protected directory. Comparator
+exports the Challenge and the Solution in two separate processes, and the
+protected Landrun adapter gives each its own `LEAN_PATH`. The Challenge export
+resolves the protected directory, Lean core, and every frozen trusted build
+directory, and no candidate build path at all, so no candidate artifact can
+answer an import that Palomar's own Challenge makes. The Solution export
+resolves exactly the path Lake computed for the candidate, which is what
+Comparator's statement comparison is for: if the candidate's own Lake plan
+builds `Challenge.lean` into a different statement, that is the statement its
+Solution environment carries, and it will not match the canonical export. Candidate Lake configuration
+can still build arbitrary proof dependencies in its own fresh directories, but
+it cannot replace the statement module or a trusted dependency used to compile
+it. Because Lean resolves a module by its root component alone, a Challenge
+module whose root a trusted dependency already owns is rejected before the
+comparison runs. The adapter accepts only the pinned invocation shape, one
+`--env LEAN_PATH` passed by name alone and exactly one exported module, and
+refuses every other command that carries `LEAN_PATH`, so a deviation from that
+shape stops the run rather than silently exporting the candidate's Challenge as
+the canonical one. That covers how Comparator is invoked, not what Comparator
+does: a revision that set `LEAN_PATH` inside a wrapper, or that stopped calling
+the adapter, would be invisible to it and is the pin review's responsibility.
+A nonstandard output layout fails closed.
 
 Every invocation that can load project Lake configuration runs under the same
 outer Landrun policy. This includes Mathlib cache retrieval, `lake env` used to

@@ -208,7 +208,10 @@ SANDBOX_ENVIRONMENT = (
     "COMPARATOR_LANDRUN",
     "COMPARATOR_LEAN4EXPORT",
     "COMPARATOR_NANODA",
+    "PALOMAR_CHALLENGE_LEAN_PATH",
+    "PALOMAR_CHALLENGE_MODULE",
     "PALOMAR_LANDRUN_REAL",
+    "PALOMAR_SOLUTION_MODULE",
 )
 
 
@@ -3306,7 +3309,9 @@ def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> Ve
     Comparator judges a submission, but it can also fail without judging one.
     The protected Challenge module is Palomar's own artifact, so a run that
     could not read it has established nothing about the submission and must not
-    be reported as a rejection of it.
+    be reported as a rejection of it. The protected directory reaches the
+    Challenge export alone, so naming it is enough to place the blame: no
+    candidate module is looked up there.
     """
     excerpt = comparator_failure_excerpt(log)
     if "landrun adapter:" in log:
@@ -3344,17 +3349,53 @@ def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> Ve
     )
 
 
-def protected_lean_path(
-    canonical_olean: Path,
+def challenge_export_lean_path(
+    protected_root: Path,
     trusted_lean_paths: list[Path],
-    candidate_lean_path: str,
-    *,
-    protected_root: Path | None = None,
 ) -> str:
-    """Resolve protected statement imports before any candidate build output."""
-    candidate_paths = [Path(value) for value in candidate_lean_path.split(os.pathsep) if value]
-    ordered = [protected_root or canonical_olean.parent, *trusted_lean_paths, *candidate_paths]
+    """The search path for the export of the Challenge Palomar compiled.
+
+    The protected directory first, then the frozen trusted dependencies, and
+    no candidate build output at all: the canonical Challenge was compiled
+    without candidate modules on its path, so it cannot import one, and
+    leaving them off means no candidate artifact can satisfy an import made by
+    Palomar's own Challenge. `scripts/landrun_passthrough.py` applies this to
+    the Challenge export alone; the Solution export keeps the path Lake
+    computed for the candidate.
+
+    `protected_root` is the search path entry, not the directory holding the
+    olean: a dotted Challenge module sits several directories below it.
+    """
+    ordered = [protected_root, *trusted_lean_paths]
     return os.pathsep.join(str(path) for path in dict.fromkeys(ordered))
+
+
+def require_distinct_challenge_root(challenge_module: str, trusted_lean_paths: list[Path]) -> None:
+    """Refuse a Challenge module whose root component a trusted package owns.
+
+    Lean picks a search path entry by the module's root component alone, so a
+    Challenge named under a trusted root, `Mathlib.SomeChallenge` say, would
+    make the protected directory answer for every `Mathlib.*` import the
+    Challenge itself makes. That fails closed rather than resolving to
+    something untrusted, but it fails with Lean's "object file does not exist"
+    rather than anything a submitter can act on, so it is rejected up front.
+    """
+    module_source_suffix(challenge_module)
+    root = challenge_module.split(".", 1)[0]
+    for path in trusted_lean_paths:
+        candidate = path / root
+        if candidate.is_dir() or candidate.with_suffix(".olean").exists():
+            raise VerificationError(
+                f"Challenge module {challenge_module} claims the root component {root!r}, "
+                "which a trusted dependency already owns",
+                code="comparator.challenge_module_root_conflict",
+                field="challenge_module",
+                next_action=(
+                    f"Rename the Challenge module so its first component is not {root!r}, "
+                    "update comparator.json, commit the correction, then make a new "
+                    "submission using the new commit SHA."
+                ),
+            )
 
 
 def canonical_challenge_artifacts(olean: Path, *, module_system: bool) -> tuple[Path, ...]:
@@ -3395,8 +3436,9 @@ def compile_canonical_challenge(
     """Compile Challenge directly against frozen trusted dependencies.
 
     Candidate Lake configuration never participates in this compilation. The
-    resulting module is prepended to Comparator's LEAN_PATH so its Challenge
-    export cannot be replaced by candidate build output.
+    resulting module goes first on the search path given to Comparator's
+    Challenge export alone, which carries no candidate build path at all, so
+    that export cannot read candidate build output.
     """
     output_dir = work / "canonical-challenge"
     scratch = work / "canonical-challenge-scratch"
@@ -3900,6 +3942,9 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
         canonical_root = (work / "canonical-challenge").resolve()
+        require_distinct_challenge_root(
+            report["comparator"]["challenge_module"], trusted_lean_paths
+        )
         readable_paths = sorted({*readable_paths, canonical_root})
         # The whole protected directory, so every module-system sidecar beside
         # the Challenge olean is covered, not just the olean itself.
@@ -3986,12 +4031,14 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
             allowed_roots=[checkout, lean_prefix],
         )
-        env["LEAN_PATH"] = protected_lean_path(
-            canonical_olean,
+        # `env["LEAN_PATH"]` stays exactly what Lake computed: it is what the
+        # Solution export resolves against, as the candidate's own build does.
+        env["PALOMAR_CHALLENGE_LEAN_PATH"] = challenge_export_lean_path(
+            canonical_root,
             trusted_lean_paths,
-            env["LEAN_PATH"],
-            protected_root=canonical_root,
         )
+        env["PALOMAR_CHALLENGE_MODULE"] = report["comparator"]["challenge_module"]
+        env["PALOMAR_SOLUTION_MODULE"] = report["comparator"]["solution_module"]
         report["stage"] = "comparator"
         proc = sandboxed_run(
             [str(comparator), str(comparator_config)],
