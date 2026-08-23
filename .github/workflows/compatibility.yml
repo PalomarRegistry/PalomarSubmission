@@ -129,6 +129,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.31.0-rc2
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.2
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.34.0-rc1
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -143,6 +144,12 @@ jobs:
           git -C lean4export checkout "$LEAN4EXPORT_COMMIT"
           test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
           (cd lean4export && lake build lean4export)
+          git clone --filter=blob:none https://github.com/leanprover/verso.git verso-patch-fallback
+          VERSO_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.render_challenge import toolchain_verso_commit; print(toolchain_verso_commit("leanprover/lean4:v4.32.2"))')"
+          git -C verso-patch-fallback checkout "$VERSO_COMMIT"
+          test "$(tr -d '\r\n' < verso-patch-fallback/lean-toolchain)" = "leanprover/lean4:v4.32.0"
+          (cd verso-patch-fallback && ELAN_TOOLCHAIN=leanprover/lean4:v4.32.2 \
+            lake build Verso VersoLiterate «verso-html»)
           git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git nanoda
           git -C nanoda checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
           cargo build --release --locked --manifest-path nanoda/Cargo.toml
