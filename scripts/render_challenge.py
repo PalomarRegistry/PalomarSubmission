@@ -66,7 +66,7 @@ MISSING_DECLARATION_CODE = "challenge.declaration_not_rendered"
 MISSING_DECLARATION_EXIT = 3
 MAX_REPORTED_DECLARATIONS = 50
 MAX_REPORTED_DECLARATION_LENGTH = 400
-MAX_SANITIZE_DIAGNOSTIC_BYTES = 32 * 1024
+MAX_SANITIZE_DIAGNOSTIC_BYTES = 512 * 1024
 
 MAX_RENDER_FILES = 2_000
 MAX_RENDER_NODES = 4_000
@@ -532,7 +532,7 @@ class ComparedDeclarationsNotRendered(VerificationError):
         ]
         count = total if total is not None else len(declarations)
         preview = ", ".join(bounded[:5])
-        remainder = count - min(count, 5)
+        remainder = count - len(bounded[:5])
         if remainder > 0:
             preview += f" (+{remainder} more)"
         noun = "declaration" if count == 1 else "declarations"
@@ -544,7 +544,7 @@ class ComparedDeclarationsNotRendered(VerificationError):
             field="comparator.declarations",
             detail=(
                 "Compared declarations without an anchor (bounded): "
-                + json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
+                + json.dumps(bounded[:10], ensure_ascii=False, separators=(",", ":"))
                 + "\n\nEach theorem, definition, or instance selected by comparator.json must "
                 "have a compiler-backed declaration anchor in the rendered Challenge. "
                 "Anonymous instances currently have no such Verso anchor."
@@ -599,6 +599,7 @@ def read_sanitize_diagnostic(path: Path) -> ComparedDeclarationsNotRendered:
         )
         or type(total) is not int
         or not len(declarations) <= total <= 1_000_000
+        or not (total == len(declarations) or len(declarations) == MAX_REPORTED_DECLARATIONS)
     ):
         raise VerificationError("sanitizer diagnostic channel has invalid values")
     return ComparedDeclarationsNotRendered(declarations, total=total)

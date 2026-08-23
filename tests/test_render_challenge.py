@@ -1452,6 +1452,61 @@ instPartialOrderElement</span></body></html>'''
         self.assertEqual(document["code"], "challenge.declaration_not_rendered")
         self.assertEqual(document["declarations"], ["Example.generated"])
 
+    def test_sanitizer_channel_rejects_every_untrusted_shape(self):
+        from scripts.render_challenge import (
+            MISSING_DECLARATION_CODE,
+            read_sanitize_diagnostic,
+        )
+
+        valid = {
+            "schema_version": 1,
+            "code": MISSING_DECLARATION_CODE,
+            "declarations": ["Example.generated"],
+            "total": 1,
+        }
+        malformed = (
+            {**valid, "extra": True},
+            {key: value for key, value in valid.items() if key != "code"},
+            {**valid, "schema_version": 2},
+            {**valid, "code": "challenge.other"},
+            {**valid, "declarations": []},
+            {**valid, "declarations": ["x" * 401]},
+            {**valid, "total": True},
+            {**valid, "total": 2},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            for document in malformed:
+                with self.subTest(document=document):
+                    channel.write_text(json.dumps(document))
+                    with self.assertRaises(VerificationError):
+                        read_sanitize_diagnostic(channel)
+
+            channel.unlink()
+            channel.symlink_to(Path(directory) / "missing")
+            with self.assertRaisesRegex(VerificationError, "missing or invalid"):
+                read_sanitize_diagnostic(channel)
+
+    def test_sanitizer_channel_accepts_maximal_unicode_payload(self):
+        from scripts.render_challenge import (
+            MAX_REPORTED_DECLARATION_LENGTH,
+            MAX_REPORTED_DECLARATIONS,
+            ComparedDeclarationsNotRendered,
+            read_sanitize_diagnostic,
+            sanitize_diagnostic_document,
+        )
+
+        declarations = [
+            f"Example.«{'𝔘' * (MAX_REPORTED_DECLARATION_LENGTH - 10)}{index:02d}»"
+            for index in range(MAX_REPORTED_DECLARATIONS)
+        ]
+        error = ComparedDeclarationsNotRendered(declarations)
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            channel.write_text(json.dumps(sanitize_diagnostic_document(error), indent=2))
+            recovered = read_sanitize_diagnostic(channel)
+        self.assertEqual(recovered.total, MAX_REPORTED_DECLARATIONS)
+
     def test_payload_text_cannot_forge_a_submitter_renderability_failure(self):
         from scripts.render_challenge import render_failure_diagnostic
 
