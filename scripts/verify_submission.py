@@ -285,10 +285,15 @@ def report_diagnostic(
         return
     if isinstance(error, VerificationError):
         diagnostic = error.diagnostic(current_stage)
+        reclassified_to_palomar = False
         if owner is not None:
             diagnostic["owner"] = owner
+            reclassified_to_palomar = owner == "palomar" and error.owner == "submitter"
         elif error.owner == "submitter" and current_stage in PALOMAR_OWNED_STAGES:
             diagnostic["owner"] = "palomar"
+            reclassified_to_palomar = True
+        if reclassified_to_palomar:
+            diagnostic["retryable"] = True
             diagnostic["repairable"] = False
             diagnostic["next_action"] = (
                 "Do not change the repository. Retry the same commit later; report the "
@@ -3647,6 +3652,7 @@ def execute(args: argparse.Namespace) -> int:
         except ValueError as error:
             raise VerificationError("Lake executable is outside the selected Lean toolchain") from error
 
+        report["stage"] = "candidate-setup"
         if ensure_lake_manifest(source, checkout):
             report["warnings"].append(
                 "Generated a trusted Lake manifest from contained path-dependency manifests"
@@ -3707,6 +3713,7 @@ def execute(args: argparse.Namespace) -> int:
         comparator_config = protected_comparator_config(
             comparator_path, work / "protected-comparator.json"
         )
+        report["stage"] = "setup"
         readable_paths = sorted(
             {checkout.resolve(), comparator_config, *system_readable_paths()}
         )

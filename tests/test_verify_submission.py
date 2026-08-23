@@ -2319,6 +2319,125 @@ review:
         diagnostic = VerificationError("plain failure").diagnostic("comparator")
         self.assertEqual(diagnostic["explanation"], diagnostic["summary"])
 
+    def test_a_palomar_owned_stage_makes_the_same_commit_retryable(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("trusted cache failed", repairable=True),
+            stage="trusted-cache",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertTrue(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Retry the same commit", diagnostic["next_action"])
+
+    def test_a_submitter_owned_stage_keeps_repository_changes_nonretryable(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("candidate source failed"),
+            stage="candidate-setup",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Update the repository", diagnostic["next_action"])
+
+    def test_an_explicit_palomar_owner_rewrites_submitter_actionability(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("trusted tool changed", repairable=True),
+            stage="setup",
+            owner="palomar",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertTrue(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Retry the same commit", diagnostic["next_action"])
+
+    def test_candidate_setup_failure_requires_repository_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            source = work / "source"
+            (source / ".git").mkdir(parents=True)
+            report_path = root / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "errors": [],
+                        "warnings": [],
+                        "source": {},
+                    }
+                )
+            )
+            tools = []
+            for name in ("comparator", "lean4export", "landrun", "nanoda"):
+                tool = root / name
+                tool.touch()
+                tools.append(tool)
+            lean_prefix = root / "lean"
+            (lean_prefix / "bin").mkdir(parents=True)
+            for name in ("lean", "lake"):
+                (lean_prefix / "bin" / name).touch()
+            printenv = root / "printenv"
+            touch = root / "touch"
+            printenv.touch()
+            touch.touch()
+            commands = {
+                "lean": lean_prefix / "bin" / "lean",
+                "lake": lean_prefix / "bin" / "lake",
+                "printenv": printenv,
+                "touch": touch,
+            }
+            args = Namespace(
+                output=report_path,
+                work_dir=work,
+                comparator=tools[0],
+                lean4export=tools[1],
+                landrun=tools[2],
+                nanoda=tools[3],
+                comparator_commit="a" * 40,
+                landrun_commit="b" * 40,
+                nanoda_commit="c" * 40,
+                workflow_url="https://github.com/example/project/actions/runs/1",
+            )
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.shutil.which",
+                    side_effect=lambda name, **_kwargs: str(commands[name]),
+                ),
+                mock.patch(
+                    "scripts.verify_submission.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["lean", "--print-prefix"], 0, str(lean_prefix), ""
+                    ),
+                ),
+                mock.patch("scripts.verify_submission.ensure_lake_manifest", return_value=False),
+                mock.patch(
+                    "scripts.verify_submission.materialize_packages",
+                    side_effect=VerificationError("unsafe package name in Lake manifest"),
+                ),
+            ):
+                self.assertEqual(execute(args), 0)
+
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["stage"], "candidate-setup")
+            [diagnostic] = report["diagnostics"]
+            self.assertEqual(diagnostic["owner"], "submitter")
+            self.assertFalse(diagnostic["retryable"])
+            self.assertIn("Update the repository", diagnostic["next_action"])
+
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)
