@@ -179,11 +179,15 @@ the submitted result.
 The prototype accepts public GitHub repositories and any released or RC Lean
 toolchain at or above the minimum recorded in
 [`toolchains.json`](toolchains.json). There is no list of accepted versions:
-the matching tooling revisions are derived from the toolchain's release tag,
-which is what a table of them kept getting wrong. The file is deliberately a
-closed record containing only its schema version and the minimum Lean release;
-it does not claim to configure tooling repositories that the verifier does not
-read from it.
+tooling revisions are derived from release tags, which is what a table of them
+kept getting wrong. Rendering first selects the exact Verso release tag. When a
+stable positive Lean patch release has no exact Verso tag, it uses that same
+major/minor release line's patch-zero Verso tag and rebuilds the pinned source
+with the submission's exact Lean toolchain. Release candidates never fall back,
+and the resolved Verso commit is recorded in the render report. The file is
+deliberately a closed record containing only its schema version and the minimum
+Lean release; it does not claim to configure tooling repositories that the
+verifier does not read from it.
 
 ## Licensing
 

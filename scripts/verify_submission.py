@@ -98,9 +98,10 @@ def parse_lean_version(value: str, pattern: re.Pattern[str]) -> tuple[int, int, 
 def toolchain_release_tag(toolchain: str) -> str:
     """The tag in Palomar's tooling repositories that matches this toolchain.
 
-    lean4export and Verso publish a tag for every Lean release, so the version
-    is derived rather than looked up in a table that has to be edited for every
-    release and is stale the moment it is not.
+    The version is derived rather than looked up in a table that has to be
+    edited for every release and is stale the moment it is not. Renderer policy
+    may subsequently fall back from a missing stable Verso patch tag to the
+    release line's patch-zero tag.
     """
     match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
     if not match:
@@ -1118,6 +1119,9 @@ def prepare(args: argparse.Namespace) -> int:
                     ),
                 )
             toolchain = toolchain_path.read_text(encoding="utf-8").strip()
+            # Verification deliberately requires lean4export's exact release
+            # tag. Only the post-acceptance Verso renderer has a stable-patch
+            # fallback policy.
             export_commit = resolve_release_commit(
                 "leanprover/lean4export", supported_toolchain(toolchain)
             )

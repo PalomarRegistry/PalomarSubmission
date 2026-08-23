@@ -36,6 +36,7 @@ from scripts.verify_submission import (  # noqa: E402
     DIAGNOSTICS_SCHEMA_VERSION,
     MAX_DIAGNOSTICS,
     MAX_SOURCE_BYTES,
+    TOOLCHAIN_RE,
     LeanHeader,
     clone_commit,
     ensure_lake_manifest,
@@ -644,14 +645,61 @@ def append_render_failure(report: dict[str, Any], error: BaseException) -> None:
 
 
 def toolchain_verso_commit(toolchain: str) -> str:
-    """The Verso release matching this toolchain, resolved to a commit.
+    """The compatible Verso release for this toolchain, resolved to a commit.
 
-    Verso publishes a tag for every Lean release, so the revision is derived
-    from the toolchain rather than looked up in a table that has to be edited
-    for every release. The resolved commit is what gets recorded, so a render
-    always says exactly which Verso built it.
+    Prefer an exact tag. Stable Lean patch releases may fall back to the
+    release line's patch-zero Verso tag, whose source is then rebuilt with the
+    submission's exact toolchain. Release candidates remain exact. The
+    resolved commit is what gets recorded, so no compatibility table or
+    mutable tag is part of the render report's provenance.
     """
-    return resolve_release_commit("leanprover/verso", supported_toolchain(toolchain))
+    tag = supported_toolchain(toolchain)
+    try:
+        return resolve_release_commit(VERSO_REPOSITORY, tag)
+    except VerificationError as error:
+        if error.code != "palomar.toolchain_release_missing":
+            raise
+        match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
+        if match is None or match.group("rc") is not None or int(match.group("patch")) == 0:
+            raise
+        release_line_tag = f"v{match.group('major')}.{match.group('minor')}.0"
+        try:
+            return resolve_release_commit(VERSO_REPOSITORY, release_line_tag)
+        except VerificationError as fallback_error:
+            if fallback_error.code != "palomar.toolchain_release_missing":
+                raise
+            raise VerificationError(
+                f"{VERSO_REPOSITORY} has published neither {tag} nor "
+                f"{release_line_tag} for this Lean release line",
+                code="palomar.toolchain_release_missing",
+                owner="palomar",
+                next_action=(
+                    "Do not change the repository. Palomar must add support for this Lean release."
+                ),
+            ) from None
+
+
+def compatible_verso_toolchain(source_toolchain: str, verso_toolchain: str) -> bool:
+    """Whether a selected Verso source release may build with the source Lean.
+
+    Exact toolchains always match. The sole relaxation is from a stable
+    positive patch release to patch zero on the same major/minor release line;
+    it deliberately does not cross release lines or prerelease boundaries.
+    """
+    source = TOOLCHAIN_RE.fullmatch(source_toolchain.strip())
+    verso = TOOLCHAIN_RE.fullmatch(verso_toolchain.strip())
+    if source is None or verso is None:
+        return False
+    if source_toolchain.strip() == verso_toolchain.strip():
+        return True
+    return (
+        source.group("rc") is None
+        and verso.group("rc") is None
+        and int(source.group("major")) == int(verso.group("major"))
+        and int(source.group("minor")) == int(verso.group("minor"))
+        and int(source.group("patch")) > 0
+        and int(verso.group("patch")) == 0
+    )
 
 
 def normalized_repository(value: str) -> tuple[str, str]:
@@ -1048,8 +1096,15 @@ def prepare_workspace(
     try:
         verso_toolchain = (verso_probe / "lean-toolchain").read_text(encoding="utf-8").strip()
         source_toolchain = source_toolchain_path.read_text(encoding="utf-8").strip()
-        if verso_toolchain != source_toolchain:
-            raise VerificationError("pinned Verso commit does not match the submission Lean toolchain")
+        if not compatible_verso_toolchain(source_toolchain, verso_toolchain):
+            raise VerificationError(
+                "pinned Verso commit does not match the submission Lean toolchain",
+                code="palomar.renderer_toolchain_mismatch",
+                owner="palomar",
+                next_action=(
+                    "Do not change the repository. Palomar must select a compatible Verso release."
+                ),
+            )
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
         merged_manifest = merge_renderer_manifest(source_manifest, verso_manifest, verso_commit)
     finally:

@@ -17,6 +17,7 @@ from scripts.render_challenge import (
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
     artifact_manifest,
+    compatible_verso_toolchain,
     download_mathlib_cache,
     execute,
     extract_module_doc,
@@ -925,8 +926,8 @@ end Audit.Task
             "332773edafa3ac712ec3fba31d4c6ece2339693958873a9020a9be1bddb22538",
         )
 
-    def test_the_renderer_revision_is_derived_from_the_toolchain(self):
-        """No table to keep current: the tag is the toolchain's own version."""
+    def test_the_renderer_prefers_the_toolchains_exact_release(self):
+        """No table to keep current: first try the toolchain's own version."""
         with mock.patch(
             "scripts.render_challenge.resolve_release_commit",
             side_effect=lambda repo, tag: f"{repo}@{tag}",
@@ -936,6 +937,220 @@ end Audit.Task
                 "leanprover/verso@v4.31.0-rc2",
             )
         self.assertEqual(resolve.call_args.args, ("leanprover/verso", "v4.31.0-rc2"))
+
+    def test_a_stable_patch_release_falls_back_to_patch_zero(self):
+        missing = VerificationError(
+            "leanprover/verso has published no v4.32.2 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=[missing, "3" * 40],
+        ) as resolve:
+            self.assertEqual(
+                toolchain_verso_commit("leanprover/lean4:v4.32.2"),
+                "3" * 40,
+            )
+        self.assertEqual(
+            resolve.call_args_list,
+            [
+                mock.call("leanprover/verso", "v4.32.2"),
+                mock.call("leanprover/verso", "v4.32.0"),
+            ],
+        )
+
+    def test_release_candidates_do_not_fall_back(self):
+        missing = VerificationError(
+            "leanprover/verso has published no v4.32.0-rc3 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=missing,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.0-rc3")
+        self.assertIs(raised.exception, missing)
+        resolve.assert_called_once_with("leanprover/verso", "v4.32.0-rc3")
+
+    def test_missing_exact_and_patch_zero_tags_report_the_release_line(self):
+        exact_missing = VerificationError(
+            "leanprover/verso has published no v4.32.2 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        base_missing = VerificationError(
+            "leanprover/verso has published no v4.32.0 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=[exact_missing, base_missing],
+        ):
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.2")
+        self.assertEqual(raised.exception.code, "palomar.toolchain_release_missing")
+        self.assertEqual(raised.exception.owner, "palomar")
+        self.assertIn("neither v4.32.2 nor v4.32.0", str(raised.exception))
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_provider_lookup_failures_do_not_trigger_a_fallback(self):
+        unavailable = VerificationError(
+            "could not read leanprover/verso releases",
+            code="provider.release_lookup_failed",
+            owner="provider",
+            retryable=True,
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=unavailable,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.2")
+        self.assertIs(raised.exception, unavailable)
+        resolve.assert_called_once_with("leanprover/verso", "v4.32.2")
+
+    def test_verso_patch_zero_is_compatible_with_a_stable_patch_release(self):
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.2",
+                "leanprover/lean4:v4.32.0",
+            )
+        )
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.2",
+                "leanprover/lean4:v4.32.2",
+            )
+        )
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.0-rc2",
+                "leanprover/lean4:v4.32.0-rc2",
+            )
+        )
+        for verso in (
+            "leanprover/lean4:v4.31.0",
+            "leanprover/lean4:v4.32.1",
+            "leanprover/lean4:v4.32.0-rc2",
+            "leanprover/lean4:v4.33.0",
+            "nightly-2026-08-01",
+            "",
+        ):
+            with self.subTest(verso=verso):
+                self.assertFalse(
+                    compatible_verso_toolchain("leanprover/lean4:v4.32.2", verso)
+                )
+
+    def test_workspace_enforces_the_stable_patch_verso_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (source / "Solution.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (source / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (source / "lakefile.toml").write_text('name = "example"\n', encoding="utf-8")
+            (source / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+            )
+            (source / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.32.2\n", encoding="utf-8"
+            )
+            work = root / "work"
+            work.mkdir()
+
+            def clone_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.32.0\n", encoding="utf-8"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+                )
+
+            with mock.patch(
+                "scripts.render_challenge.clone_commit", side_effect=clone_verso
+            ):
+                workspace = root / "workspace"
+                prepared = prepare_workspace(
+                    source,
+                    workspace,
+                    "3" * 40,
+                    work,
+                    AcceptedRenderPaths(
+                        project_path="",
+                        challenge_path="Challenge.lean",
+                        solution_path="Solution.lean",
+                        comparator_config_path="comparator.json",
+                        lakefile_path="lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
+                )
+
+            self.assertEqual(
+                (workspace / "lean-toolchain").read_text(encoding="utf-8").strip(),
+                "leanprover/lean4:v4.32.2",
+            )
+            manifest = json.loads((workspace / "lake-manifest.json").read_text(encoding="utf-8"))
+            verso = next(package for package in manifest["packages"] if package["name"] == "verso")
+            self.assertEqual(verso["rev"], "3" * 40)
+            self.assertEqual(prepared.project, workspace.resolve())
+
+            incompatible_work = root / "incompatible-work"
+            incompatible_work.mkdir()
+
+            def clone_incompatible_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.31.0\n", encoding="utf-8"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+                )
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.clone_commit",
+                    side_effect=clone_incompatible_verso,
+                ),
+                self.assertRaises(VerificationError) as raised,
+            ):
+                prepare_workspace(
+                    source,
+                    root / "incompatible-workspace",
+                    "4" * 40,
+                    incompatible_work,
+                    AcceptedRenderPaths(
+                        project_path="",
+                        challenge_path="Challenge.lean",
+                        solution_path="Solution.lean",
+                        comparator_config_path="comparator.json",
+                        lakefile_path="lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
+                )
+            self.assertEqual(raised.exception.code, "palomar.renderer_toolchain_mismatch")
+            self.assertEqual(raised.exception.owner, "palomar")
 
     def test_a_toolchain_below_the_minimum_is_refused(self):
         with self.assertRaisesRegex(VerificationError, "older than the minimum"):
