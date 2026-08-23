@@ -33,6 +33,8 @@ from scripts.render_report import (  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
+    DIAGNOSTICS_SCHEMA_VERSION,
+    MAX_DIAGNOSTICS,
     MAX_SOURCE_BYTES,
     LeanHeader,
     clone_commit,
@@ -60,6 +62,11 @@ from scripts.verify_submission import (  # noqa: E402
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
+MISSING_DECLARATION_CODE = "challenge.declaration_not_rendered"
+MISSING_DECLARATION_EXIT = 3
+MAX_REPORTED_DECLARATIONS = 50
+MAX_REPORTED_DECLARATION_LENGTH = 400
+MAX_SANITIZE_DIAGNOSTIC_BYTES = 512 * 1024
 
 MAX_RENDER_FILES = 2_000
 MAX_RENDER_NODES = 4_000
@@ -513,6 +520,127 @@ def load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise VerificationError(f"{path.name} must contain a JSON object")
     return value
+
+
+class ComparedDeclarationsNotRendered(VerificationError):
+    """Trusted sanitizer result for compared declarations with no HTML anchor."""
+
+    def __init__(self, declarations: list[str], *, total: int | None = None) -> None:
+        bounded = [
+            declaration[:MAX_REPORTED_DECLARATION_LENGTH]
+            for declaration in declarations[:MAX_REPORTED_DECLARATIONS]
+        ]
+        count = total if total is not None else len(declarations)
+        preview = ", ".join(bounded[:5])
+        remainder = count - len(bounded[:5])
+        if remainder > 0:
+            preview += f" (+{remainder} more)"
+        noun = "declaration" if count == 1 else "declarations"
+        verb = "has" if count == 1 else "have"
+        super().__init__(
+            f"{count} compared {noun} {verb} no rendered anchor: {preview}",
+            code=MISSING_DECLARATION_CODE,
+            owner="submitter",
+            field="comparator.declarations",
+            detail=(
+                "Compared declarations without an anchor (bounded): "
+                + json.dumps(bounded[:10], ensure_ascii=False, separators=(",", ":"))
+                + "\n\nEach theorem, definition, or instance selected by comparator.json must "
+                "have a compiler-backed declaration anchor in the rendered Challenge. "
+                "Anonymous instances currently have no such Verso anchor."
+            ),
+            next_action=(
+                "Give every listed declaration an explicit source-level name in Challenge.lean, "
+                "update comparator.json if its generated name changes, commit the correction, "
+                "and make a new submission using that commit SHA."
+            ),
+        )
+        self.declarations = tuple(bounded)
+        self.total = count
+
+
+def compared_declarations_not_rendered(declarations: list[str]) -> VerificationError:
+    """Describe a publication-contract failure without guessing an HTML anchor.
+
+    Verso only emits declaration bindings for names backed by source tokens.
+    Comparator may also select compiler-generated declarations, notably
+    anonymous instances. Those declarations are valid Lean but cannot be an
+    unambiguous publication target, so the submitter has to name them in the
+    immutable Challenge source.
+    """
+    return ComparedDeclarationsNotRendered(declarations)
+
+
+def sanitize_diagnostic_document(error: ComparedDeclarationsNotRendered) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "code": MISSING_DECLARATION_CODE,
+        "declarations": list(error.declarations),
+        "total": error.total,
+    }
+
+
+def read_sanitize_diagnostic(path: Path) -> ComparedDeclarationsNotRendered:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_SANITIZE_DIAGNOSTIC_BYTES:
+        raise VerificationError("sanitizer diagnostic channel is missing or invalid")
+    value = load_json_object(path)
+    if set(value) != {"schema_version", "code", "declarations", "total"}:
+        raise VerificationError("sanitizer diagnostic channel has an unsupported shape")
+    declarations = value.get("declarations")
+    total = value.get("total")
+    if (
+        value.get("schema_version") != 1
+        or value.get("code") != MISSING_DECLARATION_CODE
+        or not isinstance(declarations, list)
+        or not 1 <= len(declarations) <= MAX_REPORTED_DECLARATIONS
+        or not all(
+            isinstance(item, str) and 1 <= len(item) <= MAX_REPORTED_DECLARATION_LENGTH
+            for item in declarations
+        )
+        or type(total) is not int
+        or not len(declarations) <= total <= 1_000_000
+        or not (total == len(declarations) or len(declarations) == MAX_REPORTED_DECLARATIONS)
+    ):
+        raise VerificationError("sanitizer diagnostic channel has invalid values")
+    return ComparedDeclarationsNotRendered(declarations, total=total)
+
+
+def render_failure_diagnostic(error: BaseException, stage: str) -> dict[str, Any]:
+    """Classify renderer failures from typed, trusted process boundaries."""
+    message = str(error)
+    if isinstance(error, ComparedDeclarationsNotRendered):
+        return error.diagnostic(stage)
+    if isinstance(error, subprocess.TimeoutExpired):
+        return VerificationError(
+            "Challenge rendering timed out.",
+            code="provider.render_timeout",
+            owner="provider",
+            next_action="Do not change the repository. Retry the same commit later.",
+            retryable=True,
+        ).diagnostic(stage)
+    if isinstance(error, VerificationError) and error.owner != "submitter":
+        return error.diagnostic(stage)
+    return VerificationError(
+        "Palomar could not render the accepted Challenge.",
+        code="palomar.render_failed",
+        owner="palomar",
+        next_action=(
+            "Do not change the repository. Retry the same commit later and report the "
+            "render workflow URL if this happens again."
+        ),
+        retryable=True,
+        detail=f"{type(error).__name__}: {message[:1_500]}",
+    ).diagnostic(stage)
+
+
+def append_render_failure(report: dict[str, Any], error: BaseException) -> None:
+    report["diagnostics_schema_version"] = DIAGNOSTICS_SCHEMA_VERSION
+    diagnostics = report.setdefault("diagnostics", [])
+    if isinstance(diagnostics, list) and len(diagnostics) < MAX_DIAGNOSTICS:
+        diagnostic = render_failure_diagnostic(error, str(report.get("stage") or "render"))
+        diagnostics.append(diagnostic)
+        if diagnostic["owner"] == "submitter":
+            report["status"] = "fail"
 
 
 def toolchain_verso_commit(toolchain: str) -> str:
@@ -1223,11 +1351,13 @@ def static_html_sanitize(
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
-    for declaration in declarations or []:
-        if declaration not in sanitizer.found_declarations:
-            raise VerificationError(
-                f"Verso output does not contain compared declaration: {declaration}"
-            )
+    missing_declarations = [
+        declaration
+        for declaration in declarations or []
+        if declaration not in sanitizer.found_declarations
+    ]
+    if missing_declarations:
+        raise compared_declarations_not_rendered(missing_declarations)
 
     # Inject trusted declaration metadata only after every whole-document regex
     # pass. Otherwise an escaped Lean identifier containing text such as
@@ -1603,20 +1733,26 @@ def sanitize_bundle(
 
 
 def sanitize_command(args: argparse.Namespace) -> int:
-    metadata = parsed_challenge_metadata(
-        Path(args.challenge).resolve(),
-        Path(args.solution).resolve(),
-        Path(args.comparator).resolve(),
-        challenge_module=args.challenge_module,
-        lean=Path(args.lean).resolve(strict=True),
-        environment=os.environ.copy(),
-    )
-    sanitize_bundle(
-        Path(args.input_dir).resolve(),
-        Path(args.output_dir).resolve(),
-        challenge_module=args.challenge_module,
-        metadata=metadata,
-    )
+    diagnostic_out = Path(args.diagnostic_out).resolve()
+    diagnostic_out.unlink(missing_ok=True)
+    try:
+        metadata = parsed_challenge_metadata(
+            Path(args.challenge).resolve(),
+            Path(args.solution).resolve(),
+            Path(args.comparator).resolve(),
+            challenge_module=args.challenge_module,
+            lean=Path(args.lean).resolve(strict=True),
+            environment=os.environ.copy(),
+        )
+        sanitize_bundle(
+            Path(args.input_dir).resolve(),
+            Path(args.output_dir).resolve(),
+            challenge_module=args.challenge_module,
+            metadata=metadata,
+        )
+    except ComparedDeclarationsNotRendered as error:
+        write_json(diagnostic_out, sanitize_diagnostic_document(error))
+        return MISSING_DECLARATION_EXIT
     return 0
 
 
@@ -2119,7 +2255,9 @@ def execute(args: argparse.Namespace) -> int:
 
         report["stage"] = "sanitize"
         write_json(output, report)
-        sandboxed_run(
+        sanitize_diagnostic = clean_output / ".palomar-sanitize-diagnostic.json"
+        sanitize_diagnostic.unlink(missing_ok=True)
+        sanitized = sandboxed_run(
             [
                 str(python),
                 str(renderer),
@@ -2138,6 +2276,8 @@ def execute(args: argparse.Namespace) -> int:
                 render_workspace.challenge_module,
                 "--lean",
                 str(lean),
+                "--diagnostic-out",
+                str(sanitize_diagnostic),
             ],
             cwd=workspace,
             environment=env,
@@ -2148,8 +2288,18 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=allowed_exec,
             tools=tools,
             timeout=SANITIZE_TIMEOUT_SECONDS,
+            check=False,
             resource_properties=RESOURCE_PROPERTIES,
         )
+        if sanitized.returncode == MISSING_DECLARATION_EXIT:
+            raise read_sanitize_diagnostic(sanitize_diagnostic)
+        if sanitized.returncode:
+            detail = (sanitized.stderr or sanitized.stdout).strip()[-8000:]
+            raise VerificationError(
+                f"{python} {renderer} sanitize failed ({sanitized.returncode}): {detail}"
+            )
+        if sanitize_diagnostic.exists() or sanitize_diagnostic.is_symlink():
+            raise VerificationError("sanitizer wrote a diagnostic while reporting success")
         files, tree_hash = artifact_manifest(clean_output)
         validate_build_metadata_files(writable_files)
         embedded_manifest = load_json_object(clean_output / "artifact-manifest.json")
@@ -2190,10 +2340,12 @@ def execute(args: argparse.Namespace) -> int:
         write_json(result_dir / "challenge-render.json", report)
         write_json(output, report)
         return 0
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         report["errors"].append("Challenge rendering timed out")
+        append_render_failure(report, error)
     except Exception as error:  # noqa: BLE001 - workflow failures become a bounded report
         report["errors"].append(str(error))
+        append_render_failure(report, error)
     write_json(output, report)
     return 1
 
@@ -2230,6 +2382,7 @@ def parser() -> argparse.ArgumentParser:
     sanitize_parser.add_argument("--comparator", required=True)
     sanitize_parser.add_argument("--challenge-module", required=True)
     sanitize_parser.add_argument("--lean", required=True)
+    sanitize_parser.add_argument("--diagnostic-out", required=True)
     sanitize_parser.set_defaults(func=sanitize_command)
     return result
 

@@ -1355,13 +1355,178 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
 
     def test_static_html_rejects_a_missing_compared_declaration(self):
         html_text = "<!doctype html><html><head><base href=\"../\"></head><body></body></html>"
-        with self.assertRaisesRegex(VerificationError, "does not contain compared declaration"):
+        with self.assertRaisesRegex(
+            VerificationError, "compared declaration has no rendered anchor"
+        ) as raised:
             static_html_sanitize(
                 html_text,
                 "../palomar-sanitize.js",
                 "../palomar-verso.js",
                 ["Example.missing"],
             )
+        diagnostic = raised.exception.diagnostic("sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertIn("explicit source-level name", diagnostic["next_action"])
+
+    def test_static_html_reports_every_missing_compared_declaration(self):
+        html_text = """<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-Example.present" id="present">present</span>
+</body></html>"""
+        with self.assertRaises(VerificationError) as raised:
+            static_html_sanitize(
+                html_text,
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+                ["Example.present", "Example.first", "Example.second"],
+            )
+        self.assertEqual(
+            raised.exception.declarations, ("Example.first", "Example.second")
+        )
+        self.assertEqual(raised.exception.total, 2)
+
+    def test_sanitizer_accepts_an_explicitly_named_instance_anchor(self):
+        declaration = "Example.instPartialOrderElement"
+        html_text = f'''<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-{declaration}" id="Example___instPartialOrderElement">
+instPartialOrderElement</span></body></html>'''
+        sanitized = static_html_sanitize(
+            html_text,
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+            [declaration],
+        )
+        self.assertIn("Example___instPartialOrderElement", sanitized)
+
+    def test_sanitizer_channel_keeps_its_submitter_diagnostic(self):
+        from scripts.render_challenge import (
+            ComparedDeclarationsNotRendered,
+            read_sanitize_diagnostic,
+            render_failure_diagnostic,
+            sanitize_diagnostic_document,
+        )
+
+        error = ComparedDeclarationsNotRendered(["Example.generated"])
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            channel.write_text(json.dumps(sanitize_diagnostic_document(error)))
+            recovered = read_sanitize_diagnostic(channel)
+        diagnostic = render_failure_diagnostic(recovered, "sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertIn("Example.generated", diagnostic["summary"])
+
+    def test_sanitize_command_uses_dedicated_exit_and_json_channel(self):
+        from scripts.render_challenge import (
+            MISSING_DECLARATION_EXIT,
+            ComparedDeclarationsNotRendered,
+            sanitize_command,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            channel = root / "diagnostic.json"
+            args = argparse.Namespace(
+                challenge=str(root / "Challenge.lean"),
+                solution=str(root / "Solution.lean"),
+                comparator=str(root / "comparator.json"),
+                challenge_module="Challenge",
+                lean=sys.executable,
+                input_dir=str(root / "raw"),
+                output_dir=str(root / "clean"),
+                diagnostic_out=str(channel),
+            )
+            with (
+                mock.patch(
+                    "scripts.render_challenge.parsed_challenge_metadata",
+                    return_value={"declarations": ["Example.generated"]},
+                ),
+                mock.patch(
+                    "scripts.render_challenge.sanitize_bundle",
+                    side_effect=ComparedDeclarationsNotRendered(["Example.generated"]),
+                ),
+            ):
+                self.assertEqual(sanitize_command(args), MISSING_DECLARATION_EXIT)
+            document = json.loads(channel.read_text())
+        self.assertEqual(document["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(document["declarations"], ["Example.generated"])
+
+    def test_sanitizer_channel_rejects_every_untrusted_shape(self):
+        from scripts.render_challenge import (
+            MISSING_DECLARATION_CODE,
+            read_sanitize_diagnostic,
+        )
+
+        valid = {
+            "schema_version": 1,
+            "code": MISSING_DECLARATION_CODE,
+            "declarations": ["Example.generated"],
+            "total": 1,
+        }
+        malformed = (
+            {**valid, "extra": True},
+            {key: value for key, value in valid.items() if key != "code"},
+            {**valid, "schema_version": 2},
+            {**valid, "code": "challenge.other"},
+            {**valid, "declarations": []},
+            {**valid, "declarations": ["x" * 401]},
+            {**valid, "total": True},
+            {**valid, "total": 2},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            for document in malformed:
+                with self.subTest(document=document):
+                    channel.write_text(json.dumps(document))
+                    with self.assertRaises(VerificationError):
+                        read_sanitize_diagnostic(channel)
+
+            channel.unlink()
+            channel.symlink_to(Path(directory) / "missing")
+            with self.assertRaisesRegex(VerificationError, "missing or invalid"):
+                read_sanitize_diagnostic(channel)
+
+    def test_sanitizer_channel_accepts_maximal_unicode_payload(self):
+        from scripts.render_challenge import (
+            MAX_REPORTED_DECLARATION_LENGTH,
+            MAX_REPORTED_DECLARATIONS,
+            ComparedDeclarationsNotRendered,
+            read_sanitize_diagnostic,
+            sanitize_diagnostic_document,
+        )
+
+        declarations = [
+            f"Example.«{'𝔘' * (MAX_REPORTED_DECLARATION_LENGTH - 10)}{index:02d}»"
+            for index in range(MAX_REPORTED_DECLARATIONS)
+        ]
+        error = ComparedDeclarationsNotRendered(declarations)
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            channel.write_text(json.dumps(sanitize_diagnostic_document(error), indent=2))
+            recovered = read_sanitize_diagnostic(channel)
+        self.assertEqual(recovered.total, MAX_REPORTED_DECLARATIONS)
+
+    def test_payload_text_cannot_forge_a_submitter_renderability_failure(self):
+        from scripts.render_challenge import render_failure_diagnostic
+
+        forged = VerificationError(
+            "lake build failed: challenge.declaration_not_rendered Example.generated"
+        )
+        diagnostic = render_failure_diagnostic(forged, "literate")
+        self.assertEqual(diagnostic["code"], "palomar.render_failed")
+        self.assertEqual(diagnostic["owner"], "palomar")
+
+    def test_submitter_renderability_failure_sets_the_report_status_to_fail(self):
+        from scripts.render_challenge import (
+            ComparedDeclarationsNotRendered,
+            append_render_failure,
+        )
+
+        report = {"status": "error", "stage": "sanitize", "errors": []}
+        append_render_failure(report, ComparedDeclarationsNotRendered(["Example.generated"]))
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["diagnostics"][0]["owner"], "submitter")
 
     def test_raw_svg_is_not_an_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
