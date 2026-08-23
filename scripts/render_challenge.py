@@ -60,6 +60,7 @@ from scripts.verify_submission import (  # noqa: E402
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
+MISSING_DECLARATION_PREFIX = "Verso output does not contain compared declarations: "
 
 MAX_RENDER_FILES = 2_000
 MAX_RENDER_NODES = 4_000
@@ -513,6 +514,80 @@ def load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise VerificationError(f"{path.name} must contain a JSON object")
     return value
+
+
+def compared_declarations_not_rendered(declarations: list[str]) -> VerificationError:
+    """Describe a publication-contract failure without guessing an HTML anchor.
+
+    Verso only emits declaration bindings for names backed by source tokens.
+    Comparator may also select compiler-generated declarations, notably
+    anonymous instances. Those declarations are valid Lean but cannot be an
+    unambiguous publication target, so the submitter has to name them in the
+    immutable Challenge source.
+    """
+    bounded = declarations[:50]
+    encoded = json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
+    return VerificationError(
+        MISSING_DECLARATION_PREFIX + encoded,
+        code="challenge.declaration_not_rendered",
+        owner="submitter",
+        field="comparator.declarations",
+        detail=(
+            "Each theorem, definition, or instance selected by comparator.json must have "
+            "a compiler-backed declaration anchor in the rendered Challenge. Anonymous "
+            "instances currently have no such Verso anchor."
+        ),
+        next_action=(
+            "Give every listed declaration an explicit source-level name in Challenge.lean, "
+            "update comparator.json if its generated name changes, commit the correction, "
+            "and make a new submission using that commit SHA."
+        ),
+    )
+
+
+def render_failure_diagnostic(error: BaseException, stage: str) -> dict[str, Any]:
+    """Classify renderer failures, recovering a confined sanitizer diagnostic."""
+    message = str(error)
+    marker = message.find(MISSING_DECLARATION_PREFIX)
+    if marker >= 0:
+        encoded = message[marker + len(MISSING_DECLARATION_PREFIX) :].splitlines()[0]
+        try:
+            declarations = json.loads(encoded)
+        except json.JSONDecodeError:
+            declarations = None
+        if (
+            isinstance(declarations, list)
+            and declarations
+            and len(declarations) <= 50
+            and all(isinstance(item, str) and item for item in declarations)
+        ):
+            return compared_declarations_not_rendered(declarations).diagnostic(stage)
+    if isinstance(error, subprocess.TimeoutExpired):
+        return VerificationError(
+            "Challenge rendering timed out.",
+            code="provider.render_timeout",
+            owner="provider",
+            next_action="Do not change the repository. Retry the same commit later.",
+            retryable=True,
+        ).diagnostic(stage)
+    return VerificationError(
+        "Palomar could not render the accepted Challenge.",
+        code="palomar.render_failed",
+        owner="palomar",
+        next_action=(
+            "Do not change the repository. Retry the same commit later and report the "
+            "render workflow URL if this happens again."
+        ),
+        retryable=True,
+        detail=f"{type(error).__name__}: {message[:1_500]}",
+    ).diagnostic(stage)
+
+
+def append_render_failure(report: dict[str, Any], error: BaseException) -> None:
+    report["diagnostics_schema_version"] = 1
+    diagnostics = report.setdefault("diagnostics", [])
+    if isinstance(diagnostics, list) and len(diagnostics) < 50:
+        diagnostics.append(render_failure_diagnostic(error, str(report.get("stage") or "render")))
 
 
 def toolchain_verso_commit(toolchain: str) -> str:
@@ -1223,11 +1298,13 @@ def static_html_sanitize(
         raise VerificationError("generated HTML has an unexpected base URL")
     text = "".join(sanitizer.parts)
     declaration_json = json.dumps(declarations or [], ensure_ascii=False, separators=(",", ":"))
-    for declaration in declarations or []:
-        if declaration not in sanitizer.found_declarations:
-            raise VerificationError(
-                f"Verso output does not contain compared declaration: {declaration}"
-            )
+    missing_declarations = [
+        declaration
+        for declaration in declarations or []
+        if declaration not in sanitizer.found_declarations
+    ]
+    if missing_declarations:
+        raise compared_declarations_not_rendered(missing_declarations)
 
     # Inject trusted declaration metadata only after every whole-document regex
     # pass. Otherwise an escaped Lean identifier containing text such as
@@ -2190,10 +2267,12 @@ def execute(args: argparse.Namespace) -> int:
         write_json(result_dir / "challenge-render.json", report)
         write_json(output, report)
         return 0
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         report["errors"].append("Challenge rendering timed out")
+        append_render_failure(report, error)
     except Exception as error:  # noqa: BLE001 - workflow failures become a bounded report
         report["errors"].append(str(error))
+        append_render_failure(report, error)
     write_json(output, report)
     return 1
 

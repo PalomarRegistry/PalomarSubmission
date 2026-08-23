@@ -1355,13 +1355,58 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
 
     def test_static_html_rejects_a_missing_compared_declaration(self):
         html_text = "<!doctype html><html><head><base href=\"../\"></head><body></body></html>"
-        with self.assertRaisesRegex(VerificationError, "does not contain compared declaration"):
+        with self.assertRaisesRegex(
+            VerificationError, "does not contain compared declarations"
+        ) as raised:
             static_html_sanitize(
                 html_text,
                 "../palomar-sanitize.js",
                 "../palomar-verso.js",
                 ["Example.missing"],
             )
+        diagnostic = raised.exception.diagnostic("sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertIn("explicit source-level name", diagnostic["next_action"])
+
+    def test_static_html_reports_every_missing_compared_declaration(self):
+        html_text = """<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-Example.present" id="present">present</span>
+</body></html>"""
+        with self.assertRaises(VerificationError) as raised:
+            static_html_sanitize(
+                html_text,
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+                ["Example.present", "Example.first", "Example.second"],
+            )
+        self.assertIn('["Example.first","Example.second"]', str(raised.exception))
+
+    def test_explicitly_named_instance_anchor_is_renderable(self):
+        declaration = "Example.instPartialOrderElement"
+        html_text = f'''<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-{declaration}" id="Example___instPartialOrderElement">
+instPartialOrderElement</span></body></html>'''
+        sanitized = static_html_sanitize(
+            html_text,
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+            [declaration],
+        )
+        self.assertIn("Example___instPartialOrderElement", sanitized)
+
+    def test_confined_missing_declaration_keeps_its_submitter_diagnostic(self):
+        from scripts.render_challenge import render_failure_diagnostic
+
+        wrapped = VerificationError(
+            "python render_challenge.py sanitize failed (2): render challenge: "
+            'Verso output does not contain compared declarations: ["Example.generated"]'
+        )
+        diagnostic = render_failure_diagnostic(wrapped, "sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertIn("Example.generated", diagnostic["summary"])
 
     def test_raw_svg_is_not_an_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
