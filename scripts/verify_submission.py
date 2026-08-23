@@ -2670,6 +2670,48 @@ def verify_sandbox_confinement(
         raise VerificationError("normal sandbox phase unexpectedly reached the network")
 
 
+TAG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]*$")
+
+
+def revision_release_tags(git: list[str], revision: str, *, env: dict[str, str]) -> list[str]:
+    """The remote's tag names that point at exactly this revision.
+
+    Lake builds a GitHub release download URL from ``git describe --tags
+    --exact-match``, so a dependency that ships prebuilt assets rather than
+    building them (ProofWidgets' widget bundle needs npm) can only be fetched
+    when the tag naming its pinned revision exists in the local checkout.
+    """
+    listing = run(
+        [*git, "ls-remote", "--tags", "origin"],
+        env=env,
+        timeout=EXECUTION_BUDGET_SECONDS,
+    ).stdout
+    direct: dict[str, str] = {}
+    peeled: dict[str, str] = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not submission_contract.SHA_RE.fullmatch(parts[0]):
+            continue
+        if not parts[1].startswith("refs/tags/"):
+            continue
+        name = parts[1].removeprefix("refs/tags/")
+        if name.endswith("^{}"):
+            peeled[name.removesuffix("^{}")] = parts[0]
+        else:
+            direct[name] = parts[0]
+    # An annotated tag names its commit through the peeled ref; a lightweight
+    # tag points at the commit directly.
+    return sorted(
+        name
+        for name, target in direct.items()
+        if peeled.get(name, target) == revision
+        and TAG_NAME_RE.fullmatch(name)
+        and ".." not in name
+        and "//" not in name
+        and not name.endswith(("/", ".lock"))
+    )
+
+
 def materialize_packages(
     source: Path, *, checkout: Path, base_env: dict[str, str]
 ) -> list[Path]:
@@ -2743,6 +2785,23 @@ def materialize_packages(
             env=git_env,
             timeout=EXECUTION_BUDGET_SECONDS,
         )
+        # A depth-1 fetch of a bare commit brings no tags, so fetch the ones
+        # naming this revision. They carry no history the pinned revision did
+        # not already bring, and the revision itself stays the verified one.
+        tags = revision_release_tags(git, revision, env=git_env)
+        if tags:
+            run(
+                [
+                    *git,
+                    "fetch",
+                    "--quiet",
+                    "--depth=1",
+                    "origin",
+                    *(f"+refs/tags/{tag}:refs/tags/{tag}" for tag in tags),
+                ],
+                env=git_env,
+                timeout=EXECUTION_BUDGET_SECONDS,
+            )
         run([*git, "checkout", "--quiet", "--detach", revision], env=git_env)
         validate_preservable_git_checkout(
             package_dir,

@@ -3470,6 +3470,150 @@ review:
             )
 
 
+class RevisionReleaseTagTests(unittest.TestCase):
+    """Lake needs the tag naming a pinned revision to fetch a GitHub release."""
+
+    REV = "b" * 40
+    OTHER = "c" * 40
+
+    def _tags(self, *refs):
+        listing = "".join(f"{sha}\trefs/tags/{name}\n" for name, sha in refs)
+        with mock.patch(
+            "scripts.verify_submission.run",
+            return_value=subprocess.CompletedProcess(["git"], 0, listing, ""),
+        ):
+            return verifier.revision_release_tags(["git"], self.REV, env={})
+
+    def test_a_lightweight_tag_naming_the_revision_is_fetched(self):
+        self.assertEqual(self._tags(("v0.0.87", self.REV)), ["v0.0.87"])
+
+    def test_an_annotated_tag_is_matched_through_its_peeled_ref(self):
+        """The direct ref is the tag object, not the commit it names."""
+        self.assertEqual(
+            self._tags(("v0.0.87", "a" * 40), ("v0.0.87^{}", self.REV)),
+            ["v0.0.87"],
+        )
+
+    def test_a_tag_naming_another_revision_is_left_alone(self):
+        self.assertEqual(self._tags(("v0.0.88", self.OTHER)), [])
+        self.assertEqual(
+            self._tags(("v0.0.88", "a" * 40), ("v0.0.88^{}", self.OTHER)), []
+        )
+
+    def test_every_tag_naming_the_revision_is_returned_in_order(self):
+        self.assertEqual(
+            self._tags(
+                ("v0.0.87", self.REV),
+                ("v0.0.86", self.REV),
+                ("v0.0.88", self.OTHER),
+            ),
+            ["v0.0.86", "v0.0.87"],
+        )
+
+    def test_a_tag_carrying_a_lean_toolchain_suffix_is_accepted(self):
+        self.assertEqual(
+            self._tags(("v0.0.95+lean-v4.29.1", self.REV)), ["v0.0.95+lean-v4.29.1"]
+        )
+
+    def test_unsafe_tag_names_are_refused(self):
+        for name in ("../escape", "a//b", "broken.lock", "trailing/", "-dash", "with space"):
+            with self.subTest(name):
+                self.assertEqual(self._tags((name, self.REV)), [])
+
+    def test_non_tag_refs_are_ignored(self):
+        listing = f"{self.REV}\trefs/heads/main\n{self.REV}\trefs/tags/v1\n"
+        with mock.patch(
+            "scripts.verify_submission.run",
+            return_value=subprocess.CompletedProcess(["git"], 0, listing, ""),
+        ):
+            self.assertEqual(verifier.revision_release_tags(["git"], self.REV, env={}), ["v1"])
+
+
+class PackageTagMaterializationTests(unittest.TestCase):
+    """The tag naming a pinned revision reaches the dependency checkout."""
+
+    REV = "d" * 40
+
+    def test_materializing_a_git_package_fetches_its_release_tag(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            out = ""
+            if "ls-remote" in command:
+                out = f"{self.REV}\trefs/tags/v0.0.87\n"
+            return subprocess.CompletedProcess(command, 0, out, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "proofwidgets",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/proofwidgets4",
+                                "rev": self.REV,
+                            }
+                        ]
+                    }
+                )
+            )
+            with mock.patch("scripts.verify_submission.run", side_effect=fake_run):
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
+
+        fetches = [c for c in commands if "fetch" in c]
+        self.assertIn(
+            "+refs/tags/v0.0.87:refs/tags/v0.0.87",
+            [argument for command in fetches for argument in command],
+        )
+        # The tag is fetched only after the pinned revision itself.
+        revision_fetch = next(i for i, c in enumerate(commands) if "fetch" in c and self.REV in c)
+        tag_fetch = next(
+            i
+            for i, c in enumerate(commands)
+            if "fetch" in c and any(a.startswith("+refs/tags/") for a in c)
+        )
+        checkout = next(i for i, c in enumerate(commands) if "checkout" in c)
+        self.assertLess(revision_fetch, tag_fetch)
+        self.assertLess(tag_fetch, checkout)
+
+    def test_a_package_with_no_tag_at_its_revision_skips_the_extra_fetch(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "batteries",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/batteries",
+                                "rev": self.REV,
+                            }
+                        ]
+                    }
+                )
+            )
+            with mock.patch("scripts.verify_submission.run", side_effect=fake_run):
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
+
+        self.assertFalse([
+            c for c in commands if any(a.startswith("+refs/tags/") for a in c)
+        ])
+
+
 class SubmissionRequestTests(unittest.TestCase):
     """Submissions arrive as a dispatch, and carry no submitter."""
 
