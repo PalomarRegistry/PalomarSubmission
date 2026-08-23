@@ -1061,6 +1061,111 @@ review:
                 ],
             )
 
+    def test_project_author_orcid_forms_are_accepted_during_preflight(self):
+        document = """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      orcid: ORCID_VALUE
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+        for orcid in (
+            "0000-0002-0201-310X",
+            "https://orcid.org/0000-0002-0201-310X",
+            "https://orcid.org/0000-0002-0201-310X/",
+        ):
+            with self.subTest(orcid=orcid), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "formalization.yaml"
+                path.write_text(document.replace("ORCID_VALUE", orcid), encoding="utf-8")
+                metadata = load_formalization_metadata(path)
+                self.assertEqual(metadata["project"]["authors"][0]["orcid"], orcid)
+
+    def test_project_author_invalid_orcid_is_rejected_during_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      orcid: https://example.com/0000-0002-0201-310X
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FormalizationValidationError) as caught:
+                load_formalization_metadata(path)
+
+        issue = next(issue for issue in caught.exception.issues if issue.field)
+        self.assertEqual(issue.field, "project.authors[0].orcid")
+        self.assertIn("must be a bare ORCID or an https://orcid.org URL", str(issue))
+        self.assertFalse(issue.repairable)
+
+    def test_project_author_invalid_github_login_is_rejected_during_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      github: https://github.com/ada
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FormalizationValidationError) as caught:
+                load_formalization_metadata(path)
+
+        issue = next(issue for issue in caught.exception.issues if issue.field)
+        self.assertEqual(issue.field, "project.authors[0].github")
+        self.assertFalse(issue.repairable)
+
     def test_legacy_person_aliases_pass_full_metadata_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "formalization.yaml"

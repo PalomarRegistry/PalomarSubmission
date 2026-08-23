@@ -99,6 +99,9 @@ GITHUB_LOGIN_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
 )
 ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
+ORCID_URL_RE = re.compile(
+    r"^https://orcid\.org/(?P<identifier>[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4})/?$"
+)
 AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
@@ -290,15 +293,19 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
             login = _required_text(github, f"{item_path}.github").strip().removeprefix("@")
             if not GITHUB_LOGIN_RE.fullmatch(login):
                 raise VerificationError(
-                    f"formalization.yaml field {item_path}.github is invalid"
+                    f"formalization.yaml field {item_path}.github must be a GitHub login"
                 )
             record["github"] = login
         orcid = person.get("orcid")
         if orcid is not None:
             identifier = _required_text(orcid, f"{item_path}.orcid").strip()
+            url_match = ORCID_URL_RE.fullmatch(identifier)
+            if url_match is not None:
+                identifier = url_match.group("identifier")
             if not ORCID_RE.fullmatch(identifier):
                 raise VerificationError(
-                    f"formalization.yaml field {item_path}.orcid is invalid"
+                    f"formalization.yaml field {item_path}.orcid must be a bare ORCID "
+                    "or an https://orcid.org URL"
                 )
             record["orcid"] = identifier
         records.append(record)
@@ -871,7 +878,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             project.get("description"), "project.description", maximum=10_000
         )
     )
-    check(lambda: _required_people(project.get("authors"), "project.authors"))
+    check(lambda: _person_records(project.get("authors"), "project.authors", required=True))
     check(lambda: _required_text(project.get("license"), "project.license"))
     maintainers = project.get("responsible_maintainers")
     if "responsible_maintainers" not in project and "responsible_maintainer" in project:
