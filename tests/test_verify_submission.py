@@ -93,6 +93,211 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertTrue(verifier.mathlib_cache_availability("No files to download"))
         self.assertIsNone(verifier.mathlib_cache_availability("older client output"))
 
+    def test_proofwidgets_release_directory_is_canonical_and_layout_gated(self):
+        layouts = {
+            "release": """import Lake
+open Lake DSL
+package proofwidgets where
+  preferReleaseBuild := true
+  buildArchive? := \"ProofWidgets4.tar.gz\"
+  releaseRepo := \"https://github.com/leanprover-community/ProofWidgets4\"
+""",
+            "source": "import Lake\nopen Lake DSL\npackage proofwidgets where\n",
+            "partial": """import Lake
+open Lake DSL
+package proofwidgets where
+  preferReleaseBuild := true
+""",
+        }
+        for layout, lakefile in layouts.items():
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                package = source / ".lake" / "packages" / "proofwidgets"
+                (package / ".lake").mkdir(parents=True)
+                (package / "lakefile.lean").write_text(lakefile)
+                (source / "lake-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "packages": [
+                                {
+                                    "name": "proofwidgets",
+                                    "type": "git",
+                                    "url": (
+                                        "https://github.com/leanprover-community/ProofWidgets4"
+                                    ),
+                                    "rev": "1" * 40,
+                                }
+                            ]
+                        }
+                    )
+                )
+
+                packages = verifier.manifest_packages(source)
+                writable = verifier.proofwidgets_release_writable_directory(
+                    source,
+                    packages,
+                    {"proofwidgets"},
+                    checkout=source,
+                )
+                if layout == "release":
+                    self.assertEqual(
+                        writable,
+                        (package / ".lake").resolve(),
+                    )
+                    (package / ".lake").rmdir()
+                    with self.assertRaisesRegex(VerificationError, "unavailable"):
+                        verifier.proofwidgets_release_writable_directory(
+                            source, packages, {"proofwidgets"}, checkout=source
+                        )
+                else:
+                    self.assertIsNone(writable)
+                forked = [{**packages[0], "repository": "example/proofwidgets4"}]
+                with self.assertRaisesRegex(VerificationError, "not canonical"):
+                    verifier.proofwidgets_release_writable_directory(
+                        source, forked, {"proofwidgets"}, checkout=source
+                    )
+
+    def test_proofwidgets_release_validation_rejects_empty_oversize_and_extra(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lake_dir = Path(directory)
+            (lake_dir / "build").mkdir()
+            (lake_dir / "config").mkdir()
+            archive = lake_dir / "ProofWidgets4.tar.gz"
+            trace = Path(f"{archive}.trace")
+            archive.write_bytes(b"archive")
+            trace.write_bytes(b"")
+            with self.assertRaisesRegex(VerificationError, "release file"):
+                verifier.validate_proofwidgets_release_directory(lake_dir)
+            with trace.open("wb") as handle:
+                handle.truncate(verifier.MAX_PROOFWIDGETS_RELEASE_TRACE_BYTES + 1)
+            with self.assertRaisesRegex(VerificationError, "release file"):
+                verifier.validate_proofwidgets_release_directory(lake_dir)
+            trace.write_bytes(b"trace")
+            verifier.validate_proofwidgets_release_directory(lake_dir)
+            (lake_dir / "unexpected").write_bytes(b"unexpected")
+            with self.assertRaisesRegex(VerificationError, "unexpected"):
+                verifier.validate_proofwidgets_release_directory(lake_dir)
+            (lake_dir / "unexpected").unlink()
+            (lake_dir / "build").rmdir()
+            (lake_dir / "build").write_bytes(b"not a directory")
+            with self.assertRaisesRegex(VerificationError, "Lake directory"):
+                verifier.validate_proofwidgets_release_directory(lake_dir)
+
+    def test_mathlib_cache_grants_release_directory_only_during_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            mathlib = source / ".lake" / "packages" / "mathlib"
+            proofwidgets = source / ".lake" / "packages" / "proofwidgets"
+            for package in (mathlib, proofwidgets):
+                (package / ".lake" / "build").mkdir(parents=True)
+                (package / ".lake" / "config").mkdir()
+            (proofwidgets / "widget").mkdir()
+            (proofwidgets / "widget" / "package-lock.json").write_text("{}\n")
+            (proofwidgets / "lakefile.lean").write_text(
+                """import Lake
+open Lake DSL
+package proofwidgets where
+  preferReleaseBuild := true
+  buildArchive? := \"ProofWidgets4.tar.gz\"
+  releaseRepo := \"https://github.com/leanprover-community/ProofWidgets4\"
+"""
+            )
+            (mathlib / ".git").mkdir()
+            revision = "1" * 40
+            packages = [
+                {
+                    "name": "mathlib",
+                    "repository": "leanprover-community/mathlib4",
+                    "url": "https://github.com/leanprover-community/mathlib4",
+                    "revision": revision,
+                },
+                {
+                    "name": "proofwidgets",
+                    "repository": "leanprover-community/proofwidgets4",
+                    "url": "https://github.com/leanprover-community/ProofWidgets4",
+                    "revision": "2" * 40,
+                },
+            ]
+            mathlib_dependencies = [packages[1]]
+            archive = proofwidgets / ".lake" / "ProofWidgets4.tar.gz"
+            trace = Path(f"{archive}.trace")
+            lock_hash = proofwidgets / "widget" / "package-lock.json.hash"
+            nested = mathlib / ".lake" / "packages"
+            nested.mkdir()
+
+            def git_result(command, **_kwargs):
+                if "rev-parse" in command:
+                    output = revision
+                elif "get-url" in command:
+                    output = "https://github.com/leanprover-community/mathlib4"
+                else:
+                    output = ""
+                return subprocess.CompletedProcess(command, 0, output + "\n", "")
+
+            def cache_phase(command, **kwargs):
+                if kwargs.get("unrestricted_network", False):
+                    self.assertIn(
+                        (proofwidgets / ".lake").resolve(),
+                        set(kwargs["writable_directories"]),
+                    )
+                    self.assertFalse(kwargs.get("writable_files"))
+                    archive.write_bytes(b"release archive")
+                    trace.write_text('{"depHash":"0123456789abcdef"}\n')
+                    output = "No files to download"
+                else:
+                    self.assertNotIn(
+                        (proofwidgets / ".lake").resolve(),
+                        set(kwargs["writable_directories"]),
+                    )
+                    self.assertEqual(
+                        set(kwargs["writable_files"]), {lock_hash.resolve()}
+                    )
+                    output = ""
+                return subprocess.CompletedProcess(command, 0, output, "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.manifest_packages",
+                    side_effect=lambda path: (
+                        mathlib_dependencies if path == mathlib else packages
+                    ),
+                ),
+                mock.patch("scripts.verify_submission.run", side_effect=git_result),
+                mock.patch(
+                    "scripts.verify_submission.reset_trusted_lake_state",
+                    return_value=[
+                        mathlib / ".lake" / "build",
+                        mathlib / ".lake" / "config",
+                        proofwidgets / ".lake" / "build",
+                        proofwidgets / ".lake" / "config",
+                    ],
+                ),
+                mock.patch(
+                    "scripts.verify_submission.nested_package_links",
+                    return_value=nested,
+                ),
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run", side_effect=cache_phase
+                ) as sandbox,
+            ):
+                result = verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "proofwidgets": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertEqual(result, {"required": True, "available": True})
+            self.assertEqual(sandbox.call_count, 2)
+
     def test_manifest_packages_directory_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             ancestor = Path(directory)

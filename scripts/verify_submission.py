@@ -41,6 +41,8 @@ MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
+MAX_PROOFWIDGETS_RELEASE_BYTES = 64 * 1024 * 1024
+MAX_PROOFWIDGETS_RELEASE_TRACE_BYTES = 1024 * 1024
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 COMPARATOR_REQUIRED_KEYS = {
     "challenge_module",
@@ -2853,6 +2855,76 @@ def mathlib_cache_availability(transcript: str) -> bool | None:
     return None
 
 
+def proofwidgets_release_writable_directory(
+    source: Path,
+    packages: list[dict[str, str]],
+    closure: set[str],
+    *,
+    checkout: Path,
+) -> Path | None:
+    """Return the generated directory written by ProofWidgets' release layout."""
+    proofwidgets = next(
+        (package for package in packages if package["name"] == "proofwidgets"),
+        None,
+    )
+    if proofwidgets is None or proofwidgets["name"] not in closure:
+        return None
+    if proofwidgets["repository"].lower() != "leanprover-community/proofwidgets4":
+        raise VerificationError("Mathlib ProofWidgets dependency is not canonical")
+    package_dir = package_checkout(source, proofwidgets, checkout=checkout)
+    lakefile = package_dir / "lakefile.lean"
+    if lakefile.is_symlink() or not lakefile.is_file():
+        raise VerificationError("canonical ProofWidgets Lakefile is unavailable")
+    if lakefile.stat().st_size > MAX_CONFIGURATION_BYTES:
+        raise VerificationError("canonical ProofWidgets Lakefile exceeds the size limit")
+    contents = lakefile.read_text(encoding="utf-8")
+    directives = (
+        "preferReleaseBuild := true",
+        'buildArchive? := "ProofWidgets4.tar.gz"',
+        'releaseRepo := "https://github.com/leanprover-community/ProofWidgets4"',
+    )
+    matches = tuple(directive in contents for directive in directives)
+    if not all(matches):
+        return None
+    lake_dir = package_dir / ".lake"
+    if lake_dir.is_symlink() or not lake_dir.is_dir():
+        raise VerificationError("canonical ProofWidgets Lake directory is unavailable")
+    return lake_dir.resolve(strict=True)
+
+
+def validate_proofwidgets_release_directory(lake_dir: Path | None) -> None:
+    if lake_dir is None:
+        return
+    permitted = {
+        "build",
+        "config",
+        "ProofWidgets4.tar.gz",
+        "ProofWidgets4.tar.gz.trace",
+    }
+    unexpected = [path.name for path in lake_dir.iterdir() if path.name not in permitted]
+    if unexpected:
+        raise VerificationError(
+            f"unexpected canonical ProofWidgets Lake entry: {sorted(unexpected)[0]}"
+        )
+    for name in ("build", "config"):
+        directory = lake_dir / name
+        if directory.is_symlink() or not directory.is_dir():
+            raise VerificationError(
+                f"invalid canonical ProofWidgets Lake directory: {name}"
+            )
+    archive = lake_dir / "ProofWidgets4.tar.gz"
+    trace = Path(f"{archive}.trace")
+    limits = (MAX_PROOFWIDGETS_RELEASE_BYTES, MAX_PROOFWIDGETS_RELEASE_TRACE_BYTES)
+    for path, maximum in zip((archive, trace), limits, strict=True):
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size == 0
+            or path.stat().st_size > maximum
+        ):
+            raise VerificationError(f"invalid canonical ProofWidgets release file: {path.name}")
+
+
 def get_mathlib_cache(
     source: Path,
     *,
@@ -2934,6 +3006,8 @@ def get_mathlib_cache(
     # Candidate configuration ran with these directories writable. Recreate
     # every verified package's .lake tree immediately before the first
     # networked Lake command, then expose only fresh build/config directories.
+    # A canonical cloud-release layout additionally needs its generated .lake
+    # directory because Lake removes and recreates the configured archive.
     trusted_directories = reset_trusted_lake_state(
         source,
         closure,
@@ -2944,7 +3018,14 @@ def get_mathlib_cache(
     nested_packages = nested_package_links(
         source, package_dir, checkout=checkout, allowed_names=closure
     )
-    cache_writable = validate_writable_directories(checkout, trusted_directories)
+    replay_writable = validate_writable_directories(checkout, trusted_directories)
+    release_writable_directory = proofwidgets_release_writable_directory(
+        source, packages, closure, checkout=checkout
+    )
+    cache_directories = list(trusted_directories)
+    if release_writable_directory is not None:
+        cache_directories.append(release_writable_directory)
+    cache_writable = validate_writable_directories(checkout, cache_directories)
     replay_writable_files: list[Path] = []
     proofwidgets = next((package for package in packages if package["name"] == "proofwidgets"), None)
     if proofwidgets and proofwidgets["name"] in closure:
@@ -2987,16 +3068,19 @@ def get_mathlib_cache(
         )
         cache_transcript = f"{cache_result.stdout}\n{cache_result.stderr}"
         cache_available = mathlib_cache_availability(cache_transcript)
+        validate_proofwidgets_release_directory(release_writable_directory)
         # Replay the trusted cache while the high-trust Mathlib closure
         # is still the only writable package surface. Lake records local hash
         # metadata during replay; creating it here prevents a qualified root
         # from later needing write access to Mathlib or its dependencies.
+        # The cloud-release archive and trace are up to date at this point and
+        # remain read-only during replay.
         sandboxed_run(
             [str(lake), "build"],
             cwd=package_dir,
             environment=cache_env,
             landrun=landrun,
-            writable_directories=cache_writable,
+            writable_directories=replay_writable,
             writable_files=replay_writable_files,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
