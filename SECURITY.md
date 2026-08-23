@@ -136,19 +136,23 @@ integrity: candidate configuration could copy arbitrarily named bytes into a
 fresh build directory.
 
 Statement integrity instead comes from a separate build path. Mathlib's
-trusted cache is run with official Mathlib as the workspace root and
-with symlinks to the exact independently verified official closure. Other
-allowlisted roots are built from their own pinned configuration. Candidate
-Lake configuration never runs during these operations. Immediately before the
-network-enabled Mathlib cache command, the verifier deletes and recreates the
-entire ignored `.lake` tree for every verified package in Mathlib's closure,
-leaving only fresh `build` and `config` directories; candidate work from
-earlier network-disabled configuration therefore cannot cross that boundary.
-Those closure `build` and `config` directories are the network-enabled
-command's complete writable-directory set; source and closure-link paths remain
-read-only. The later network-disabled replay additionally receives write access
-to one exact ProofWidgets replay marker. Trusted-root Lake URL resolution is
-pinned to that root's verified manifest and is accepted only
+trusted cache is run with a disposable copy of official Mathlib as the
+workspace root and with symlinks to the exact independently verified official
+closure. Other allowlisted roots are built from their own pinned configuration.
+Candidate Lake configuration never runs during these operations. Immediately before the
+network-enabled Mathlib cache command, the verifier deletes and recreates every
+canonical `.lake` tree in Mathlib's closure, then hard-links the verified,
+read-only sources into a disposable sibling workspace. The network-enabled
+command can write complete `.lake` roots only there, allowing ordinary Lake
+release facets without granting write access to canonical source or build
+state. Before promotion, the verifier rechecks package and dependency-link
+mappings, rejects special files, external hard links, and escaping build
+symlinks, and accepts non-build state only as generic regular
+artifact/`.trace` pairs. It validates every package before atomically moving
+those build trees and pairs into the fresh canonical `.lake` roots. The later
+network-disabled replay can write only canonical `build` and `config`
+directories and one pre-existing exact ProofWidgets replay marker. Trusted-root
+Lake URL resolution is pinned to that root's verified manifest and is accepted only
 when the flattened submission manifest names the same canonical GitHub
 repository. Immediately before each qualified-root build, the verifier likewise
 deletes and recreates every `.lake` tree owned by that root. Mathlib-owned cache

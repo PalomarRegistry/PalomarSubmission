@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2853,6 +2854,363 @@ def mathlib_cache_availability(transcript: str) -> bool | None:
     return None
 
 
+@dataclass(frozen=True)
+class StagedTrustedClosure:
+    """A disposable copy of one verified package closure."""
+
+    source: Path
+    root_package: Path
+    lake_roots: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class StagedLakePromotion:
+    """Validated staged state ready to move into one canonical package."""
+
+    name: str
+    staged_build: Path
+    canonical_build: Path
+    metadata: tuple[tuple[Path, Path], ...]
+
+
+def stage_trusted_closure(
+    source: Path,
+    *,
+    checkout: Path,
+    packages: list[dict[str, str]],
+    closure: set[str],
+    root_name: str,
+    destination: Path,
+) -> StagedTrustedClosure:
+    """Copy only a verified closure into a disposable Lake workspace."""
+    if destination.is_symlink() or not destination.is_dir():
+        raise VerificationError("trusted-cache staging boundary is not a real directory")
+    by_name = {package["name"]: package for package in packages}
+    if not closure <= by_name.keys() or root_name not in closure:
+        raise VerificationError("trusted-cache staging closure is incomplete")
+
+    staged_packages = destination / ".lake" / "packages"
+    staged_packages.mkdir(parents=True)
+    manifest: list[dict[str, str]] = []
+    for name in sorted(closure):
+        package = by_name.get(name)
+        if package is None:
+            raise VerificationError(f"trusted package {name!r} is absent from the manifest")
+        if package["url"].startswith("path:"):
+            raise VerificationError(f"trusted package {name!r} may not use a path dependency")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
+            raise VerificationError(f"unsafe trusted package name: {name!r}")
+        canonical = package_checkout(source, package, checkout=checkout)
+        if canonical.is_symlink() or not canonical.is_dir():
+            raise VerificationError(f"trusted package checkout is not a real directory: {canonical}")
+        staged = staged_packages / name
+        # Staging and canonical state deliberately share a filesystem. Hard
+        # links make the large verified source closure cheap to reproduce; the
+        # sandbox exposes these files read-only and grants writes only below
+        # each newly created staged .lake root.
+        shutil.copytree(
+            canonical,
+            staged,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".lake"),
+            copy_function=os.link,
+        )
+        if (staged / ".git").is_symlink() or not (staged / ".git").is_dir():
+            raise VerificationError(f"staged trusted package has no real Git metadata: {name!r}")
+        manifest.append(
+            {
+                "name": name,
+                "type": "git",
+                "url": package["url"],
+                "rev": package["revision"],
+            }
+        )
+
+    write_json(
+        destination / "lake-manifest.json",
+        {"version": "1.2.0", "packagesDir": ".lake/packages", "packages": manifest},
+    )
+    staged_manifest = manifest_packages(destination)
+    for package in staged_manifest:
+        staged_lake = package_checkout(
+            destination, package, checkout=destination
+        ) / ".lake"
+        (staged_lake / "build").mkdir(parents=True)
+        (staged_lake / "config").mkdir()
+    reset_trusted_lake_state(
+        destination,
+        closure,
+        packages=staged_manifest,
+        checkout=destination,
+    )
+    root = package_checkout(
+        destination,
+        next(package for package in staged_manifest if package["name"] == root_name),
+        checkout=destination,
+    )
+    nested_package_links(destination, root, checkout=destination, allowed_names=closure)
+
+    lake_roots: list[Path] = []
+    boundary = destination.resolve()
+    for name in sorted(closure):
+        package = next(package for package in staged_manifest if package["name"] == name)
+        lake_root = package_checkout(
+            destination, package, checkout=destination
+        ) / ".lake"
+        if lake_root.is_symlink() or not lake_root.is_dir():
+            raise VerificationError(f"staged trusted package Lake root is invalid: {name!r}")
+        resolved = lake_root.resolve()
+        try:
+            resolved.relative_to(boundary)
+        except ValueError as error:
+            raise VerificationError(
+                f"staged trusted package Lake root escapes its boundary: {name!r}"
+            ) from error
+        lake_roots.append(resolved)
+    return StagedTrustedClosure(destination.resolve(), root.resolve(), tuple(lake_roots))
+
+
+def _resolve_staged_symlink(path: Path, root: Path) -> Path:
+    """Resolve one symlink without ever traversing outside its build root."""
+    current = path.parent
+    remaining = list(Path(os.readlink(path)).parts)
+    traversed_links = 0
+    while remaining:
+        component = remaining.pop(0)
+        if component in {"", "."}:
+            continue
+        current = current.parent if component == ".." else current / component
+        try:
+            current.relative_to(root)
+        except ValueError as error:
+            raise VerificationError("staged build symlink escapes its build root") from error
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise VerificationError("staged build symlink has a missing target") from error
+        if stat.S_ISLNK(info.st_mode):
+            target = Path(os.readlink(current))
+            if target.is_absolute():
+                raise VerificationError("staged build symlink has an absolute target")
+            traversed_links += 1
+            if traversed_links > 40:
+                raise VerificationError("staged build symlink chain is too deep")
+            remaining = [*target.parts, *remaining]
+            current = current.parent
+    return current
+
+
+def _validate_staged_build_tree(build: Path, name: str) -> None:
+    """Reject generated filesystem objects that could escape after promotion."""
+    root = build.resolve()
+    if build.is_symlink() or not build.is_dir():
+        raise VerificationError(f"staged trusted package build is invalid: {name!r}")
+    hardlinks: dict[tuple[int, int], tuple[int, int]] = {}
+    for current, directories, filenames in os.walk(build, followlinks=False):
+        current_path = Path(current)
+        for entry_name in [*directories, *filenames]:
+            path = current_path / entry_name
+            info = path.lstat()
+            mode = info.st_mode
+            if stat.S_ISLNK(mode):
+                target = os.readlink(path)
+                if Path(target).is_absolute():
+                    raise VerificationError(
+                        f"staged trusted package build contains an absolute symlink: {name!r}"
+                    )
+                try:
+                    _resolve_staged_symlink(path, root)
+                except VerificationError as error:
+                    raise VerificationError(
+                        f"staged trusted package build contains an escaping symlink: {name!r}"
+                    ) from error
+                continue
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise VerificationError(
+                    f"staged trusted package build contains a special file: {name!r}"
+                )
+            key = (info.st_dev, info.st_ino)
+            observed, links = hardlinks.get(key, (0, info.st_nlink))
+            hardlinks[key] = (observed + 1, links)
+    if any(observed != links for observed, links in hardlinks.values()):
+        raise VerificationError(
+            f"staged trusted package build contains an external hard link: {name!r}"
+        )
+
+
+def _staged_lake_metadata(
+    staged_lake: Path, canonical_lake: Path, name: str
+) -> tuple[tuple[Path, Path], ...]:
+    """Validate generic Lake archive/trace pairs outside generated directories."""
+    files: dict[pathlib.PurePosixPath, Path] = {}
+    directories: set[pathlib.PurePosixPath] = set()
+    for expected in ("build", "config"):
+        path = staged_lake / expected
+        if path.is_symlink() or not path.is_dir():
+            raise VerificationError(
+                f"staged trusted package Lake {expected} is invalid: {name!r}"
+            )
+
+    for current, child_directories, filenames in os.walk(staged_lake, followlinks=False):
+        current_path = Path(current)
+        relative_current = pathlib.PurePosixPath(current_path.relative_to(staged_lake).as_posix())
+        if relative_current == pathlib.PurePosixPath("."):
+            child_directories[:] = [
+                child for child in child_directories if child not in {"build", "config", "packages"}
+            ]
+        for child in child_directories:
+            path = current_path / child
+            if path.is_symlink() or not path.is_dir():
+                raise VerificationError(
+                    f"staged trusted package Lake metadata contains a symlink: {name!r}"
+                )
+            directories.add(pathlib.PurePosixPath(path.relative_to(staged_lake).as_posix()))
+        for filename in filenames:
+            path = current_path / filename
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise VerificationError(
+                    f"staged trusted package Lake metadata is not a regular file: {name!r}"
+                )
+            relative = pathlib.PurePosixPath(path.relative_to(staged_lake).as_posix())
+            files[relative] = path
+
+    archives = {
+        relative
+        for relative in files
+        if relative.with_name(relative.name + ".trace") in files
+    }
+    expected = {
+        *archives,
+        *(relative.with_name(relative.name + ".trace") for relative in archives),
+    }
+    if set(files) != expected:
+        raise VerificationError(
+            f"staged trusted package Lake metadata is not paired archive state: {name!r}"
+        )
+    required_directories = {
+        parent
+        for relative in files
+        for parent in relative.parents
+        if parent != pathlib.PurePosixPath(".")
+    }
+    if directories != required_directories:
+        raise VerificationError(
+            f"staged trusted package Lake metadata contains an unexpected directory: {name!r}"
+        )
+
+    result: list[tuple[Path, Path]] = []
+    for relative in sorted(files):
+        destination = canonical_lake.joinpath(*relative.parts)
+        if destination.exists() or destination.is_symlink():
+            raise VerificationError(
+                f"canonical trusted package Lake metadata already exists: {name!r}"
+            )
+        result.append((files[relative], destination))
+    return tuple(result)
+
+
+def validate_staged_lake_promotions(
+    source: Path,
+    staged_source: Path,
+    *,
+    checkout: Path,
+    packages: list[dict[str, str]],
+    closure: set[str],
+    root_name: str,
+) -> tuple[StagedLakePromotion, ...]:
+    """Validate every staged package before any canonical state is replaced."""
+    canonical_by_name = {package["name"]: package for package in packages}
+    staged_by_name = {package["name"]: package for package in manifest_packages(staged_source)}
+    if set(staged_by_name) != closure:
+        raise VerificationError("trusted-cache staged package mapping is incomplete")
+    for name in sorted(closure):
+        canonical = canonical_by_name.get(name)
+        staged = staged_by_name[name]
+        if canonical is None or (
+            canonical["repository"].lower() != staged["repository"].lower()
+            or canonical["revision"] != staged["revision"]
+        ):
+            raise VerificationError(
+                f"trusted-cache staged package mapping changed: {name!r}"
+            )
+
+    staged_root_package = staged_by_name.get(root_name)
+    if staged_root_package is None:
+        raise VerificationError("trusted-cache staged root package is missing")
+    staged_root = package_checkout(
+        staged_source, staged_root_package, checkout=staged_source
+    )
+    staged_links = staged_root / ".lake" / "packages"
+    if staged_links.is_symlink() or not staged_links.is_dir():
+        raise VerificationError("trusted-cache staged package links are invalid")
+    expected_links = {
+        package["name"]: package for package in manifest_packages(staged_root)
+    }
+    if set(path.name for path in staged_links.iterdir()) != set(expected_links):
+        raise VerificationError("trusted-cache staged package links changed")
+    for name, expected in expected_links.items():
+        link = staged_links / name
+        actual = staged_by_name.get(name)
+        if actual is None or (
+            actual["repository"].lower() != expected["repository"].lower()
+            or actual["revision"] != expected["revision"]
+        ):
+            raise VerificationError(
+                f"trusted-cache staged dependency mapping changed: {name!r}"
+            )
+        target = package_checkout(staged_source, actual, checkout=staged_source)
+        if not link.is_symlink() or link.resolve(strict=True) != target.resolve(strict=True):
+            raise VerificationError(
+                f"trusted-cache staged dependency link changed: {name!r}"
+            )
+
+    promotions: list[StagedLakePromotion] = []
+    for name in sorted(closure):
+        canonical_package = canonical_by_name.get(name)
+        staged_package = staged_by_name.get(name)
+        if canonical_package is None or staged_package is None:
+            raise VerificationError(f"trusted-cache promotion package is missing: {name!r}")
+        canonical_dir = package_checkout(source, canonical_package, checkout=checkout)
+        staged_dir = package_checkout(staged_source, staged_package, checkout=staged_source)
+        canonical_lake = canonical_dir / ".lake"
+        staged_lake = staged_dir / ".lake"
+        for lake, field in ((canonical_lake, "canonical"), (staged_lake, "staged")):
+            if lake.is_symlink() or not lake.is_dir():
+                raise VerificationError(f"{field} trusted package Lake root is invalid: {name!r}")
+        canonical_entries = {path.name for path in canonical_lake.iterdir()}
+        if canonical_entries != {"build", "config"}:
+            raise VerificationError(
+                f"canonical trusted package Lake state is not fresh: {name!r}"
+            )
+        canonical_build = canonical_lake / "build"
+        staged_build = staged_lake / "build"
+        if canonical_build.is_symlink() or not canonical_build.is_dir():
+            raise VerificationError(f"canonical trusted package build is invalid: {name!r}")
+        if any(canonical_build.iterdir()):
+            raise VerificationError(f"canonical trusted package build is not fresh: {name!r}")
+        if staged_build.stat().st_dev != canonical_build.parent.stat().st_dev:
+            raise VerificationError(f"trusted-cache staging is on another filesystem: {name!r}")
+        _validate_staged_build_tree(staged_build, name)
+        metadata = _staged_lake_metadata(staged_lake, canonical_lake, name)
+        promotions.append(
+            StagedLakePromotion(name, staged_build, canonical_build, metadata)
+        )
+    return tuple(promotions)
+
+
+def promote_staged_lake_state(promotions: tuple[StagedLakePromotion, ...]) -> None:
+    """Move already-validated build and release state into canonical packages."""
+    for promotion in promotions:
+        promotion.canonical_build.rmdir()
+        os.replace(promotion.staged_build, promotion.canonical_build)
+        for source, destination in promotion.metadata:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
+
+
 def get_mathlib_cache(
     source: Path,
     *,
@@ -2922,9 +3280,10 @@ def get_mathlib_cache(
         raise VerificationError("Mathlib source was modified while configuring the workspace")
 
     # Run Mathlib as the workspace root so candidate Lake configuration never
-    # executes during the network-enabled phase. Symlinks expose only Mathlib's
-    # independently verified official closure, so trusted cache output is
-    # written into the exact flattened checkouts the candidate will later read.
+    # executes during the network-enabled phase. Its independently verified
+    # closure is copied into a disposable workspace first: the cache client can
+    # use arbitrary Lake release facets there without gaining write access to
+    # canonical package source or build state.
     closure = {
         mathlib["name"],
         *(dependency["name"] for dependency in manifest_packages(package_dir)),
@@ -2932,19 +3291,71 @@ def get_mathlib_cache(
     if not closure <= allowlist.keys():
         raise VerificationError("Mathlib cache closure is outside the verified allowlist")
     # Candidate configuration ran with these directories writable. Recreate
-    # every verified package's .lake tree immediately before the first
-    # networked Lake command, then expose only fresh build/config directories.
-    trusted_directories = reset_trusted_lake_state(
+    # every verified package's .lake tree before any staged output can be
+    # promoted back into it.
+    reset_trusted_lake_state(
         source,
         closure,
         packages=packages,
         checkout=checkout,
     )
+    cache_env = base_env.copy()
+    cache_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(
+        packages, manifest_packages(package_dir)
+    )
+
+    cache_available: bool | None
+    with tempfile.TemporaryDirectory(
+        prefix=".palomar-trusted-cache-", dir=checkout.parent
+    ) as staging_directory:
+        staged = stage_trusted_closure(
+            source,
+            checkout=checkout,
+            packages=packages,
+            closure=closure,
+            root_name=mathlib["name"],
+            destination=Path(staging_directory),
+        )
+        staged_home = staged.root_package / ".lake" / "config" / "home"
+        staged_temporary = staged.root_package / ".lake" / "config" / "tmp"
+        staged_home.mkdir(exist_ok=True)
+        staged_temporary.mkdir(exist_ok=True)
+        staged_env = cache_env.copy()
+        staged_env.update(
+            {
+                "HOME": str(staged_home.resolve()),
+                "TMPDIR": str(staged_temporary.resolve()),
+                "LEAN_ABORT_ON_PANIC": "1",
+            }
+        )
+        cache_result = sandboxed_run(
+            [str(lake), "exe", "cache", "get"],
+            cwd=staged.root_package,
+            environment=staged_env,
+            landrun=landrun,
+            writable_directories=list(staged.lake_roots),
+            readable_paths=sorted({staged.source, *system_readable_paths()}),
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+            unrestricted_network=True,
+            resource_properties=resource_properties,
+        )
+        cache_transcript = f"{cache_result.stdout}\n{cache_result.stderr}"
+        cache_available = mathlib_cache_availability(cache_transcript)
+        promotions = validate_staged_lake_promotions(
+            source,
+            staged.source,
+            checkout=checkout,
+            packages=packages,
+            closure=closure,
+            root_name=mathlib["name"],
+        )
+        promote_staged_lake_state(promotions)
 
     nested_packages = nested_package_links(
         source, package_dir, checkout=checkout, allowed_names=closure
     )
-    cache_writable = validate_writable_directories(checkout, trusted_directories)
     replay_writable_files: list[Path] = []
     proofwidgets = next((package for package in packages if package["name"] == "proofwidgets"), None)
     if proofwidgets and proofwidgets["name"] in closure:
@@ -2960,37 +3371,26 @@ def get_mathlib_cache(
         if lock_hash.is_symlink() or not lock_hash.is_file():
             raise VerificationError("ProofWidgets replay marker is not a regular file")
         replay_writable_files.append(lock_hash.resolve())
-    cache_env = base_env.copy()
-    cache_env["LAKE_PKG_URL_MAP"] = trusted_package_url_map(
-        packages, manifest_packages(package_dir)
+    cache_writable = validate_writable_directories(
+        checkout,
+        trusted_lake_directories(source, closure, checkout=checkout),
     )
     home = package_dir / ".lake" / "config" / "home"
     temporary = package_dir / ".lake" / "config" / "tmp"
     home.mkdir(exist_ok=True)
     temporary.mkdir(exist_ok=True)
     cache_env.update(
-        {"HOME": str(home.resolve()), "TMPDIR": str(temporary.resolve()), "LEAN_ABORT_ON_PANIC": "1"}
+        {
+            "HOME": str(home.resolve()),
+            "TMPDIR": str(temporary.resolve()),
+            "LEAN_ABORT_ON_PANIC": "1",
+        }
     )
     try:
-        cache_result = sandboxed_run(
-            [str(lake), "exe", "cache", "get"],
-            cwd=package_dir,
-            environment=cache_env,
-            landrun=landrun,
-            writable_directories=cache_writable,
-            readable_paths=readable_paths,
-            executable_paths=executable_paths,
-            tools=tools,
-            timeout=EXECUTION_BUDGET_SECONDS,
-            unrestricted_network=True,
-            resource_properties=resource_properties,
-        )
-        cache_transcript = f"{cache_result.stdout}\n{cache_result.stderr}"
-        cache_available = mathlib_cache_availability(cache_transcript)
-        # Replay the trusted cache while the high-trust Mathlib closure
-        # is still the only writable package surface. Lake records local hash
-        # metadata during replay; creating it here prevents a qualified root
-        # from later needing write access to Mathlib or its dependencies.
+        # Replay only the fully validated staged state in the canonical closure.
+        # Lake records local hash metadata during replay; creating it here
+        # prevents a qualified root from later needing write access to Mathlib
+        # or its dependencies.
         sandboxed_run(
             [str(lake), "build"],
             cwd=package_dir,

@@ -85,26 +85,39 @@ worktree is clean. In ordinary verification, the package allowlist and its
 official revisions were established earlier from the submitted and Mathlib
 manifests; the compatibility fixture exercises the same function against its
 checked repository and manifest. After those checks, the verifier deletes and
-recreates each `.lake` tree with only empty `build` and `config` directories
-for every package in Mathlib's verified official closure. This second reset
-discards ignored files written by earlier candidate Lake elaboration and
-occurs immediately before the verifier creates the closure links and enables
-cache networking.
+recreates each canonical `.lake` tree with only empty `build` and `config`
+directories for every package in Mathlib's verified official closure. This
+second reset discards ignored files written by earlier candidate Lake
+elaboration. It then creates a disposable sibling workspace containing a
+hard-linked, read-only copy of exactly those verified package sources and fresh
+Lake state.
 
-The verifier then makes the selected Mathlib package, not the submitted
-project, the Lake workspace root and runs `lake exe cache get` inside the
-combined Landrun/systemd boundary. The submitted project's Lakefile is not
-elaborated in that network-enabled phase. Landrun and the transient systemd
-unit forward only the named sandbox variables to the payload; those names do
-not include GitHub, Azure, AWS, or Cloudflare credentials, and the workflow
-supplies no cache credential. The network-enabled command can write only the
-fresh `build` and `config` directories in the verified Mathlib closure; the
-source trees and verifier-created closure links remain read-only. The selected
-Mathlib client chooses its configured official download backend. After
-download, the verifier builds the
-official closure with network disabled before it grants the submitted project
-access to those compiled outputs. The checked cold-build route plants
-cache executables in Mathlib and one closure dependency after materialization,
+The verifier then makes the staged Mathlib package, not the submitted project,
+the Lake workspace root and runs `lake exe cache get` inside the combined
+Landrun/systemd boundary. The submitted project's Lakefile is not elaborated in
+that network-enabled phase. Landrun and the transient systemd unit forward only
+the named sandbox variables to the payload; those names do not include GitHub,
+Azure, AWS, or Cloudflare credentials, and the workflow supplies no cache
+credential. The network-enabled command can write complete `.lake` roots only
+inside the disposable closure; staged source and canonical packages remain
+read-only. This accommodates package-defined Lake release facets without
+granting a filename- or package-specific canonical exception.
+
+After download, the verifier validates every staged package before changing
+canonical state. Package revisions and root dependency links must still match
+the authenticated closure. Build trees may contain directories, regular files,
+and relative symlinks whose entire resolution remains within the same build
+tree; special files and external hard links fail closed. Outside `build`,
+`config`, and disposable package links, only regular artifact files paired with
+an adjacent `<artifact>.trace` are promotable. Artifact names and nesting are
+otherwise generic. The verifier then moves validated build trees and artifact
+pairs into fresh canonical `.lake` roots on the same filesystem, deletes the
+disposable workspace, reconstructs the exact closure links, and builds the
+official closure with network disabled. Canonical replay can write only
+`build` and `config` (plus the already documented exact ProofWidgets lock-hash
+marker); it cannot create new release artifacts beside them. Only after replay
+succeeds can the submitted project read the compiled outputs. The checked
+cold-build route plants cache executables in Mathlib and one closure dependency after materialization,
 requires neither payload to survive the real cache and replay phases, and
 asserts both paths are clean at the network-enabled invocation. The same route
 separately plants executable and compiled output in its qualified root, as
