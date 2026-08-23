@@ -66,6 +66,17 @@ COMPILED_ARTIFACT_SUFFIXES = {
 # The module system's sidecars are double-suffixed, so `Path.suffix` reports
 # `.private`/`.server` and the table above cannot match them on its own.
 COMPILED_ARTIFACT_NAME_SUFFIXES = (".olean.private", ".olean.server")
+MAX_STAGED_LAKE_METADATA_FILES = 512
+MAX_STAGED_LAKE_METADATA_BYTES = 8 * 1024**3
+STAGED_LAKE_CONTROL_NAMES = {
+    "lake-manifest.json",
+    "lakefile.ilean",
+    "lakefile.lean",
+    "lakefile.olean",
+    "lakefile.toml",
+    "lean-toolchain",
+}
+STAGED_LAKE_CONTROL_DIRECTORIES = {"build", "config", "packages"}
 # A Lean toolchain, as a comparable version. Release candidates sort before the
 # release they lead to, so v4.31.0-rc2 < v4.31.0, and anything that does not
 # parse is refused rather than guessed at.
@@ -2861,6 +2872,15 @@ class StagedTrustedClosure:
     source: Path
     root_package: Path
     lake_roots: tuple[Path, ...]
+    source_snapshots: tuple[TrustedSourceSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class TrustedSourceSnapshot:
+    """Filesystem identity of one canonical or staged source tree."""
+
+    root: Path
+    entries: tuple[tuple[str, tuple[Any, ...]], ...]
 
 
 @dataclass(frozen=True)
@@ -2879,6 +2899,78 @@ class TrustedReplayWorkspace:
 
     source: Path
     lake_root: Path
+
+
+def _trusted_source_snapshot(root: Path) -> TrustedSourceSnapshot:
+    """Record source identity, excluding the intentionally mutable top-level .lake."""
+    entries: list[tuple[str, tuple[Any, ...]]] = []
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        directories[:] = [directory for directory in directories if directory != ".lake"]
+        for name in [*directories, *filenames]:
+            path = current_path / name
+            info = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISLNK(info.st_mode):
+                kind = "symlink"
+                target: str | None = os.readlink(path)
+                if name in directories:
+                    directories.remove(name)
+            elif stat.S_ISDIR(info.st_mode):
+                kind = "directory"
+                target = None
+            elif stat.S_ISREG(info.st_mode):
+                kind = "file"
+                target = None
+            else:
+                raise VerificationError("trusted package source contains a special file")
+            entries.append(
+                (
+                    relative,
+                    (
+                        kind,
+                        info.st_dev,
+                        info.st_ino,
+                        info.st_mode,
+                        info.st_nlink,
+                        info.st_size,
+                        info.st_mtime_ns,
+                        info.st_ctime_ns,
+                        target,
+                    ),
+                )
+            )
+    return TrustedSourceSnapshot(root.resolve(), tuple(sorted(entries)))
+
+
+def _validate_staged_source_copy(
+    canonical: TrustedSourceSnapshot, staged: TrustedSourceSnapshot, name: str
+) -> None:
+    """Require staging to preserve structure and hard-link every regular source file."""
+    canonical_entries = dict(canonical.entries)
+    staged_entries = dict(staged.entries)
+    if canonical_entries.keys() != staged_entries.keys():
+        raise VerificationError(f"staged trusted package source is incomplete: {name!r}")
+    for relative, canonical_info in canonical_entries.items():
+        staged_info = staged_entries[relative]
+        canonical_kind = canonical_info[0]
+        if canonical_kind != staged_info[0] or canonical_info[-1] != staged_info[-1]:
+            raise VerificationError(f"staged trusted package source changed: {name!r}")
+        if canonical_kind == "file" and canonical_info[1:3] != staged_info[1:3]:
+            raise VerificationError(
+                f"staged trusted package source file was not hard-linked: {name!r}"
+            )
+
+
+def validate_trusted_source_snapshots(
+    snapshots: tuple[TrustedSourceSnapshot, ...],
+) -> None:
+    """Recheck canonical and hard-linked staged sources after networked execution."""
+    for snapshot in snapshots:
+        if _trusted_source_snapshot(snapshot.root).entries != snapshot.entries:
+            raise VerificationError(
+                "trusted package source changed during the network-enabled cache phase"
+            )
 
 
 def stage_trusted_closure(
@@ -2900,6 +2992,7 @@ def stage_trusted_closure(
     staged_packages = destination / ".lake" / "packages"
     staged_packages.mkdir(parents=True)
     manifest: list[dict[str, str]] = []
+    source_snapshots: list[TrustedSourceSnapshot] = []
     for name in sorted(closure):
         package = by_name.get(name)
         if package is None:
@@ -2923,6 +3016,10 @@ def stage_trusted_closure(
             ignore=shutil.ignore_patterns(".lake"),
             copy_function=os.link,
         )
+        canonical_snapshot = _trusted_source_snapshot(canonical)
+        staged_snapshot = _trusted_source_snapshot(staged)
+        _validate_staged_source_copy(canonical_snapshot, staged_snapshot, name)
+        source_snapshots.extend((canonical_snapshot, staged_snapshot))
         if (staged / ".git").is_symlink() or not (staged / ".git").is_dir():
             raise VerificationError(f"staged trusted package has no real Git metadata: {name!r}")
         manifest.append(
@@ -2975,7 +3072,9 @@ def stage_trusted_closure(
                 f"staged trusted package Lake root escapes its boundary: {name!r}"
             ) from error
         lake_roots.append(resolved)
-    return StagedTrustedClosure(destination.resolve(), root.resolve(), tuple(lake_roots))
+    return StagedTrustedClosure(
+        destination.resolve(), root.resolve(), tuple(lake_roots), tuple(source_snapshots)
+    )
 
 
 def _resolve_staged_symlink(path: Path, root: Path) -> Path:
@@ -3054,6 +3153,7 @@ def _staged_lake_metadata(
     """Validate generic Lake archive/trace pairs outside generated directories."""
     files: dict[pathlib.PurePosixPath, Path] = {}
     directories: set[pathlib.PurePosixPath] = set()
+    total_bytes = 0
     for expected in ("build", "config"):
         path = staged_lake / expected
         if path.is_symlink() or not path.is_dir():
@@ -3084,11 +3184,20 @@ def _staged_lake_metadata(
                 )
             relative = pathlib.PurePosixPath(path.relative_to(staged_lake).as_posix())
             files[relative] = path
+            total_bytes += info.st_size
+            if (
+                len(files) > MAX_STAGED_LAKE_METADATA_FILES
+                or total_bytes > MAX_STAGED_LAKE_METADATA_BYTES
+            ):
+                raise VerificationError(
+                    f"staged trusted package Lake metadata exceeds its limit: {name!r}"
+                )
 
     archives = {
         relative
         for relative in files
-        if relative.with_name(relative.name + ".trace") in files
+        if not relative.name.endswith(".trace")
+        and relative.with_name(relative.name + ".trace") in files
     }
     expected = {
         *archives,
@@ -3098,6 +3207,18 @@ def _staged_lake_metadata(
         raise VerificationError(
             f"staged trusted package Lake metadata is not paired archive state: {name!r}"
         )
+    for archive in archives:
+        lowered_name = archive.name.lower()
+        if (
+            any(part.lower() in STAGED_LAKE_CONTROL_DIRECTORIES for part in archive.parts[:-1])
+            or lowered_name in STAGED_LAKE_CONTROL_DIRECTORIES
+            or lowered_name in STAGED_LAKE_CONTROL_NAMES
+            or Path(lowered_name).suffix in COMPILED_ARTIFACT_SUFFIXES - {".trace"}
+            or lowered_name.endswith(COMPILED_ARTIFACT_NAME_SUFFIXES)
+        ):
+            raise VerificationError(
+                f"staged trusted package Lake metadata is control-plane state: {name!r}"
+            )
     required_directories = {
         parent
         for relative in files
@@ -3442,6 +3563,7 @@ def get_mathlib_cache(
         )
         cache_transcript = f"{cache_result.stdout}\n{cache_result.stderr}"
         cache_available = mathlib_cache_availability(cache_transcript)
+        validate_trusted_source_snapshots(staged.source_snapshots)
         promotions = validate_staged_lake_promotions(
             source,
             staged.source,

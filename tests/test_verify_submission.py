@@ -103,8 +103,8 @@ class VerifySubmissionTests(unittest.TestCase):
                 (lake / "config").mkdir()
             nested = staged / "release" / "web"
             nested.mkdir(parents=True)
-            archive = nested / "arbitrary.bundle.trace"
-            trace = nested / "arbitrary.bundle.trace.trace"
+            archive = nested / "arbitrary.bundle"
+            trace = nested / "arbitrary.bundle.trace"
             archive.write_bytes(b"archive")
             trace.write_bytes(b"trace")
 
@@ -113,10 +113,33 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertEqual(
                 {source.relative_to(staged).as_posix() for source, _ in metadata},
                 {
+                    "release/web/arbitrary.bundle",
                     "release/web/arbitrary.bundle.trace",
-                    "release/web/arbitrary.bundle.trace.trace",
                 },
             )
+
+    def test_staged_lake_metadata_rejects_control_state_and_resource_excess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "staged" / ".lake"
+            canonical = root / "canonical" / ".lake"
+            for lake in (staged, canonical):
+                (lake / "build").mkdir(parents=True)
+                (lake / "config").mkdir()
+            (staged / "lakefile.olean").write_bytes(b"compiled config")
+            (staged / "lakefile.olean.trace").write_bytes(b"trace")
+            with self.assertRaisesRegex(VerificationError, "control-plane state"):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
+
+            (staged / "lakefile.olean").unlink()
+            (staged / "lakefile.olean.trace").unlink()
+            (staged / "release.tar.gz").write_bytes(b"archive")
+            (staged / "release.tar.gz.trace").write_bytes(b"trace")
+            with (
+                mock.patch.object(verifier, "MAX_STAGED_LAKE_METADATA_FILES", 1),
+                self.assertRaisesRegex(VerificationError, "exceeds its limit"),
+            ):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
 
     def test_staged_lake_metadata_rejects_unpaired_or_linked_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2831,6 +2854,7 @@ review:
                 if kwargs.get("unrestricted_network", False):
                     staged_mathlib = kwargs["cwd"]
                     self.assertNotEqual(staged_mathlib, mathlib)
+                    self.assertNotIn(source.resolve(), kwargs["readable_paths"])
                     staged_packages = staged_mathlib.parent
                     self.assertEqual(
                         set(kwargs["writable_directories"]),
@@ -2958,6 +2982,38 @@ review:
                 )
             self.assertEqual(mutated_sandbox.call_count, 1)
             self.assertFalse((batteries / ".lake" / "release").exists())
+
+            def mutate_hardlinked_source(command, **kwargs):
+                if kwargs.get("unrestricted_network", False):
+                    (mathlib / "lakefile.lean").write_text("package changed\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=mutate_hardlinked_source,
+                ) as source_mutation_sandbox,
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "source changed during the network-enabled cache phase",
+                ),
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(source_mutation_sandbox.call_count, 1)
+            (mathlib / "lakefile.lean").write_text("package mathlib\n")
 
             protected = mathlib / ".lake" / "config" / "must-survive-refusal"
             protected.write_text("protected")

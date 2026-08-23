@@ -105,13 +105,17 @@ granting a filename- or package-specific canonical exception.
 
 After download, the verifier validates every staged package before changing
 canonical state. Package revisions and root dependency links must still match
-the authenticated closure. Build trees may contain directories, regular files,
-and relative symlinks whose entire resolution remains within the same build
-tree; special files and external hard links fail closed. Outside `build`,
-`config`, and disposable package links, only regular artifact files paired with
-an adjacent `<artifact>.trace` are promotable. Artifact names and nesting are
-otherwise generic. The verifier then moves validated build trees and artifact
-pairs into fresh canonical `.lake` roots on the same filesystem, deletes the
+the authenticated closure. The verifier also rechecks the filesystem identity
+of every canonical and hard-linked staged source entry, including ignored
+source, after the network-enabled process exits. Build trees may contain
+directories, regular files, and relative symlinks whose entire resolution
+remains within the same build tree; special files and external hard links fail
+closed. Outside `build`, `config`, and disposable package links, only bounded
+regular artifact files paired with an adjacent `<artifact>.trace` are
+promotable. Names and nesting remain package-generic, but trace chains,
+compiled artifacts, and Lake control-plane names or directories are refused.
+The verifier then moves each validated build tree and artifact file atomically
+into fresh canonical `.lake` roots on the same filesystem, deletes the
 disposable workspace, reconstructs the exact closure links, and builds the
 official closure with network disabled. It also builds an empty,
 verifier-authored synthetic root whose manifest links the same canonical
