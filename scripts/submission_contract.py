@@ -99,6 +99,9 @@ GITHUB_LOGIN_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
 )
 ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
+ORCID_URL_RE = re.compile(
+    r"^https://orcid\.org/(?P<identifier>[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4})/?$"
+)
 AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
@@ -296,6 +299,9 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
         orcid = person.get("orcid")
         if orcid is not None:
             identifier = _required_text(orcid, f"{item_path}.orcid").strip()
+            url_match = ORCID_URL_RE.fullmatch(identifier)
+            if url_match is not None:
+                identifier = url_match.group("identifier")
             if not ORCID_RE.fullmatch(identifier):
                 raise VerificationError(
                     f"formalization.yaml field {item_path}.orcid is invalid"
@@ -843,6 +849,8 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             canonical = field or detected
             if canonical and canonical.startswith("sources"):
                 canonical = "sources"
+            elif canonical and canonical.startswith("project.authors"):
+                canonical = "project.authors"
             elif canonical and canonical.startswith("automation.methods"):
                 canonical = "automation.methods"
             issues.append(
@@ -871,7 +879,16 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             project.get("description"), "project.description", maximum=10_000
         )
     )
-    check(lambda: _required_people(project.get("authors"), "project.authors"))
+    def check_project_authors() -> None:
+        raw_authors = project.get("authors")
+        authors = _person_records(raw_authors, "project.authors", required=True)
+        # Preserve the submitted list shape while making accepted ORCID URLs
+        # canonical for every later consumer of this parsed document.
+        for raw, canonical in zip(raw_authors, authors, strict=True):
+            if isinstance(raw, dict) and "orcid" in canonical:
+                raw["orcid"] = canonical["orcid"]
+
+    check(check_project_authors)
     check(lambda: _required_text(project.get("license"), "project.license"))
     maintainers = project.get("responsible_maintainers")
     if "responsible_maintainers" not in project and "responsible_maintainer" in project:
