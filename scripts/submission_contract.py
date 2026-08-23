@@ -293,7 +293,7 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
             login = _required_text(github, f"{item_path}.github").strip().removeprefix("@")
             if not GITHUB_LOGIN_RE.fullmatch(login):
                 raise VerificationError(
-                    f"formalization.yaml field {item_path}.github is invalid"
+                    f"formalization.yaml field {item_path}.github must be a GitHub login"
                 )
             record["github"] = login
         orcid = person.get("orcid")
@@ -304,7 +304,8 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
                 identifier = url_match.group("identifier")
             if not ORCID_RE.fullmatch(identifier):
                 raise VerificationError(
-                    f"formalization.yaml field {item_path}.orcid is invalid"
+                    f"formalization.yaml field {item_path}.orcid must be a bare ORCID "
+                    "or an https://orcid.org URL"
                 )
             record["orcid"] = identifier
         records.append(record)
@@ -849,8 +850,6 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             canonical = field or detected
             if canonical and canonical.startswith("sources"):
                 canonical = "sources"
-            elif canonical and canonical.startswith("project.authors"):
-                canonical = "project.authors"
             elif canonical and canonical.startswith("automation.methods"):
                 canonical = "automation.methods"
             issues.append(
@@ -879,16 +878,7 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             project.get("description"), "project.description", maximum=10_000
         )
     )
-    def check_project_authors() -> None:
-        raw_authors = project.get("authors")
-        authors = _person_records(raw_authors, "project.authors", required=True)
-        # Preserve the submitted list shape while making accepted ORCID URLs
-        # canonical for every later consumer of this parsed document.
-        for raw, canonical in zip(raw_authors, authors, strict=True):
-            if isinstance(raw, dict) and "orcid" in canonical:
-                raw["orcid"] = canonical["orcid"]
-
-    check(check_project_authors)
+    check(lambda: _person_records(project.get("authors"), "project.authors", required=True))
     check(lambda: _required_text(project.get("license"), "project.license"))
     maintainers = project.get("responsible_maintainers")
     if "responsible_maintainers" not in project and "responsible_maintainer" in project:
