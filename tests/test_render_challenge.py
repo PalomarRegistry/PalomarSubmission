@@ -26,6 +26,7 @@ from scripts.render_challenge import (
     parsed_challenge_metadata,
     parser,
     prepare,
+    prepare_build_metadata_files,
     prepare_workspace,
     sanitize_bundle,
     static_html_sanitize,
@@ -307,6 +308,68 @@ class RenderChallengeTests(unittest.TestCase):
 
         self.assertEqual(result, {"requested": 0, "downloaded": 0, "bytes": 0})
         discover.assert_not_called()
+
+    def write_manifest(self, root: Path, packages: list[dict[str, object]]) -> None:
+        (root / "lake-manifest.json").write_text(
+            json.dumps({"version": "1.2.0", "packages": packages}),
+            encoding="utf-8",
+        )
+
+    def test_a_project_without_proofwidgets_grants_no_build_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_manifest(root, [])
+
+            self.assertEqual(prepare_build_metadata_files(root), ())
+
+    def test_proofwidgets_build_sidecars_are_created_and_granted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_manifest(
+                root,
+                [
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": "0" * 40,
+                    }
+                ],
+            )
+            package = root / ".lake" / "packages" / "proofwidgets" / "widget" / "js"
+            package.mkdir(parents=True)
+
+            granted = prepare_build_metadata_files(root)
+
+            self.assertEqual(
+                granted,
+                (
+                    (root / ".lake/packages/proofwidgets/widget/package-lock.json.hash").resolve(),
+                    (root / ".lake/packages/proofwidgets/widget/js/lake.trace.hash").resolve(),
+                ),
+            )
+            for path in granted:
+                self.assertEqual(path.read_bytes(), b"")
+
+    def test_an_impostor_proofwidgets_package_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_manifest(
+                root,
+                [
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/attacker/ProofWidgets4",
+                        "rev": "0" * 40,
+                    }
+                ],
+            )
+
+            with self.assertRaises(VerificationError) as raised:
+                prepare_build_metadata_files(root)
+
+        self.assertIn("canonical pinned ProofWidgets", str(raised.exception))
 
     def renderer_probe_paths(self, root: Path) -> dict[str, Path]:
         """Lay out the probe set the renderer's confinement call owns."""
