@@ -93,6 +93,109 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertTrue(verifier.mathlib_cache_availability("No files to download"))
         self.assertIsNone(verifier.mathlib_cache_availability("older client output"))
 
+    def test_staged_lake_metadata_accepts_generic_nested_archive_pairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "staged" / ".lake"
+            canonical = root / "canonical" / ".lake"
+            for lake in (staged, canonical):
+                (lake / "build").mkdir(parents=True)
+                (lake / "config").mkdir()
+            nested = staged / "release" / "web"
+            nested.mkdir(parents=True)
+            archive = nested / "arbitrary.bundle"
+            trace = nested / "arbitrary.bundle.trace"
+            archive.write_bytes(b"archive")
+            trace.write_bytes(b"trace")
+
+            metadata = verifier._staged_lake_metadata(staged, canonical, "generic")
+
+            self.assertEqual(
+                {source.relative_to(staged).as_posix() for source, _ in metadata},
+                {
+                    "release/web/arbitrary.bundle",
+                    "release/web/arbitrary.bundle.trace",
+                },
+            )
+
+    def test_staged_lake_metadata_rejects_control_state_and_resource_excess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "staged" / ".lake"
+            canonical = root / "canonical" / ".lake"
+            for lake in (staged, canonical):
+                (lake / "build").mkdir(parents=True)
+                (lake / "config").mkdir()
+            (staged / "lakefile.olean").write_bytes(b"compiled config")
+            (staged / "lakefile.olean.trace").write_bytes(b"trace")
+            with self.assertRaisesRegex(VerificationError, "control-plane state"):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
+
+            (staged / "lakefile.olean").unlink()
+            (staged / "lakefile.olean.trace").unlink()
+            (staged / "release.tar.gz").write_bytes(b"archive")
+            (staged / "release.tar.gz.trace").write_bytes(b"trace")
+            with (
+                mock.patch.object(verifier, "MAX_STAGED_LAKE_METADATA_FILES", 1),
+                self.assertRaisesRegex(VerificationError, "exceeds its limit"),
+            ):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
+
+    def test_staged_lake_metadata_rejects_unpaired_or_linked_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "staged" / ".lake"
+            canonical = root / "canonical" / ".lake"
+            for lake in (staged, canonical):
+                (lake / "build").mkdir(parents=True)
+                (lake / "config").mkdir()
+            archive = staged / "release.tar.gz"
+            archive.write_bytes(b"archive")
+            with self.assertRaisesRegex(VerificationError, "paired archive state"):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
+
+            trace = staged / "release.tar.gz.trace"
+            trace.write_bytes(b"trace")
+            outside = root / "outside"
+            outside.write_bytes(b"outside")
+            archive.unlink()
+            os.link(outside, archive)
+            with self.assertRaisesRegex(VerificationError, "not a regular file"):
+                verifier._staged_lake_metadata(staged, canonical, "generic")
+
+    def test_staged_build_validation_rejects_escape_and_external_hardlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "build"
+            build.mkdir()
+            outside = root / "outside"
+            outside.write_bytes(b"outside")
+            (build / "escape").symlink_to(Path("../outside"))
+            with self.assertRaisesRegex(VerificationError, "escaping symlink"):
+                verifier._validate_staged_build_tree(build, "generic")
+
+            (build / "escape").unlink()
+            os.link(outside, build / "linked")
+            with self.assertRaisesRegex(VerificationError, "external hard link"):
+                verifier._validate_staged_build_tree(build, "generic")
+
+            (build / "linked").unlink()
+            os.mkfifo(build / "fifo")
+            with self.assertRaisesRegex(VerificationError, "special file"):
+                verifier._validate_staged_build_tree(build, "generic")
+
+    def test_staged_build_validation_allows_contained_relative_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory) / "build"
+            target = build / "lib" / "artifact"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"artifact")
+            links = build / "bin" / "nested"
+            links.mkdir(parents=True)
+            (links / "artifact").symlink_to(Path("../../lib/artifact"))
+
+            verifier._validate_staged_build_tree(build, "generic")
+
     def test_manifest_packages_directory_does_not_widen_to_an_ancestor_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             ancestor = Path(directory)
@@ -1060,6 +1163,111 @@ review:
                     {"name": "Evgenii Khukhro", "role": "editor"},
                 ],
             )
+
+    def test_project_author_orcid_forms_are_accepted_during_preflight(self):
+        document = """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      orcid: ORCID_VALUE
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+"""
+        for orcid in (
+            "0000-0002-0201-310X",
+            "https://orcid.org/0000-0002-0201-310X",
+            "https://orcid.org/0000-0002-0201-310X/",
+        ):
+            with self.subTest(orcid=orcid), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "formalization.yaml"
+                path.write_text(document.replace("ORCID_VALUE", orcid), encoding="utf-8")
+                metadata = load_formalization_metadata(path)
+                self.assertEqual(metadata["project"]["authors"][0]["orcid"], orcid)
+
+    def test_project_author_invalid_orcid_is_rejected_during_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      orcid: https://example.com/0000-0002-0201-310X
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FormalizationValidationError) as caught:
+                load_formalization_metadata(path)
+
+        issue = next(issue for issue in caught.exception.issues if issue.field)
+        self.assertEqual(issue.field, "project.authors[0].orcid")
+        self.assertIn("must be a bare ORCID or an https://orcid.org URL", str(issue))
+        self.assertFalse(issue.repairable)
+
+    def test_project_author_invalid_github_login_is_rejected_during_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+version: v0.4
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      github: https://github.com/ada
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: A source theorem
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FormalizationValidationError) as caught:
+                load_formalization_metadata(path)
+
+        issue = next(issue for issue in caught.exception.issues if issue.field)
+        self.assertEqual(issue.field, "project.authors[0].github")
+        self.assertFalse(issue.repairable)
 
     def test_legacy_person_aliases_pass_full_metadata_loading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2319,6 +2527,125 @@ review:
         diagnostic = VerificationError("plain failure").diagnostic("comparator")
         self.assertEqual(diagnostic["explanation"], diagnostic["summary"])
 
+    def test_a_palomar_owned_stage_makes_the_same_commit_retryable(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("trusted cache failed", repairable=True),
+            stage="trusted-cache",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertTrue(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Retry the same commit", diagnostic["next_action"])
+
+    def test_a_submitter_owned_stage_keeps_repository_changes_nonretryable(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("candidate source failed"),
+            stage="candidate-setup",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Update the repository", diagnostic["next_action"])
+
+    def test_an_explicit_palomar_owner_rewrites_submitter_actionability(self):
+        report = {}
+        verifier.report_diagnostic(
+            report,
+            VerificationError("trusted tool changed", repairable=True),
+            stage="setup",
+            owner="palomar",
+        )
+
+        [diagnostic] = report["diagnostics"]
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertTrue(diagnostic["retryable"])
+        self.assertFalse(diagnostic["repairable"])
+        self.assertIn("Retry the same commit", diagnostic["next_action"])
+
+    def test_candidate_setup_failure_requires_repository_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            source = work / "source"
+            (source / ".git").mkdir(parents=True)
+            report_path = root / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "status": "pending",
+                        "errors": [],
+                        "warnings": [],
+                        "source": {},
+                    }
+                )
+            )
+            tools = []
+            for name in ("comparator", "lean4export", "landrun", "nanoda"):
+                tool = root / name
+                tool.touch()
+                tools.append(tool)
+            lean_prefix = root / "lean"
+            (lean_prefix / "bin").mkdir(parents=True)
+            for name in ("lean", "lake"):
+                (lean_prefix / "bin" / name).touch()
+            printenv = root / "printenv"
+            touch = root / "touch"
+            printenv.touch()
+            touch.touch()
+            commands = {
+                "lean": lean_prefix / "bin" / "lean",
+                "lake": lean_prefix / "bin" / "lake",
+                "printenv": printenv,
+                "touch": touch,
+            }
+            args = Namespace(
+                output=report_path,
+                work_dir=work,
+                comparator=tools[0],
+                lean4export=tools[1],
+                landrun=tools[2],
+                nanoda=tools[3],
+                comparator_commit="a" * 40,
+                landrun_commit="b" * 40,
+                nanoda_commit="c" * 40,
+                workflow_url="https://github.com/example/project/actions/runs/1",
+            )
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.shutil.which",
+                    side_effect=lambda name, **_kwargs: str(commands[name]),
+                ),
+                mock.patch(
+                    "scripts.verify_submission.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["lean", "--print-prefix"], 0, str(lean_prefix), ""
+                    ),
+                ),
+                mock.patch("scripts.verify_submission.ensure_lake_manifest", return_value=False),
+                mock.patch(
+                    "scripts.verify_submission.materialize_packages",
+                    side_effect=VerificationError("unsafe package name in Lake manifest"),
+                ),
+            ):
+                self.assertEqual(execute(args), 0)
+
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["stage"], "candidate-setup")
+            [diagnostic] = report["diagnostics"]
+            self.assertEqual(diagnostic["owner"], "submitter")
+            self.assertFalse(diagnostic["retryable"])
+            self.assertIn("Update the repository", diagnostic["next_action"])
+
     def test_submitted_lake_state_is_discarded(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)
@@ -2414,6 +2741,7 @@ review:
             mathlib = source / ".lake" / "packages" / "mathlib"
             mathlib.mkdir(parents=True)
             (mathlib / ".gitignore").write_text(".lake/\n")
+            (mathlib / "lakefile.lean").write_text("package mathlib\n")
             dependency_revision = "1" * 40
             (mathlib / "lake-manifest.json").write_text(
                 json.dumps(
@@ -2432,7 +2760,15 @@ review:
             )
             subprocess.run(["git", "init", "--quiet", mathlib], check=True)
             subprocess.run(
-                ["git", "-C", mathlib, "add", ".gitignore", "lake-manifest.json"],
+                [
+                    "git",
+                    "-C",
+                    mathlib,
+                    "add",
+                    ".gitignore",
+                    "lakefile.lean",
+                    "lake-manifest.json",
+                ],
                 check=True,
             )
             subprocess.run(
@@ -2491,6 +2827,7 @@ review:
                 )
             )
             batteries = source / ".lake" / "packages" / "batteries"
+            (batteries / ".git").mkdir(parents=True)
             poisons = []
             for package in (mathlib, batteries):
                 poison = package / ".lake" / "build" / "bin" / "cache"
@@ -2499,7 +2836,7 @@ review:
                 poison.chmod(0o755)
                 (package / ".lake" / "config").mkdir()
                 poisons.append(poison)
-            expected_writable = {
+            expected_replay_writable = {
                 (package / ".lake" / leaf).resolve()
                 for package in (mathlib, batteries)
                 for leaf in ("build", "config")
@@ -2515,8 +2852,38 @@ review:
                     command[-3:] == ["exe", "cache", "get"],
                 )
                 if kwargs.get("unrestricted_network", False):
+                    staged_mathlib = kwargs["cwd"]
+                    self.assertNotEqual(staged_mathlib, mathlib)
+                    self.assertNotIn(source.resolve(), kwargs["readable_paths"])
+                    staged_packages = staged_mathlib.parent
                     self.assertEqual(
-                        set(kwargs["writable_directories"]), expected_writable
+                        set(kwargs["writable_directories"]),
+                        {
+                            (staged_packages / name / ".lake").resolve()
+                            for name in ("mathlib", "batteries")
+                        },
+                    )
+                    self.assertFalse(
+                        (staged_packages / "mathlib" / ".lake" / "build" / "bin" / "cache").exists()
+                    )
+                    release = staged_packages / "batteries" / ".lake" / "release"
+                    release.mkdir()
+                    (release / "generic.bundle").write_bytes(b"archive")
+                    (release / "generic.bundle.trace").write_bytes(b"trace")
+                else:
+                    writable = set(kwargs["writable_directories"])
+                    self.assertTrue(expected_replay_writable <= writable)
+                    if kwargs["cwd"] == mathlib:
+                        self.assertEqual(writable, expected_replay_writable)
+                    else:
+                        self.assertEqual(len(writable - expected_replay_writable), 1)
+                        self.assertEqual(
+                            Path(kwargs["cwd"], "lakefile.toml").read_text().splitlines()[0],
+                            'name = "palomarTrustedCacheReplay"',
+                        )
+                    self.assertEqual(
+                        (batteries / ".lake" / "release" / "generic.bundle").read_bytes(),
+                        b"archive",
                     )
                 return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -2538,7 +2905,7 @@ review:
                     tools={},
                 )
 
-            self.assertEqual(sandbox.call_count, 2)
+            self.assertEqual(sandbox.call_count, 3)
 
             submitted_manifest = json.loads(
                 (source / "lake-manifest.json").read_text()
@@ -2580,9 +2947,73 @@ review:
                     executable_paths=[],
                     tools={},
                 )
-            self.assertEqual(alias_sandbox.call_count, 2)
+            self.assertEqual(alias_sandbox.call_count, 3)
             submitted_manifest["packages"][0]["url"] = canonical_mathlib_url
             (source / "lake-manifest.json").write_text(json.dumps(submitted_manifest))
+
+            def mutate_staged_mapping(command, **kwargs):
+                if kwargs.get("unrestricted_network", False):
+                    staged_mathlib = kwargs["cwd"]
+                    batteries_link = staged_mathlib / ".lake" / "packages" / "batteries"
+                    batteries_link.unlink()
+                    batteries_link.symlink_to(staged_mathlib, target_is_directory=True)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=mutate_staged_mapping,
+                ) as mutated_sandbox,
+                self.assertRaisesRegex(VerificationError, "dependency link changed"),
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(mutated_sandbox.call_count, 1)
+            self.assertFalse((batteries / ".lake" / "release").exists())
+
+            def mutate_hardlinked_source(command, **kwargs):
+                if kwargs.get("unrestricted_network", False):
+                    (mathlib / "lakefile.lean").write_text("package changed\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch(
+                    "scripts.verify_submission.sandboxed_run",
+                    side_effect=mutate_hardlinked_source,
+                ) as source_mutation_sandbox,
+                self.assertRaisesRegex(
+                    VerificationError,
+                    "source changed during the network-enabled cache phase",
+                ),
+            ):
+                verifier.get_mathlib_cache(
+                    source,
+                    checkout=source,
+                    base_env={"PATH": os.environ["PATH"]},
+                    allowlist={
+                        "mathlib": ("leanprover-community/mathlib4", "high"),
+                        "batteries": ("leanprover-community/mathlib4", "high"),
+                    },
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    readable_paths=[source],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertEqual(source_mutation_sandbox.call_count, 1)
+            (mathlib / "lakefile.lean").write_text("package mathlib\n")
 
             protected = mathlib / ".lake" / "config" / "must-survive-refusal"
             protected.write_text("protected")
@@ -3468,6 +3899,150 @@ review:
                 checkout=Path(directory),
                 base_env={"PATH": "/usr/bin"},
             )
+
+
+class RevisionReleaseTagTests(unittest.TestCase):
+    """Lake needs the tag naming a pinned revision to fetch a GitHub release."""
+
+    REV = "b" * 40
+    OTHER = "c" * 40
+
+    def _tags(self, *refs):
+        listing = "".join(f"{sha}\trefs/tags/{name}\n" for name, sha in refs)
+        with mock.patch(
+            "scripts.verify_submission.run",
+            return_value=subprocess.CompletedProcess(["git"], 0, listing, ""),
+        ):
+            return verifier.revision_release_tags(["git"], self.REV, env={})
+
+    def test_a_lightweight_tag_naming_the_revision_is_fetched(self):
+        self.assertEqual(self._tags(("v0.0.87", self.REV)), ["v0.0.87"])
+
+    def test_an_annotated_tag_is_matched_through_its_peeled_ref(self):
+        """The direct ref is the tag object, not the commit it names."""
+        self.assertEqual(
+            self._tags(("v0.0.87", "a" * 40), ("v0.0.87^{}", self.REV)),
+            ["v0.0.87"],
+        )
+
+    def test_a_tag_naming_another_revision_is_left_alone(self):
+        self.assertEqual(self._tags(("v0.0.88", self.OTHER)), [])
+        self.assertEqual(
+            self._tags(("v0.0.88", "a" * 40), ("v0.0.88^{}", self.OTHER)), []
+        )
+
+    def test_every_tag_naming_the_revision_is_returned_in_order(self):
+        self.assertEqual(
+            self._tags(
+                ("v0.0.87", self.REV),
+                ("v0.0.86", self.REV),
+                ("v0.0.88", self.OTHER),
+            ),
+            ["v0.0.86", "v0.0.87"],
+        )
+
+    def test_a_tag_carrying_a_lean_toolchain_suffix_is_accepted(self):
+        self.assertEqual(
+            self._tags(("v0.0.95+lean-v4.29.1", self.REV)), ["v0.0.95+lean-v4.29.1"]
+        )
+
+    def test_unsafe_tag_names_are_refused(self):
+        for name in ("../escape", "a//b", "broken.lock", "trailing/", "-dash", "with space"):
+            with self.subTest(name):
+                self.assertEqual(self._tags((name, self.REV)), [])
+
+    def test_non_tag_refs_are_ignored(self):
+        listing = f"{self.REV}\trefs/heads/main\n{self.REV}\trefs/tags/v1\n"
+        with mock.patch(
+            "scripts.verify_submission.run",
+            return_value=subprocess.CompletedProcess(["git"], 0, listing, ""),
+        ):
+            self.assertEqual(verifier.revision_release_tags(["git"], self.REV, env={}), ["v1"])
+
+
+class PackageTagMaterializationTests(unittest.TestCase):
+    """The tag naming a pinned revision reaches the dependency checkout."""
+
+    REV = "d" * 40
+
+    def test_materializing_a_git_package_fetches_its_release_tag(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            out = ""
+            if "ls-remote" in command:
+                out = f"{self.REV}\trefs/tags/v0.0.87\n"
+            return subprocess.CompletedProcess(command, 0, out, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "proofwidgets",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/proofwidgets4",
+                                "rev": self.REV,
+                            }
+                        ]
+                    }
+                )
+            )
+            with mock.patch("scripts.verify_submission.run", side_effect=fake_run):
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
+
+        fetches = [c for c in commands if "fetch" in c]
+        self.assertIn(
+            "+refs/tags/v0.0.87:refs/tags/v0.0.87",
+            [argument for command in fetches for argument in command],
+        )
+        # The tag is fetched only after the pinned revision itself.
+        revision_fetch = next(i for i, c in enumerate(commands) if "fetch" in c and self.REV in c)
+        tag_fetch = next(
+            i
+            for i, c in enumerate(commands)
+            if "fetch" in c and any(a.startswith("+refs/tags/") for a in c)
+        )
+        checkout = next(i for i, c in enumerate(commands) if "checkout" in c)
+        self.assertLess(revision_fetch, tag_fetch)
+        self.assertLess(tag_fetch, checkout)
+
+    def test_a_package_with_no_tag_at_its_revision_skips_the_extra_fetch(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "batteries",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/batteries",
+                                "rev": self.REV,
+                            }
+                        ]
+                    }
+                )
+            )
+            with mock.patch("scripts.verify_submission.run", side_effect=fake_run):
+                materialize_packages(
+                    source, checkout=source, base_env={"PATH": "/usr/bin"}
+                )
+
+        self.assertFalse([
+            c for c in commands if any(a.startswith("+refs/tags/") for a in c)
+        ])
 
 
 class SubmissionRequestTests(unittest.TestCase):

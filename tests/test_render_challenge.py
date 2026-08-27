@@ -17,6 +17,7 @@ from scripts.render_challenge import (
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
     artifact_manifest,
+    compatible_verso_toolchain,
     download_mathlib_cache,
     execute,
     extract_module_doc,
@@ -224,6 +225,22 @@ class RenderChallengeTests(unittest.TestCase):
     def test_zero_cache_downloads_skip_unpack_and_leave_source_build_to_follow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "mathlib",
+                                "type": "git",
+                                "url": "https://github.com/leanprover-community/mathlib4",
+                                "rev": "0" * 40,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             cache = root / ".lake" / "config" / "mathlib-cache"
             cache.mkdir(parents=True)
             with (
@@ -252,6 +269,45 @@ class RenderChallengeTests(unittest.TestCase):
                 )
         self.assertEqual(result, {"requested": 1, "downloaded": 0, "bytes": 0})
         sandbox.assert_not_called()
+
+    def test_a_project_without_mathlib_skips_cache_hydration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.2.0",
+                        "packages": [
+                            {
+                                "name": "verso",
+                                "type": "git",
+                                "url": "https://github.com/leanprover/verso",
+                                "rev": "0" * 40,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "scripts.render_challenge.discover_mathlib_cache_hashes"
+            ) as discover:
+                result = hydrate_mathlib_cache(
+                    root,
+                    trusted_work=root,
+                    environment={"HOME": str(root), "TMPDIR": str(root)},
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    writable_directories=[],
+                    readable_paths=[],
+                    executable_paths=[],
+                    tools={},
+                )
+
+        self.assertEqual(result, {"requested": 0, "downloaded": 0, "bytes": 0})
+        discover.assert_not_called()
 
     def renderer_probe_paths(self, root: Path) -> dict[str, Path]:
         """Lay out the probe set the renderer's confinement call owns."""
@@ -926,8 +982,8 @@ end Audit.Task
             "332773edafa3ac712ec3fba31d4c6ece2339693958873a9020a9be1bddb22538",
         )
 
-    def test_the_renderer_revision_is_derived_from_the_toolchain(self):
-        """No table to keep current: the tag is the toolchain's own version."""
+    def test_the_renderer_prefers_the_toolchains_exact_release(self):
+        """No table to keep current: first try the toolchain's own version."""
         with mock.patch(
             "scripts.render_challenge.resolve_release_commit",
             side_effect=lambda repo, tag: f"{repo}@{tag}",
@@ -937,6 +993,220 @@ end Audit.Task
                 "leanprover/verso@v4.31.0-rc2",
             )
         self.assertEqual(resolve.call_args.args, ("leanprover/verso", "v4.31.0-rc2"))
+
+    def test_a_stable_patch_release_falls_back_to_patch_zero(self):
+        missing = VerificationError(
+            "leanprover/verso has published no v4.32.2 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=[missing, "3" * 40],
+        ) as resolve:
+            self.assertEqual(
+                toolchain_verso_commit("leanprover/lean4:v4.32.2"),
+                "3" * 40,
+            )
+        self.assertEqual(
+            resolve.call_args_list,
+            [
+                mock.call("leanprover/verso", "v4.32.2"),
+                mock.call("leanprover/verso", "v4.32.0"),
+            ],
+        )
+
+    def test_release_candidates_do_not_fall_back(self):
+        missing = VerificationError(
+            "leanprover/verso has published no v4.32.0-rc3 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=missing,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.0-rc3")
+        self.assertIs(raised.exception, missing)
+        resolve.assert_called_once_with("leanprover/verso", "v4.32.0-rc3")
+
+    def test_missing_exact_and_patch_zero_tags_report_the_release_line(self):
+        exact_missing = VerificationError(
+            "leanprover/verso has published no v4.32.2 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        base_missing = VerificationError(
+            "leanprover/verso has published no v4.32.0 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=[exact_missing, base_missing],
+        ):
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.2")
+        self.assertEqual(raised.exception.code, "palomar.toolchain_release_missing")
+        self.assertEqual(raised.exception.owner, "palomar")
+        self.assertIn("neither v4.32.2 nor v4.32.0", str(raised.exception))
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_provider_lookup_failures_do_not_trigger_a_fallback(self):
+        unavailable = VerificationError(
+            "could not read leanprover/verso releases",
+            code="provider.release_lookup_failed",
+            owner="provider",
+            retryable=True,
+        )
+        with mock.patch(
+            "scripts.render_challenge.resolve_release_commit",
+            side_effect=unavailable,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                toolchain_verso_commit("leanprover/lean4:v4.32.2")
+        self.assertIs(raised.exception, unavailable)
+        resolve.assert_called_once_with("leanprover/verso", "v4.32.2")
+
+    def test_verso_patch_zero_is_compatible_with_a_stable_patch_release(self):
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.2",
+                "leanprover/lean4:v4.32.0",
+            )
+        )
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.2",
+                "leanprover/lean4:v4.32.2",
+            )
+        )
+        self.assertTrue(
+            compatible_verso_toolchain(
+                "leanprover/lean4:v4.32.0-rc2",
+                "leanprover/lean4:v4.32.0-rc2",
+            )
+        )
+        for verso in (
+            "leanprover/lean4:v4.31.0",
+            "leanprover/lean4:v4.32.1",
+            "leanprover/lean4:v4.32.0-rc2",
+            "leanprover/lean4:v4.33.0",
+            "nightly-2026-08-01",
+            "",
+        ):
+            with self.subTest(verso=verso):
+                self.assertFalse(
+                    compatible_verso_toolchain("leanprover/lean4:v4.32.2", verso)
+                )
+
+    def test_workspace_enforces_the_stable_patch_verso_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "Challenge.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (source / "Solution.lean").write_text(
+                "theorem headline : True := by trivial\n", encoding="utf-8"
+            )
+            (source / "comparator.json").write_text(
+                json.dumps(
+                    {
+                        "challenge_module": "Challenge",
+                        "solution_module": "Solution",
+                        "theorem_names": ["headline"],
+                        "definition_names": [],
+                        "permitted_axioms": [],
+                        "enable_nanoda": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (source / "lakefile.toml").write_text('name = "example"\n', encoding="utf-8")
+            (source / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+            )
+            (source / "lean-toolchain").write_text(
+                "leanprover/lean4:v4.32.2\n", encoding="utf-8"
+            )
+            work = root / "work"
+            work.mkdir()
+
+            def clone_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.32.0\n", encoding="utf-8"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+                )
+
+            with mock.patch(
+                "scripts.render_challenge.clone_commit", side_effect=clone_verso
+            ):
+                workspace = root / "workspace"
+                prepared = prepare_workspace(
+                    source,
+                    workspace,
+                    "3" * 40,
+                    work,
+                    AcceptedRenderPaths(
+                        project_path="",
+                        challenge_path="Challenge.lean",
+                        solution_path="Solution.lean",
+                        comparator_config_path="comparator.json",
+                        lakefile_path="lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
+                )
+
+            self.assertEqual(
+                (workspace / "lean-toolchain").read_text(encoding="utf-8").strip(),
+                "leanprover/lean4:v4.32.2",
+            )
+            manifest = json.loads((workspace / "lake-manifest.json").read_text(encoding="utf-8"))
+            verso = next(package for package in manifest["packages"] if package["name"] == "verso")
+            self.assertEqual(verso["rev"], "3" * 40)
+            self.assertEqual(prepared.project, workspace.resolve())
+
+            incompatible_work = root / "incompatible-work"
+            incompatible_work.mkdir()
+
+            def clone_incompatible_verso(_url, _commit, destination):
+                destination.mkdir()
+                (destination / "lean-toolchain").write_text(
+                    "leanprover/lean4:v4.31.0\n", encoding="utf-8"
+                )
+                (destination / "lake-manifest.json").write_text(
+                    json.dumps({"version": "1.2.0", "packages": []}), encoding="utf-8"
+                )
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.clone_commit",
+                    side_effect=clone_incompatible_verso,
+                ),
+                self.assertRaises(VerificationError) as raised,
+            ):
+                prepare_workspace(
+                    source,
+                    root / "incompatible-workspace",
+                    "4" * 40,
+                    incompatible_work,
+                    AcceptedRenderPaths(
+                        project_path="",
+                        challenge_path="Challenge.lean",
+                        solution_path="Solution.lean",
+                        comparator_config_path="comparator.json",
+                        lakefile_path="lakefile.toml",
+                        lean_toolchain_path="lean-toolchain",
+                    ),
+                )
+            self.assertEqual(raised.exception.code, "palomar.renderer_toolchain_mismatch")
+            self.assertEqual(raised.exception.owner, "palomar")
 
     def test_a_toolchain_below_the_minimum_is_refused(self):
         with self.assertRaisesRegex(VerificationError, "older than the minimum"):
@@ -1394,13 +1664,181 @@ data-binding="const-Example.headline" id="Example___headline">headline</span></c
 
     def test_static_html_rejects_a_missing_compared_declaration(self):
         html_text = "<!doctype html><html><head><base href=\"../\"></head><body></body></html>"
-        with self.assertRaisesRegex(VerificationError, "does not contain compared declaration"):
+        with self.assertRaisesRegex(
+            VerificationError, "compared declaration has no rendered anchor"
+        ) as raised:
             static_html_sanitize(
                 html_text,
                 "../palomar-sanitize.js",
                 "../palomar-verso.js",
                 ["Example.missing"],
             )
+        diagnostic = raised.exception.diagnostic("sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertIn("explicit source-level name", diagnostic["next_action"])
+
+    def test_static_html_reports_every_missing_compared_declaration(self):
+        html_text = """<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-Example.present" id="present">present</span>
+</body></html>"""
+        with self.assertRaises(VerificationError) as raised:
+            static_html_sanitize(
+                html_text,
+                "../palomar-sanitize.js",
+                "../palomar-verso.js",
+                ["Example.present", "Example.first", "Example.second"],
+            )
+        self.assertEqual(
+            raised.exception.declarations, ("Example.first", "Example.second")
+        )
+        self.assertEqual(raised.exception.total, 2)
+
+    def test_sanitizer_accepts_an_explicitly_named_instance_anchor(self):
+        declaration = "Example.instPartialOrderElement"
+        html_text = f'''<!doctype html><html><head><base href="../"></head><body>
+<span data-binding="const-{declaration}" id="Example___instPartialOrderElement">
+instPartialOrderElement</span></body></html>'''
+        sanitized = static_html_sanitize(
+            html_text,
+            "../palomar-sanitize.js",
+            "../palomar-verso.js",
+            [declaration],
+        )
+        self.assertIn("Example___instPartialOrderElement", sanitized)
+
+    def test_sanitizer_channel_keeps_its_submitter_diagnostic(self):
+        from scripts.render_challenge import (
+            ComparedDeclarationsNotRendered,
+            read_sanitize_diagnostic,
+            render_failure_diagnostic,
+            sanitize_diagnostic_document,
+        )
+
+        error = ComparedDeclarationsNotRendered(["Example.generated"])
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            channel.write_text(json.dumps(sanitize_diagnostic_document(error)))
+            recovered = read_sanitize_diagnostic(channel)
+        diagnostic = render_failure_diagnostic(recovered, "sanitize")
+        self.assertEqual(diagnostic["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertIn("Example.generated", diagnostic["summary"])
+
+    def test_sanitize_command_uses_dedicated_exit_and_json_channel(self):
+        from scripts.render_challenge import (
+            MISSING_DECLARATION_EXIT,
+            ComparedDeclarationsNotRendered,
+            sanitize_command,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            channel = root / "diagnostic.json"
+            audit = root / "palomar-audit.json"
+            audit.write_text(json.dumps([]))
+            args = argparse.Namespace(
+                challenge=str(root / "Challenge.lean"),
+                solution=str(root / "Solution.lean"),
+                comparator=str(root / "comparator.json"),
+                challenge_module="Challenge",
+                lean=sys.executable,
+                input_dir=str(root / "raw"),
+                output_dir=str(root / "clean"),
+                audit_declarations=str(audit),
+                diagnostic_out=str(channel),
+            )
+            with (
+                mock.patch(
+                    "scripts.render_challenge.parsed_challenge_metadata",
+                    return_value={"declarations": ["Example.generated"]},
+                ),
+                mock.patch(
+                    "scripts.render_challenge.sanitize_bundle",
+                    side_effect=ComparedDeclarationsNotRendered(["Example.generated"]),
+                ),
+            ):
+                self.assertEqual(sanitize_command(args), MISSING_DECLARATION_EXIT)
+            document = json.loads(channel.read_text())
+        self.assertEqual(document["code"], "challenge.declaration_not_rendered")
+        self.assertEqual(document["declarations"], ["Example.generated"])
+
+    def test_sanitizer_channel_rejects_every_untrusted_shape(self):
+        from scripts.render_challenge import (
+            MISSING_DECLARATION_CODE,
+            read_sanitize_diagnostic,
+        )
+
+        valid = {
+            "schema_version": 1,
+            "code": MISSING_DECLARATION_CODE,
+            "declarations": ["Example.generated"],
+            "total": 1,
+        }
+        malformed = (
+            {**valid, "extra": True},
+            {key: value for key, value in valid.items() if key != "code"},
+            {**valid, "schema_version": 2},
+            {**valid, "code": "challenge.other"},
+            {**valid, "declarations": []},
+            {**valid, "declarations": ["x" * 401]},
+            {**valid, "total": True},
+            {**valid, "total": 2},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            for document in malformed:
+                with self.subTest(document=document):
+                    channel.write_text(json.dumps(document))
+                    with self.assertRaises(VerificationError):
+                        read_sanitize_diagnostic(channel)
+
+            channel.unlink()
+            channel.symlink_to(Path(directory) / "missing")
+            with self.assertRaisesRegex(VerificationError, "missing or invalid"):
+                read_sanitize_diagnostic(channel)
+
+    def test_sanitizer_channel_accepts_maximal_unicode_payload(self):
+        from scripts.render_challenge import (
+            MAX_REPORTED_DECLARATION_LENGTH,
+            MAX_REPORTED_DECLARATIONS,
+            ComparedDeclarationsNotRendered,
+            read_sanitize_diagnostic,
+            sanitize_diagnostic_document,
+        )
+
+        declarations = [
+            f"Example.«{'𝔘' * (MAX_REPORTED_DECLARATION_LENGTH - 10)}{index:02d}»"
+            for index in range(MAX_REPORTED_DECLARATIONS)
+        ]
+        error = ComparedDeclarationsNotRendered(declarations)
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "diagnostic.json"
+            channel.write_text(json.dumps(sanitize_diagnostic_document(error), indent=2))
+            recovered = read_sanitize_diagnostic(channel)
+        self.assertEqual(recovered.total, MAX_REPORTED_DECLARATIONS)
+
+    def test_payload_text_cannot_forge_a_submitter_renderability_failure(self):
+        from scripts.render_challenge import render_failure_diagnostic
+
+        forged = VerificationError(
+            "lake build failed: challenge.declaration_not_rendered Example.generated"
+        )
+        diagnostic = render_failure_diagnostic(forged, "literate")
+        self.assertEqual(diagnostic["code"], "palomar.render_failed")
+        self.assertEqual(diagnostic["owner"], "palomar")
+
+    def test_submitter_renderability_failure_sets_the_report_status_to_fail(self):
+        from scripts.render_challenge import (
+            ComparedDeclarationsNotRendered,
+            append_render_failure,
+        )
+
+        report = {"status": "error", "stage": "sanitize", "errors": []}
+        append_render_failure(report, ComparedDeclarationsNotRendered(["Example.generated"]))
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["diagnostics"][0]["owner"], "submitter")
 
     def test_raw_svg_is_not_an_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

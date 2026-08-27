@@ -128,7 +128,11 @@ Current metadata should declare `version: v0.4`; an omitted version follows the
 upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
 project identity, description, authorship, license, classification, automation-method, and
 review-status fields. Classification requires one to eight official arXiv subject
-classes and permits up to eight distinct MSC2020 codes. The current provenance
+classes and permits up to eight distinct MSC2020 codes. Each project author may
+be a name or a mapping with `name` and
+optional `github` login and `orcid`; ORCIDs may use the bare identifier or the
+canonical `https://orcid.org/` URL and are stored in bare form by the registry. The
+current provenance
 contract also requires a nonempty `project.responsible_maintainers` list and a
 nonempty `sources` list. The submitted repository is the substantive proof
 development by default, so ordinary submissions need no `repository` section.
@@ -179,11 +183,15 @@ the submitted result.
 The prototype accepts public GitHub repositories and any released or RC Lean
 toolchain at or above the minimum recorded in
 [`toolchains.json`](toolchains.json). There is no list of accepted versions:
-the matching tooling revisions are derived from the toolchain's release tag,
-which is what a table of them kept getting wrong. The file is deliberately a
-closed record containing only its schema version and the minimum Lean release;
-it does not claim to configure tooling repositories that the verifier does not
-read from it.
+tooling revisions are derived from release tags, which is what a table of them
+kept getting wrong. Rendering first selects the exact Verso release tag. When a
+stable positive Lean patch release has no exact Verso tag, it uses that same
+major/minor release line's patch-zero Verso tag and rebuilds the pinned source
+with the submission's exact Lean toolchain. Release candidates never fall back,
+and the resolved Verso commit is recorded in the render report. The file is
+deliberately a closed record containing only its schema version and the minimum
+Lean release; it does not claim to configure tooling repositories that the
+verifier does not read from it.
 
 ## Licensing
 
