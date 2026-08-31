@@ -266,6 +266,27 @@ def registry_correction(raw: str) -> dict[str, Any] | None:
         return False
     if not safe(metadata):
         raise VerificationError("Registry correction metadata exceeds its structural bounds")
+    _person_records(
+        metadata["authors"],
+        "registry_correction.metadata.authors",
+        required=True,
+    )
+    _person_records(
+        metadata["provenance"]["responsible_maintainers"],
+        "registry_correction.metadata.provenance.responsible_maintainers",
+        required=True,
+    )
+    correction_sources = metadata["provenance"]["mathematical_sources"]
+    if not isinstance(correction_sources, list):
+        raise VerificationError("Registry correction mathematical sources are malformed")
+    for index, source in enumerate(correction_sources):
+        if not isinstance(source, dict):
+            raise VerificationError("Registry correction mathematical sources are malformed")
+        _person_records(
+            source.get("authors"),
+            f"registry_correction.metadata.provenance.mathematical_sources[{index}].authors",
+            required=False,
+        )
     changed = value.get("changed_fields")
     if (
         not isinstance(changed, list)
@@ -386,7 +407,9 @@ def _required_bounded_text(value: Any, path: str, *, maximum: int) -> str:
     return text
 
 
-def _required_people(value: Any, path: str) -> list[Any]:
+def _required_people(
+    value: Any, path: str, *, allow_legacy_orcid_names: bool = False
+) -> list[Any]:
     if not isinstance(value, list) or not value:
         raise VerificationError(
             f"formalization.yaml field {path} must be a nonempty list"
@@ -394,9 +417,17 @@ def _required_people(value: Any, path: str) -> list[Any]:
     for index, person in enumerate(value):
         item_path = f"{path}[{index}]"
         if isinstance(person, str):
-            _person_name(person, item_path)
+            _person_name(
+                person,
+                item_path,
+                allow_legacy_orcid_names=allow_legacy_orcid_names,
+            )
         elif isinstance(person, dict):
-            _person_name(person.get("name"), f"{item_path}.name")
+            _person_name(
+                person.get("name"),
+                f"{item_path}.name",
+                allow_legacy_orcid_names=allow_legacy_orcid_names,
+            )
         else:
             raise VerificationError(
                 f"formalization.yaml field {item_path} must be a name or a mapping with a name"
@@ -404,9 +435,11 @@ def _required_people(value: Any, path: str) -> list[Any]:
     return value
 
 
-def _person_name(value: Any, path: str) -> str:
+def _person_name(
+    value: Any, path: str, *, allow_legacy_orcid_names: bool = False
+) -> str:
     name = _required_text(value, path).strip()
-    if contains_identifier(name):
+    if not allow_legacy_orcid_names and contains_identifier(name):
         raise VerificationError(
             f"formalization.yaml field {path} contains an ORCID iD in the name; "
             "move it to that person's separate orcid field",
@@ -422,18 +455,36 @@ def _person_name(value: Any, path: str) -> str:
     return name
 
 
-def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, str]]:
+def _person_records(
+    value: Any,
+    path: str,
+    *,
+    required: bool,
+    allow_legacy_orcid_names: bool = False,
+) -> list[dict[str, str]]:
     if value in (None, []) and not required:
         return []
-    people = _required_people(value, path)
+    people = _required_people(
+        value, path, allow_legacy_orcid_names=allow_legacy_orcid_names
+    )
     records: list[dict[str, str]] = []
     for index, person in enumerate(people):
         item_path = f"{path}[{index}]"
         if isinstance(person, str):
-            records.append({"name": _person_name(person, item_path)})
+            records.append({
+                "name": _person_name(
+                    person,
+                    item_path,
+                    allow_legacy_orcid_names=allow_legacy_orcid_names,
+                )
+            })
             continue
         record = {
-            "name": _person_name(person.get("name"), f"{item_path}.name")
+            "name": _person_name(
+                person.get("name"),
+                f"{item_path}.name",
+                allow_legacy_orcid_names=allow_legacy_orcid_names,
+            )
         }
         github = person.get("github")
         if github is not None:
@@ -459,11 +510,21 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
     return records
 
 
-def declared_orcids(data: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
+def declared_orcids(
+    data: dict[str, Any],
+    provenance: dict[str, Any],
+    *,
+    allow_legacy_orcid_names: bool = False,
+) -> list[str]:
     """Return every canonical ORCID iD from the supported person positions."""
     project = _required_mapping(data.get("project"), "project")
     groups = [
-        _person_records(project.get("authors"), "project.authors", required=True),
+        _person_records(
+            project.get("authors"),
+            "project.authors",
+            required=True,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
+        ),
         provenance.get("responsible_maintainers", []),
     ]
     for source in provenance.get("mathematical_sources", []):
@@ -495,19 +556,35 @@ def _person_records_with_singular_alias(
     path: str,
     *,
     required: bool,
+    allow_legacy_orcid_names: bool = False,
 ) -> list[dict[str, str]]:
     """Read the canonical people list, falling back to a legacy singular key."""
     if plural in mapping:
-        return _person_records(mapping.get(plural), f"{path}.{plural}", required=required)
+        return _person_records(
+            mapping.get(plural),
+            f"{path}.{plural}",
+            required=required,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
+        )
     if singular not in mapping:
-        return _person_records(None, f"{path}.{plural}", required=required)
+        return _person_records(
+            None,
+            f"{path}.{plural}",
+            required=required,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
+        )
 
     value = mapping.get(singular)
     if value is None:
         value = []
     elif not isinstance(value, list):
         value = [value]
-    return _person_records(value, f"{path}.{singular}", required=required)
+    return _person_records(
+        value,
+        f"{path}.{singular}",
+        required=required,
+        allow_legacy_orcid_names=allow_legacy_orcid_names,
+    )
 
 
 def _source_contributor_records(value: Any, path: str) -> list[dict[str, str]]:
@@ -534,7 +611,9 @@ def _source_contributor_records(value: Any, path: str) -> list[dict[str, str]]:
     return records
 
 
-def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
+def normalized_provenance(
+    data: dict[str, Any], *, allow_legacy_orcid_names: bool = False
+) -> dict[str, Any]:
     """Validate and canonicalize the current Palomar provenance contract."""
     project = _required_mapping(data.get("project"), "project")
     maintainers = _person_records_with_singular_alias(
@@ -543,6 +622,7 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         "responsible_maintainer",
         "project",
         required=True,
+        allow_legacy_orcid_names=allow_legacy_orcid_names,
     )
 
     raw_repository = data.get("repository")
@@ -638,7 +718,12 @@ def normalized_provenance(data: dict[str, Any]) -> dict[str, Any]:
         record: dict[str, Any] = {
             "title": _required_text(item.get("title"), f"{path}.title").strip(),
             "authors": _person_records_with_singular_alias(
-                item, "authors", "author", path, required=False
+                item,
+                "authors",
+                "author",
+                path,
+                required=False,
+                allow_legacy_orcid_names=allow_legacy_orcid_names,
             ),
             "relationship": relationship,
         }
@@ -970,7 +1055,9 @@ def formalization_repair_draft(data: dict[str, Any]) -> dict[str, Any]:
     return {"values": values, "origins": origins}
 
 
-def load_formalization_metadata(path: Path) -> dict[str, Any]:
+def load_formalization_metadata(
+    path: Path, *, allow_legacy_orcid_names: bool = False
+) -> dict[str, Any]:
     """Parse and enforce Palomar's mechanical minimum for formalization.yaml."""
     if path.stat().st_size > MAX_FORMALIZATION_BYTES:
         raise VerificationError(
@@ -1047,7 +1134,14 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             project.get("description"), "project.description", maximum=10_000
         )
     )
-    check(lambda: _person_records(project.get("authors"), "project.authors", required=True))
+    check(
+        lambda: _person_records(
+            project.get("authors"),
+            "project.authors",
+            required=True,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
+        )
+    )
     check(lambda: _required_text(project.get("license"), "project.license"))
     maintainers = project.get("responsible_maintainers")
     if "responsible_maintainers" not in project and "responsible_maintainer" in project:
@@ -1056,7 +1150,10 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             maintainers = [maintainers]
     check(
         lambda: _person_records(
-            maintainers, "project.responsible_maintainers", required=True
+            maintainers,
+            "project.responsible_maintainers",
+            required=True,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
         )
     )
 
@@ -1091,7 +1188,13 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
         "project": {**project, "responsible_maintainers": ["Palomar validation placeholder"]},
     }
     source_document.pop("repository", None)
-    check(lambda: normalized_provenance(source_document), "sources")
+    check(
+        lambda: normalized_provenance(
+            source_document,
+            allow_legacy_orcid_names=allow_legacy_orcid_names,
+        ),
+        "sources",
+    )
 
     # Ordinary repositories need no repository edit. Only an explicitly
     # declared thin wrapper may ask the guided form for its pinned target.
@@ -1112,7 +1215,10 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             and not isinstance(repository.get("substantive_formalization"), dict)
         )
         check(
-            lambda: normalized_provenance(repository_document),
+            lambda: normalized_provenance(
+                repository_document,
+                allow_legacy_orcid_names=allow_legacy_orcid_names,
+            ),
             "repository.substantive_formalization" if explicit_missing_target else None,
         )
 

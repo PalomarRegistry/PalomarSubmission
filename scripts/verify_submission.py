@@ -1163,8 +1163,14 @@ def prepare(args: argparse.Namespace) -> int:
         formalization: dict[str, Any] | None = None
         provenance: dict[str, Any] | None = None
         try:
-            formalization = submission_contract.load_formalization_metadata(metadata_path)
-            provenance = submission_contract.normalized_provenance(formalization)
+            formalization = submission_contract.load_formalization_metadata(
+                metadata_path,
+                allow_legacy_orcid_names=correction is not None,
+            )
+            provenance = submission_contract.normalized_provenance(
+                formalization,
+                allow_legacy_orcid_names=correction is not None,
+            )
             substantive = provenance.get("substantive_formalization")
             if isinstance(substantive, dict):
                 validate_preservable_remote_source(
@@ -1181,7 +1187,11 @@ def prepare(args: argparse.Namespace) -> int:
         if formalization is not None and provenance is not None:
             try:
                 declared_orcids = set(
-                    submission_contract.declared_orcids(formalization, provenance)
+                    submission_contract.declared_orcids(
+                        formalization,
+                        provenance,
+                        allow_legacy_orcid_names=correction is not None,
+                    )
                 )
                 if correction is not None:
                     correction_metadata = correction["metadata"]
