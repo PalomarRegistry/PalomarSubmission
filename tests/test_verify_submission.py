@@ -1359,8 +1359,100 @@ review:
 
         issue = next(issue for issue in caught.exception.issues if issue.field)
         self.assertEqual(issue.field, "project.authors[0].orcid")
-        self.assertIn("must be a bare ORCID or an https://orcid.org URL", str(issue))
+        self.assertIn("must be a valid bare ORCID iD", str(issue))
         self.assertFalse(issue.repairable)
+
+    def test_project_author_orcid_checksum_is_checked_during_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors:
+    - name: Ada Lovelace
+      orcid: 0000-0002-1825-0098
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: []
+sources:
+  - title: Original result
+    type: original-proof
+    relationship: other
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                FormalizationValidationError, "must be a valid bare ORCID"
+            ):
+                load_formalization_metadata(path)
+
+    def test_people_reject_orcid_ids_embedded_in_names(self):
+        identifier = "0009-0009-9699-9712"
+        cases = (
+            (
+                {
+                    "project": {
+                        "authors": [f"Idris Ali Shaik (ORCID {identifier})"],
+                        "responsible_maintainers": ["Ada Lovelace"],
+                    },
+                    "sources": [{
+                        "title": "Original result",
+                        "type": "original-proof",
+                        "relationship": "other",
+                    }],
+                },
+                "project.authors[0]",
+            ),
+            (
+                {
+                    "project": {
+                        "authors": ["Ada Lovelace"],
+                        "responsible_maintainers": [{
+                            "name": f"Idris Ali Shaik ({identifier})"
+                        }],
+                    },
+                    "sources": [{
+                        "title": "Original result",
+                        "type": "original-proof",
+                        "relationship": "other",
+                    }],
+                },
+                "project.responsible_maintainers[0].name",
+            ),
+            (
+                {
+                    "project": {
+                        "authors": ["Ada Lovelace"],
+                        "responsible_maintainers": ["Ada Lovelace"],
+                    },
+                    "sources": [{
+                        "title": "A source theorem",
+                        "authors": [
+                            f"Idris Ali Shaik https://orcid.org/{identifier}"
+                        ],
+                        "relationship": "formalizes",
+                    }],
+                },
+                "sources[0].authors[0]",
+            ),
+        )
+        for data, field in cases:
+            with self.subTest(field=field):
+                with self.assertRaises(VerificationError) as caught:
+                    provenance = submission_contract.normalized_provenance(data)
+                    submission_contract.declared_orcids(data, provenance)
+                self.assertEqual(caught.exception.code, "formalization.orcid_in_name")
+                self.assertEqual(caught.exception.field, field)
+                self.assertIn("separate orcid field", str(caught.exception))
 
     def test_project_author_invalid_github_login_is_rejected_during_preflight(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1415,7 +1507,7 @@ sources:
   - title: A source theorem
     author:
       name: Emmy Noether
-      orcid: 0000-0000-0000-000X
+      orcid: 0000-0002-1694-233X
     relationship: formalizes
 automation:
   methods:
@@ -1433,7 +1525,7 @@ review:
         )
         self.assertEqual(
             provenance["mathematical_sources"][0]["authors"],
-            [{"name": "Emmy Noether", "orcid": "0000-0000-0000-000X"}],
+            [{"name": "Emmy Noether", "orcid": "0000-0002-1694-233X"}],
         )
 
     def test_current_palomar_template_shape_passes_real_metadata_and_provenance_parsing(self):

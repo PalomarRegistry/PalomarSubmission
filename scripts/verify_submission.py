@@ -32,6 +32,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
 from scripts import submission_contract  # noqa: E402
+from scripts.orcid_validation import validate_records as validate_orcid_records  # noqa: E402
 from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
     VerificationError,
@@ -1147,6 +1148,15 @@ def prepare(args: argparse.Namespace) -> int:
                 report["formalization_repair_draft"] = error.repair_draft
             add_issue("formalization", error)
 
+        orcid_validation: dict[str, Any] | None = None
+        if formalization is not None and provenance is not None:
+            try:
+                orcid_validation = validate_orcid_records(
+                    submission_contract.declared_orcids(formalization, provenance)
+                )
+            except Exception as error:  # independent external-registry group
+                add_issue("orcid", error)
+
         license_record: dict[str, Any] | None = None
         try:
             license_path = repository_license_file(source)
@@ -1255,6 +1265,7 @@ def prepare(args: argparse.Namespace) -> int:
             return 0
 
         assert formalization is not None and provenance is not None
+        assert orcid_validation is not None
         assert license_record is not None
         assert toolchain_path is not None and toolchain is not None and export_commit is not None
         assert config_relative is not None and config_path is not None and config is not None
@@ -1297,6 +1308,7 @@ def prepare(args: argparse.Namespace) -> int:
                     ],
                 },
                 "provenance": provenance,
+                "orcid_validation": orcid_validation,
                 "lakefile": {
                     "path": lakefile_relative,
                     "sha256": sha256(lakefile),

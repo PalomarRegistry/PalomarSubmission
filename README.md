@@ -131,8 +131,15 @@ review-status fields. Classification requires one to eight official arXiv subjec
 classes and permits up to eight distinct MSC2020 codes. Each project author may
 be a name or a mapping with `name` and
 optional `github` login and `orcid`; ORCIDs may use the bare identifier or the
-canonical `https://orcid.org/` URL and are stored in bare form by the registry. The
-current provenance
+canonical `https://orcid.org/` URL and are stored in bare form by the registry.
+An ORCID iD must not be included in a person's `name`; use a person mapping with
+separate `name` and `orcid` fields instead. Preparation checks the iD's ISO 7064
+check digit and asks the public ORCID Registry whether that exact iD names a
+current record. Palomar retains only the iD and the time of that check, not the
+returned profile. A missing or deactivated record is a metadata error; an
+unavailable registry is a retryable Palomar failure. The check establishes
+that the record existed at that time. It does not authenticate the submitter,
+establish control of the ORCID record, or prove authorship. The current provenance
 contract also requires a nonempty `project.responsible_maintainers` list and a
 nonempty `sources` list. The submitted repository is the substantive proof
 development by default, so ordinary submissions need no `repository` section.

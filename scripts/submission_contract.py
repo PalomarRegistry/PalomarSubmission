@@ -9,6 +9,12 @@ from typing import Any
 
 import yaml
 
+from scripts.orcid_validation import (
+    ORCID_RE,
+    canonical_identifier,
+    contains_identifier,
+    valid_checksum,
+)
 from scripts.verification_errors import FormalizationValidationError, VerificationError
 
 __all__ = (
@@ -34,6 +40,7 @@ __all__ = (
     "SUBSTANTIVE_SOURCE_RELATIONSHIPS",
     "SUBMISSION_ID_RE",
     "UniqueKeySafeLoader",
+    "declared_orcids",
     "load_formalization_metadata",
     "normalize_repository",
     "normalized_provenance",
@@ -97,10 +104,6 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 GITHUB_LOGIN_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
-)
-ORCID_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4}$")
-ORCID_URL_RE = re.compile(
-    r"^https://orcid\.org/(?P<identifier>[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9X]{4})/?$"
 )
 AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
@@ -265,14 +268,32 @@ def _required_people(value: Any, path: str) -> list[Any]:
     for index, person in enumerate(value):
         item_path = f"{path}[{index}]"
         if isinstance(person, str):
-            _required_text(person, item_path)
+            _person_name(person, item_path)
         elif isinstance(person, dict):
-            _required_text(person.get("name"), f"{item_path}.name")
+            _person_name(person.get("name"), f"{item_path}.name")
         else:
             raise VerificationError(
                 f"formalization.yaml field {item_path} must be a name or a mapping with a name"
             )
     return value
+
+
+def _person_name(value: Any, path: str) -> str:
+    name = _required_text(value, path).strip()
+    if contains_identifier(name):
+        raise VerificationError(
+            f"formalization.yaml field {path} contains an ORCID iD in the name; "
+            "move it to that person's separate orcid field",
+            code="formalization.orcid_in_name",
+            field=path,
+            next_action=(
+                "Remove the ORCID iD from the person's name and put it in the same "
+                "person mapping, for example `{name: Ada Lovelace, orcid: "
+                "0000-0002-1825-0097}`. Commit the metadata change, then make a new "
+                "submission using the new commit SHA."
+            ),
+        )
+    return name
 
 
 def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, str]]:
@@ -283,10 +304,10 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
     for index, person in enumerate(people):
         item_path = f"{path}[{index}]"
         if isinstance(person, str):
-            records.append({"name": person.strip()})
+            records.append({"name": _person_name(person, item_path)})
             continue
         record = {
-            "name": _required_text(person.get("name"), f"{item_path}.name").strip()
+            "name": _person_name(person.get("name"), f"{item_path}.name")
         }
         github = person.get("github")
         if github is not None:
@@ -298,18 +319,36 @@ def _person_records(value: Any, path: str, *, required: bool) -> list[dict[str, 
             record["github"] = login
         orcid = person.get("orcid")
         if orcid is not None:
-            identifier = _required_text(orcid, f"{item_path}.orcid").strip()
-            url_match = ORCID_URL_RE.fullmatch(identifier)
-            if url_match is not None:
-                identifier = url_match.group("identifier")
-            if not ORCID_RE.fullmatch(identifier):
+            submitted_identifier = _required_text(
+                orcid, f"{item_path}.orcid"
+            ).strip()
+            identifier = canonical_identifier(submitted_identifier)
+            if identifier is None or not valid_checksum(identifier):
                 raise VerificationError(
-                    f"formalization.yaml field {item_path}.orcid must be a bare ORCID "
-                    "or an https://orcid.org URL"
+                    f"formalization.yaml field {item_path}.orcid must be a valid bare "
+                    "ORCID iD or an https://orcid.org URL"
                 )
             record["orcid"] = identifier
         records.append(record)
     return records
+
+
+def declared_orcids(data: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
+    """Return every canonical ORCID iD from the supported person positions."""
+    project = _required_mapping(data.get("project"), "project")
+    groups = [
+        _person_records(project.get("authors"), "project.authors", required=True),
+        provenance.get("responsible_maintainers", []),
+    ]
+    for source in provenance.get("mathematical_sources", []):
+        if isinstance(source, dict):
+            groups.append(source.get("authors", []))
+    return sorted({
+        person["orcid"]
+        for people in groups
+        for person in people
+        if isinstance(person, dict) and "orcid" in person
+    })
 
 
 def _optional_text(value: Any, path: str, *, maximum: int = 10_000) -> str | None:
@@ -885,7 +924,11 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
         maintainers = project.get("responsible_maintainer")
         if not isinstance(maintainers, list):
             maintainers = [maintainers]
-    check(lambda: _required_people(maintainers, "project.responsible_maintainers"))
+    check(
+        lambda: _person_records(
+            maintainers, "project.responsible_maintainers", required=True
+        )
+    )
 
     classification = (
         data.get("classification") if isinstance(data.get("classification"), dict) else {}
