@@ -111,8 +111,8 @@ def toolchain_release_tag(toolchain: str) -> str:
     """The tag in Palomar's tooling repositories that matches this toolchain.
 
     The version is derived rather than looked up in a table that has to be
-    edited for every release and is stale the moment it is not. Renderer policy
-    may subsequently fall back from a missing stable Verso patch tag to the
+    edited for every release and is stale the moment it is not. Tool-specific
+    policy may subsequently fall back from a missing stable patch tag to the
     release line's patch-zero tag.
     """
     match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
@@ -194,6 +194,66 @@ def resolve_release_commit(repository: str, tag: str) -> str:
             ),
         )
     return commit
+
+
+def toolchain_lean4export_commit(toolchain: str) -> str:
+    """The compatible lean4export release for this toolchain, as a commit.
+
+    Prefer an exact tag. Stable Lean patch releases may fall back to the
+    release line's patch-zero lean4export tag, whose source is then rebuilt
+    with the submission's exact toolchain. Release candidates remain exact.
+    The resolved commit is recorded in the mechanical report.
+    """
+    repository = "leanprover/lean4export"
+    tag = supported_toolchain(toolchain)
+    try:
+        return resolve_release_commit(repository, tag)
+    except VerificationError as error:
+        if error.code != "palomar.toolchain_release_missing":
+            raise
+        match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
+        if match is None or match.group("rc") is not None or int(match.group("patch")) == 0:
+            raise
+        release_line_tag = f"v{match.group('major')}.{match.group('minor')}.0"
+        try:
+            return resolve_release_commit(repository, release_line_tag)
+        except VerificationError as fallback_error:
+            if fallback_error.code != "palomar.toolchain_release_missing":
+                raise
+            raise VerificationError(
+                f"{repository} has published neither {tag} nor {release_line_tag} "
+                "for this Lean release line",
+                code="palomar.toolchain_release_missing",
+                owner="palomar",
+                next_action=(
+                    "Do not change the repository. Palomar must add support for this Lean release."
+                ),
+            ) from None
+
+
+def compatible_lean4export_toolchain(
+    submission_toolchain: str, lean4export_toolchain: str
+) -> bool:
+    """Whether selected lean4export source may build with the submission Lean.
+
+    Exact toolchains always match. The sole relaxation is from a stable
+    positive patch release to patch zero on the same major/minor release line;
+    it deliberately does not cross release lines or prerelease boundaries.
+    """
+    submission = TOOLCHAIN_RE.fullmatch(submission_toolchain.strip())
+    lean4export = TOOLCHAIN_RE.fullmatch(lean4export_toolchain.strip())
+    if submission is None or lean4export is None:
+        return False
+    if submission_toolchain.strip() == lean4export_toolchain.strip():
+        return True
+    return (
+        submission.group("rc") is None
+        and lean4export.group("rc") is None
+        and submission.group("major") == lean4export.group("major")
+        and submission.group("minor") == lean4export.group("minor")
+        and int(submission.group("patch")) > 0
+        and int(lean4export.group("patch")) == 0
+    )
 
 
 LICENSE_FILE_RE = re.compile(
@@ -1131,12 +1191,7 @@ def prepare(args: argparse.Namespace) -> int:
                     ),
                 )
             toolchain = toolchain_path.read_text(encoding="utf-8").strip()
-            # Verification deliberately requires lean4export's exact release
-            # tag. Only the post-acceptance Verso renderer has a stable-patch
-            # fallback policy.
-            export_commit = resolve_release_commit(
-                "leanprover/lean4export", supported_toolchain(toolchain)
-            )
+            export_commit = toolchain_lean4export_commit(toolchain)
         except Exception as error:  # independent preflight group
             add_issue("toolchain", error)
 

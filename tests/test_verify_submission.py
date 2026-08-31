@@ -1029,6 +1029,134 @@ class VerifySubmissionTests(unittest.TestCase):
                         with self.assertRaisesRegex(VerificationError, "schema version 2"):
                             verifier.supported_toolchain("leanprover/lean4:v4.32.0")
 
+    def test_lean4export_prefers_the_toolchains_exact_release(self):
+        with mock.patch(
+            "scripts.verify_submission.resolve_release_commit",
+            side_effect=lambda repo, tag: f"{repo}@{tag}",
+        ) as resolve:
+            self.assertEqual(
+                verifier.toolchain_lean4export_commit(
+                    "leanprover/lean4:v4.33.0-rc2"
+                ),
+                "leanprover/lean4export@v4.33.0-rc2",
+            )
+        resolve.assert_called_once_with(
+            "leanprover/lean4export", "v4.33.0-rc2"
+        )
+
+    def test_lean4export_stable_patch_release_falls_back_to_patch_zero(self):
+        missing = VerificationError(
+            "leanprover/lean4export has published no v4.33.1 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.verify_submission.resolve_release_commit",
+            side_effect=[missing, "3" * 40],
+        ) as resolve:
+            self.assertEqual(
+                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.33.1"),
+                "3" * 40,
+            )
+        self.assertEqual(
+            resolve.call_args_list,
+            [
+                mock.call("leanprover/lean4export", "v4.33.1"),
+                mock.call("leanprover/lean4export", "v4.33.0"),
+            ],
+        )
+
+    def test_lean4export_release_candidates_do_not_fall_back(self):
+        missing = VerificationError(
+            "leanprover/lean4export has published no v4.34.0-rc3 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.verify_submission.resolve_release_commit",
+            side_effect=missing,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                verifier.toolchain_lean4export_commit(
+                    "leanprover/lean4:v4.34.0-rc3"
+                )
+        self.assertIs(raised.exception, missing)
+        resolve.assert_called_once_with(
+            "leanprover/lean4export", "v4.34.0-rc3"
+        )
+
+    def test_missing_lean4export_release_line_reports_both_tags(self):
+        exact_missing = VerificationError(
+            "leanprover/lean4export has published no v4.35.2 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        base_missing = VerificationError(
+            "leanprover/lean4export has published no v4.35.0 release",
+            code="palomar.toolchain_release_missing",
+            owner="palomar",
+        )
+        with mock.patch(
+            "scripts.verify_submission.resolve_release_commit",
+            side_effect=[exact_missing, base_missing],
+        ):
+            with self.assertRaises(VerificationError) as raised:
+                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.35.2")
+        self.assertEqual(raised.exception.code, "palomar.toolchain_release_missing")
+        self.assertEqual(raised.exception.owner, "palomar")
+        self.assertIn("neither v4.35.2 nor v4.35.0", str(raised.exception))
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_lean4export_provider_failure_does_not_trigger_fallback(self):
+        unavailable = VerificationError(
+            "could not read leanprover/lean4export releases",
+            code="provider.release_lookup_failed",
+            owner="provider",
+            retryable=True,
+        )
+        with mock.patch(
+            "scripts.verify_submission.resolve_release_commit",
+            side_effect=unavailable,
+        ) as resolve:
+            with self.assertRaises(VerificationError) as raised:
+                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.33.1")
+        self.assertIs(raised.exception, unavailable)
+        resolve.assert_called_once_with("leanprover/lean4export", "v4.33.1")
+
+    def test_lean4export_patch_zero_is_compatible_with_stable_patch_release(self):
+        self.assertTrue(
+            verifier.compatible_lean4export_toolchain(
+                "leanprover/lean4:v4.33.1",
+                "leanprover/lean4:v4.33.0",
+            )
+        )
+        self.assertTrue(
+            verifier.compatible_lean4export_toolchain(
+                "leanprover/lean4:v4.33.1",
+                "leanprover/lean4:v4.33.1",
+            )
+        )
+        self.assertTrue(
+            verifier.compatible_lean4export_toolchain(
+                "leanprover/lean4:v4.34.0-rc2",
+                "leanprover/lean4:v4.34.0-rc2",
+            )
+        )
+        for lean4export in (
+            "leanprover/lean4:v4.32.0",
+            "leanprover/lean4:v4.33.2",
+            "leanprover/lean4:v4.33.0-rc2",
+            "leanprover/lean4:v4.34.0",
+            "nightly-2026-08-01",
+            "",
+        ):
+            with self.subTest(lean4export=lean4export):
+                self.assertFalse(
+                    verifier.compatible_lean4export_toolchain(
+                        "leanprover/lean4:v4.33.1", lean4export
+                    )
+                )
+
     def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4231,6 +4359,18 @@ class DispatchWorkflowTests(unittest.TestCase):
         self.assertTrue(expensive)
         for step in expensive:
             self.assertIn("inputs.mode == 'full'", step["if"])
+
+    def test_lean4export_build_enforces_and_uses_the_selected_toolchain(self):
+        step = next(
+            step
+            for step in self.workflow()["jobs"]["verify"]["steps"]
+            if step.get("name") == "Build toolchain-matched lean4export"
+        )
+        self.assertIn("compatible_lean4export_toolchain", step["run"])
+        self.assertIn(
+            'ELAN_TOOLCHAIN="$SUBMISSION_TOOLCHAIN" lake build lean4export',
+            step["run"],
+        )
 
 
 class MetadataShapeTests(unittest.TestCase):
