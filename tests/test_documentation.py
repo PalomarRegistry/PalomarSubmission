@@ -4,7 +4,11 @@ from pathlib import Path
 
 import yaml
 
-from scripts.submission_contract import OPTIONAL_FIELDS, REPAIRABLE_FORMALIZATION_FIELDS
+from scripts.submission_contract import (
+    OPTIONAL_FIELDS,
+    PROJECT_NAME_MAXIMUM,
+    REPAIRABLE_FORMALIZATION_FIELDS,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 SECURITY = (ROOT / "SECURITY.md").read_text()
@@ -82,6 +86,9 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
             if presentation.get("repairable") is True
         }
         self.assertEqual(repairable, set(REPAIRABLE_FORMALIZATION_FIELDS))
+        self.assertEqual(
+            profile["fields"]["project.name"]["maximum"], PROJECT_NAME_MAXIMUM
+        )
 
 
 if __name__ == "__main__":

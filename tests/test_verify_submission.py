@@ -1292,6 +1292,43 @@ review:
                 ],
             )
 
+    def test_project_name_fits_the_public_registry_title(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                """\
+project:
+  name: """ + "x" * 301 + """
+  description: A formalization of the example result.
+  authors: [Ada Lovelace]
+  license: Apache-2.0
+  responsible_maintainers: [Ada Lovelace]
+classification:
+  arxiv: [math.LO]
+  msc2020: [03B35]
+sources:
+  - title: Original result
+    type: original-proof
+    relationship: other
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FormalizationValidationError) as caught:
+                load_formalization_metadata(path)
+
+        issue = next(
+            issue
+            for issue in caught.exception.issues
+            if issue.field == "project.name"
+        )
+        self.assertIn("exceeds 300 characters", str(issue))
+        self.assertTrue(issue.repairable)
+
     def test_project_author_orcid_forms_are_accepted_during_preflight(self):
         document = """\
 version: v0.4

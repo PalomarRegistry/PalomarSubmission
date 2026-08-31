@@ -125,10 +125,12 @@ nonempty UTF-8 text, match one standard SPDX licence mechanically, and agree
 exactly with the SPDX identifier in `project.license`.
 
 Current metadata should declare `version: v0.4`; an omitted version follows the
-upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with one top-level mapping and nonempty
-project identity, description, authorship, license, classification, automation-method, and
-review-status fields. Classification requires one to eight official arXiv subject
-classes and permits up to eight distinct MSC2020 codes. Each project author may
+upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with
+one top-level mapping and a nonempty project name of at most 300 characters,
+plus nonempty description, authorship, license, classification,
+automation-method, and review-status fields. Classification requires one to
+eight official arXiv subject classes and permits up to eight distinct MSC2020
+codes. Each project author may
 be a name or a mapping with `name` and
 optional `github` login and `orcid`; ORCIDs may use the bare identifier or the
 canonical `https://orcid.org/` URL and are stored in bare form by the registry.

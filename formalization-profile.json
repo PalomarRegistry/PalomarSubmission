@@ -4,8 +4,9 @@
   "fields": {
     "project.name": {
       "label": "Project name",
-      "description": "The name of the formalized result or project.",
+      "description": "The default public entry title for the formalized result or project.",
       "input": "text",
+      "maximum": 300,
       "repairable": true
     },
     "project.description": {
