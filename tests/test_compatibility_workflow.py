@@ -450,6 +450,14 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             f'supported_toolchain("{toolchain}")',
             build_step["run"],
         )
+        self.assertIn(
+            "compatible_lean4export_toolchain",
+            build_step["run"],
+        )
+        self.assertIn(
+            "ELAN_TOOLCHAIN=leanprover/lean4:v4.33.1",
+            build_step["run"],
+        )
         self.assertEqual(
             exercise_step["env"]["ELAN_TOOLCHAIN"],
             toolchain,

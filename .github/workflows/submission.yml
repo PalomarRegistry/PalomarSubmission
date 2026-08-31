@@ -156,9 +156,11 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/leanprover/lean4export.git "$RUNNER_TEMP/lean4export"
           git -C "$RUNNER_TEMP/lean4export" checkout "$LEAN4EXPORT_COMMIT"
-          test "$(tr -d '\r\n' < "$RUNNER_TEMP/lean4export/lean-toolchain")" = "$SUBMISSION_TOOLCHAIN"
+          LEAN4EXPORT_TOOLCHAIN="$(tr -d '\r\n' < "$RUNNER_TEMP/lean4export/lean-toolchain")"
+          python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import compatible_lean4export_toolchain; raise SystemExit(not compatible_lean4export_toolchain(sys.argv[1], sys.argv[2]))' \
+            "$SUBMISSION_TOOLCHAIN" "$LEAN4EXPORT_TOOLCHAIN"
           cd "$RUNNER_TEMP/lean4export"
-          lake build lean4export
+          ELAN_TOOLCHAIN="$SUBMISSION_TOOLCHAIN" lake build lean4export
 
       - name: Run Comparator and challenge provenance audit
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
