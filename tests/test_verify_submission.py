@@ -81,6 +81,52 @@ PLAIN_HEADER_JSON = (
 )
 
 
+class RegistryCorrectionContractTests(unittest.TestCase):
+    def correction(self):
+        metadata = {
+            "title": "Correct title",
+            "abstract": "A result.",
+            "authors": [{"name": "Ada"}],
+            "classification": {"arxiv": ["math.LO"], "msc2020": ["03B35"]},
+            "provenance": {
+                "responsible_maintainers": [{"name": "Ada"}],
+                "mathematical_sources": [],
+                "related_formalizations": [],
+            },
+        }
+        identifier = "PALOMAR-2026-08-31-000001"
+        return {
+            "schema_version": 1,
+            "kind": "palomar-maintainer",
+            "based_on": {"id": identifier, "version": 2},
+            "baseline": {
+                "id": identifier,
+                "version": 2,
+                "path": f"entries/{identifier}-v2.json",
+                "sha256": "a" * 64,
+            },
+            "explanation": "Correct a transcription error in the title.",
+            "metadata": metadata,
+            "changed_fields": ["title"],
+            "edits": [{"field": "title", "value": metadata["title"]}],
+        }
+
+    def test_registry_correction_is_closed_and_bound_to_its_effective_edit(self):
+        value = self.correction()
+        self.assertEqual(
+            submission_contract.registry_correction(json.dumps(value)), value
+        )
+        value["edits"][0]["value"] = "Something else"
+        with self.assertRaisesRegex(VerificationError, "edits disagree"):
+            submission_contract.registry_correction(json.dumps(value))
+
+    def test_registry_correction_rejects_a_noncanonical_baseline_path(self):
+        value = self.correction()
+        value["baseline"]["path"] = "entries/another.json"
+        with self.assertRaisesRegex(VerificationError, "baseline is malformed"):
+            submission_contract.registry_correction(json.dumps(value))
+
+
 class VerifySubmissionTests(unittest.TestCase):
     def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
         self.assertTrue(verifier.mathlib_cache_availability("\rDownloaded: 42 file(s)"))
@@ -4367,6 +4413,9 @@ class SubmissionRequestTests(unittest.TestCase):
                 "I am a Palomar Technical Maintainer testing the workflow": (
                     "technical-test"
                 ),
+                "Palomar is making an exceptional registry metadata correction": (
+                    "palomar-maintainer"
+                ),
             },
         )
 
@@ -4469,7 +4518,7 @@ class DispatchWorkflowTests(unittest.TestCase):
         workflow = self.workflow()
         inputs = workflow["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(inputs["mode"]["default"], "full")
-        self.assertEqual(inputs["mode"]["options"], ["preflight", "full"])
+        self.assertEqual(inputs["mode"]["options"], ["preflight", "full", "correction"])
         steps = workflow["jobs"]["verify"]["steps"]
         prepare = next(step for step in steps if step.get("id") == "prepare")
         self.assertNotIn("if", prepare)
