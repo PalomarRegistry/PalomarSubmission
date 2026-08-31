@@ -1014,6 +1014,12 @@ def prepare(args: argparse.Namespace) -> int:
         install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
         values, submission_id = submission_contract.submission_request(event)
+        mode = str(event.get("inputs", {}).get("mode") or "full")
+        if mode not in {"preflight", "full", "correction"}:
+            raise VerificationError("Submission mode is unsupported")
+        correction = submission_contract.registry_correction(
+            values.get("registry_correction", "").strip()
+        )
         repository, url = submission_contract.normalize_repository(
             values.get("repository_url", "")
         )
@@ -1037,6 +1043,28 @@ def prepare(args: argparse.Namespace) -> int:
         else:
             raise VerificationError(
                 "Relationship to the substantive formalization must be declared"
+            )
+        if (correction is not None) != (authorization_relationship == "palomar-maintainer"):
+            raise VerificationError(
+                "Registry correction data and Palomar-maintainer authorization must appear together"
+            )
+        if correction is not None and (
+            mode != "correction" or existing_id != correction["based_on"]["id"]
+        ):
+            raise VerificationError("Registry correction mode or target is inconsistent")
+        if correction is None and mode == "correction":
+            raise VerificationError("Correction mode carried no registry correction")
+        if correction is not None:
+            report["schema_version"] = 2
+            server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+            workflow_repository = os.environ.get(
+                "GITHUB_REPOSITORY", "PalomarRegistry/PalomarSubmission"
+            )
+            workflow_run_id = os.environ.get("GITHUB_RUN_ID", "")
+            if not workflow_run_id.isdigit() or int(workflow_run_id) < 1:
+                raise VerificationError("Correction validation has no trusted workflow run id")
+            report["workflow_url"] = (
+                f"{server_url}/{workflow_repository}/actions/runs/{workflow_run_id}"
             )
         authorization: dict[str, str] = {
             "relationship": authorization_relationship,
@@ -1069,6 +1097,7 @@ def prepare(args: argparse.Namespace) -> int:
                             "formalization_metadata_path", ""
                         ).strip(),
                     },
+                    **({"registry_correction": correction} if correction is not None else {}),
                 },
                 "source": {
                     "repository": repository,
@@ -1151,9 +1180,27 @@ def prepare(args: argparse.Namespace) -> int:
         orcid_validation: dict[str, Any] | None = None
         if formalization is not None and provenance is not None:
             try:
-                orcid_validation = validate_orcid_records(
+                declared_orcids = set(
                     submission_contract.declared_orcids(formalization, provenance)
                 )
+                if correction is not None:
+                    correction_metadata = correction["metadata"]
+                    groups = [
+                        correction_metadata["authors"],
+                        correction_metadata["provenance"]["responsible_maintainers"],
+                        *(
+                            source.get("authors", [])
+                            for source in correction_metadata["provenance"]["mathematical_sources"]
+                            if isinstance(source, dict)
+                        ),
+                    ]
+                    declared_orcids.update(
+                        person["orcid"]
+                        for people in groups
+                        for person in people
+                        if isinstance(person, dict) and isinstance(person.get("orcid"), str)
+                    )
+                orcid_validation = validate_orcid_records(sorted(declared_orcids))
             except Exception as error:  # independent external-registry group
                 add_issue("orcid", error)
 
@@ -1331,10 +1378,16 @@ def prepare(args: argparse.Namespace) -> int:
                 "sha256": sha256(manifest_path),
             }
         write_json(work / "metadata.json", report)
-        report["status"] = "pending"
-        report["stage"] = "prepared"
+        report["status"] = "pass" if correction is not None else "pending"
+        report["stage"] = "correction-validation" if correction is not None else "prepared"
+        if correction is not None:
+            report["phase"] = "complete"
         write_json(output, report)
-        workflow_output(ready="true", lean4export_commit=export_commit, lean_toolchain=toolchain)
+        workflow_output(
+            ready="false" if correction is not None else "true",
+            lean4export_commit=export_commit,
+            lean_toolchain=toolchain,
+        )
     except LicenseValidationError as error:
         report["status"] = "fail"
         report["stage"] = "license"

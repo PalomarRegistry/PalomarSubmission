@@ -2,6 +2,8 @@ name: Verify submission
 run-name: >-
   ${{ inputs.mode == 'preflight'
       && format('Preflight submission {0}', inputs.request_id)
+      || inputs.mode == 'correction'
+      && format('Validate registry correction {0}', inputs.request_id)
       || format('Verify submission {0}', inputs.request_id) }}
 
 # Submissions arrive through the submission server, which dispatches this
@@ -30,6 +32,7 @@ on:
         options:
           - preflight
           - full
+          - correction
       options:
         description: JSON object of optional submission fields
         required: false
@@ -182,7 +185,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.mode == 'preflight' && 'preflight-report' || 'mechanical-report' }}-${{ inputs.request_id }}
+          name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
           retention-days: 90

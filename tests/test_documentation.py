@@ -54,6 +54,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
                 "existing_id",
                 "formalization_metadata_path",
                 "project_path",
+                "registry_correction",
             ],
         )
         self.assertIn("fixed `OPTIONAL_FIELDS`", SECURITY)

@@ -45,6 +45,7 @@ __all__ = (
     "load_formalization_metadata",
     "normalize_repository",
     "normalized_provenance",
+    "registry_correction",
     "submission_request",
 )
 
@@ -95,6 +96,7 @@ OPTIONAL_FIELDS = frozenset(
         "project_path",
         "comparator_config_path",
         "formalization_metadata_path",
+        "registry_correction",
     }
 )
 SUBMISSION_ID_RE = re.compile(r"^[0-9a-z]{12}$")
@@ -111,6 +113,7 @@ AUTHORIZATION_RELATIONSHIPS = {
     "I am a responsible author or maintainer": "maintainer",
     "I have approval from a responsible author or maintainer": "approved",
     "I am a Palomar Technical Maintainer testing the workflow": "technical-test",
+    "Palomar is making an exceptional registry metadata correction": "palomar-maintainer",
 }
 ORIGINAL_PROOF_TYPE = "original-proof"
 REPOSITORY_ROLES = {"substantive-development", "thin-wrapper"}
@@ -124,6 +127,17 @@ SOURCE_RELATIONSHIP_CATEGORIES = frozenset({
     "background",
     "other",
 })
+REGISTRY_CORRECTION_FIELDS = (
+    "title",
+    "abstract",
+    "authors",
+    "classification.arxiv",
+    "classification.msc2020",
+    "provenance.responsible_maintainers",
+    "provenance.mathematical_sources",
+    "provenance.related_formalizations",
+)
+_CORRECTION_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -162,6 +176,116 @@ UniqueKeySafeLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
 )
+
+
+def _correction_text(value: Any, field: str, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.strip()) > maximum
+        or _CORRECTION_CONTROL_RE.search(value.strip())
+    ):
+        raise VerificationError(f"Registry correction {field} is malformed")
+    return value.strip()
+
+
+def _correction_value(metadata: dict[str, Any], field: str) -> Any:
+    value: Any = metadata
+    for part in field.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise VerificationError(f"Registry correction has no {field}")
+        value = value[part]
+    return value
+
+
+def registry_correction(raw: str) -> dict[str, Any] | None:
+    """Validate the closed public correction payload dispatched by the Server."""
+    if not raw:
+        return None
+    if len(raw.encode("utf-8")) > 48_000:
+        raise VerificationError("Registry correction exceeds the 48,000-byte dispatch bound")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise VerificationError("Registry correction is not valid JSON") from error
+    expected = {
+        "schema_version", "kind", "based_on", "explanation", "metadata",
+        "changed_fields", "edits", "baseline",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise VerificationError("Registry correction has an unsupported shape")
+    if value.get("schema_version") != 1 or value.get("kind") != "palomar-maintainer":
+        raise VerificationError("Registry correction contract is unsupported")
+    based_on = value.get("based_on")
+    baseline = value.get("baseline")
+    if (
+        not isinstance(based_on, dict)
+        or set(based_on) != {"id", "version"}
+        or not PALOMAR_ID_RE.fullmatch(str(based_on.get("id", "")))
+        or type(based_on.get("version")) is not int
+        or based_on["version"] < 1
+        or not isinstance(baseline, dict)
+        or set(baseline) != {"id", "version", "path", "sha256"}
+        or baseline.get("id") != based_on["id"]
+        or baseline.get("version") != based_on["version"]
+        or baseline.get("path") != f"entries/{based_on['id']}-v{based_on['version']}.json"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(baseline.get("sha256", "")))
+    ):
+        raise VerificationError("Registry correction baseline is malformed")
+    value["explanation"] = _correction_text(value.get("explanation"), "explanation", 4_000)
+    metadata = value.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != {"title", "abstract", "authors", "classification", "provenance"}
+        or not isinstance(metadata.get("classification"), dict)
+        or set(metadata["classification"]) != {"arxiv", "msc2020"}
+        or not isinstance(metadata.get("provenance"), dict)
+        or set(metadata["provenance"]) != {
+            "responsible_maintainers", "mathematical_sources", "related_formalizations"
+        }
+    ):
+        raise VerificationError("Registry correction metadata is malformed")
+    _correction_text(metadata.get("title"), "title", 300)
+    _correction_text(metadata.get("abstract"), "abstract", 10_000)
+    # The Server owns detailed field validation; this independent boundary
+    # still closes recursive size and scalar types before publishing the report.
+    def safe(node: Any, depth: int = 0) -> bool:
+        if depth > 8:
+            return False
+        if node is None or isinstance(node, (bool, int)):
+            return True
+        if isinstance(node, str):
+            return len(node) <= 10_000 and _CORRECTION_CONTROL_RE.search(node) is None
+        if isinstance(node, list):
+            return len(node) <= 100 and all(safe(item, depth + 1) for item in node)
+        if isinstance(node, dict):
+            return len(node) <= 20 and all(
+                isinstance(key, str) and safe(item, depth + 1)
+                for key, item in node.items()
+            )
+        return False
+    if not safe(metadata):
+        raise VerificationError("Registry correction metadata exceeds its structural bounds")
+    changed = value.get("changed_fields")
+    if (
+        not isinstance(changed, list)
+        or not changed
+        or any(field not in REGISTRY_CORRECTION_FIELDS for field in changed)
+        or changed != sorted(set(changed), key=REGISTRY_CORRECTION_FIELDS.index)
+    ):
+        raise VerificationError("Registry correction changed_fields is malformed")
+    edits = value.get("edits")
+    if not isinstance(edits, list) or len(edits) != len(changed):
+        raise VerificationError("Registry correction edits are malformed")
+    for field, edit in zip(changed, edits, strict=True):
+        if (
+            not isinstance(edit, dict)
+            or set(edit) != {"field", "value"}
+            or edit.get("field") != field
+            or edit.get("value") != _correction_value(metadata, field)
+        ):
+            raise VerificationError("Registry correction edits disagree with effective metadata")
+    return value
 
 
 def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
