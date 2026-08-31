@@ -2084,7 +2084,11 @@ def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
         ),
         None,
     )
-    if proofwidgets is None or proofwidgets["repository"].lower() != "leanprover-community/proofwidgets4":
+    # A Challenge that depends on neither Mathlib nor ProofWidgets has no
+    # widget assets for Lake to rebuild, so it needs no sidecars granted.
+    if proofwidgets is None:
+        return ()
+    if proofwidgets["repository"].lower() != "leanprover-community/proofwidgets4":
         raise VerificationError("renderer requires the canonical pinned ProofWidgets package")
     package_dir = workspace / ".lake" / "packages" / "proofwidgets"
     relative_paths = (
