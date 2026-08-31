@@ -126,6 +126,22 @@ class RegistryCorrectionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "baseline is malformed"):
             submission_contract.registry_correction(json.dumps(value))
 
+    def test_registry_correction_requires_orcids_in_structured_person_fields(self):
+        value = self.correction()
+        value["metadata"]["authors"] = [{
+            "name": "Ada Lovelace",
+            "orcid": "0000-0002-1825-0097",
+        }]
+        self.assertEqual(
+            submission_contract.registry_correction(json.dumps(value)), value
+        )
+
+        value["metadata"]["authors"] = [
+            "Ada Lovelace (ORCID 0000-0002-1825-0097)"
+        ]
+        with self.assertRaisesRegex(VerificationError, "separate orcid field"):
+            submission_contract.registry_correction(json.dumps(value))
+
 
 class VerifySubmissionTests(unittest.TestCase):
     def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
@@ -1536,6 +1552,64 @@ review:
                 self.assertEqual(caught.exception.code, "formalization.orcid_in_name")
                 self.assertEqual(caught.exception.field, field)
                 self.assertIn("separate orcid field", str(caught.exception))
+
+    def test_correction_mode_can_read_legacy_names_before_validating_the_overlay(self):
+        identifier = "0009-0009-9699-9712"
+        data = {
+            "project": {
+                "authors": [f"Idris Ali Shaik (ORCID {identifier})"],
+                "responsible_maintainers": [f"Idris Ali Shaik ({identifier})"],
+            },
+            "sources": [{
+                "title": "Original result",
+                "type": "original-proof",
+                "relationship": "other",
+            }],
+        }
+
+        provenance = submission_contract.normalized_provenance(
+            data, allow_legacy_orcid_names=True
+        )
+        self.assertEqual(
+            submission_contract.declared_orcids(
+                data, provenance, allow_legacy_orcid_names=True
+            ),
+            [],
+        )
+        with self.assertRaisesRegex(VerificationError, "separate orcid field"):
+            submission_contract.normalized_provenance(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "formalization.yaml"
+            path.write_text(
+                f"""\
+project:
+  name: Example result
+  description: A formalization of the example result.
+  authors: [Idris Ali Shaik (ORCID {identifier})]
+  license: Apache-2.0
+  responsible_maintainers: [Idris Ali Shaik ({identifier})]
+classification:
+  arxiv: [math.LO]
+  msc2020: [03B35]
+sources:
+  - title: Original result
+    type: original-proof
+    relationship: other
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
+""",
+                encoding="utf-8",
+            )
+            loaded = load_formalization_metadata(
+                path, allow_legacy_orcid_names=True
+            )
+            self.assertEqual(loaded["project"]["authors"][0], data["project"]["authors"][0])
+            with self.assertRaisesRegex(FormalizationValidationError, "separate orcid field"):
+                load_formalization_metadata(path)
 
     def test_project_author_invalid_github_login_is_rejected_during_preflight(self):
         with tempfile.TemporaryDirectory() as directory:
