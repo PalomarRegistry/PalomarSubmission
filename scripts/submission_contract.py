@@ -32,6 +32,7 @@ __all__ = (
     "ORCID_RE",
     "ORIGINAL_PROOF_TYPE",
     "PALOMAR_ID_RE",
+    "PROJECT_NAME_MAXIMUM",
     "REPOSITORY_RE",
     "REPOSITORY_ROLES",
     "REPAIRABLE_FORMALIZATION_FIELDS",
@@ -50,6 +51,7 @@ __all__ = (
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FORMALIZATION_BYTES = 256 * 1024
 FORMALIZATION_PROFILE_VERSION = 4
+PROJECT_NAME_MAXIMUM = 300
 REPAIRABLE_FORMALIZATION_FIELDS = frozenset(
     {
         "project.name",
@@ -911,7 +913,11 @@ def load_formalization_metadata(path: Path) -> dict[str, Any]:
             )
 
     project = data.get("project") if isinstance(data.get("project"), dict) else {}
-    check(lambda: _required_text(project.get("name"), "project.name"))
+    check(
+        lambda: _required_bounded_text(
+            project.get("name"), "project.name", maximum=PROJECT_NAME_MAXIMUM
+        )
+    )
     check(
         lambda: _required_bounded_text(
             project.get("description"), "project.description", maximum=10_000
