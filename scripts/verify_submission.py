@@ -25,7 +25,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
@@ -43,6 +45,7 @@ MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
+MAX_CORRECTION_BASELINE_BYTES = 2 * 1024 * 1024
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 COMPARATOR_REQUIRED_KEYS = {
     "challenge_module",
@@ -624,6 +627,78 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def correction_source_evidence(
+    correction: dict[str, Any],
+    *,
+    checkout: Path,
+    repository: str,
+    commit: str,
+    open_url: Callable[..., Any] = urlopen,
+) -> dict[str, dict[str, str]]:
+    """Bind correction review paths to the exact registered baseline bytes."""
+    baseline_binding = correction["baseline"]
+    baseline_path = baseline_binding["path"]
+    encoded_path = "/".join(quote(part, safe="") for part in baseline_path.split("/"))
+    request = Request(
+        "https://raw.githubusercontent.com/PalomarRegistry/PalomarDatabase/"
+        f"main/{encoded_path}",
+        headers={"User-Agent": "PalomarSubmission/correction-validation"},
+    )
+    try:
+        with open_url(request, timeout=30) as response:
+            raw = response.read(MAX_CORRECTION_BASELINE_BYTES + 1)
+    except (HTTPError, URLError, OSError) as error:
+        raise VerificationError(
+            "Registry correction baseline could not be read from PalomarDatabase"
+        ) from error
+    if len(raw) > MAX_CORRECTION_BASELINE_BYTES:
+        raise VerificationError("Registry correction baseline exceeds the 2 MiB bound")
+    if hashlib.sha256(raw).hexdigest() != baseline_binding["sha256"]:
+        raise VerificationError("Registry correction baseline bytes do not match their digest")
+    try:
+        baseline = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError("Registry correction baseline is not valid JSON") from error
+    based_on = correction["based_on"]
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("id") != based_on["id"]
+        or baseline.get("version") != based_on["version"]
+        or baseline.get("source", {}).get("repository") != repository
+        or baseline.get("source", {}).get("commit") != commit
+    ):
+        raise VerificationError(
+            "Registry correction baseline does not match the registered version and source"
+        )
+    formalization = baseline.get("formalization")
+    verification = baseline.get("verification")
+    if not isinstance(formalization, dict) or not isinstance(verification, dict):
+        raise VerificationError("Registry correction baseline lacks source evidence")
+
+    evidence: dict[str, dict[str, str]] = {}
+    for name in ("challenge", "solution"):
+        relative = formalization.get(f"{name}_path")
+        expected_sha256 = verification.get(f"{name}_sha256")
+        if (
+            not isinstance(relative, str)
+            or not isinstance(expected_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+        ):
+            raise VerificationError(
+                f"Registry correction baseline lacks valid {name} source evidence"
+            )
+        normalized = normalized_repository_path(relative, f"Baseline {name} path")
+        source_path = resolve_repository_path(
+            checkout, normalized, f"Baseline {name} path", kind="file"
+        )
+        if sha256(source_path) != expected_sha256:
+            raise VerificationError(
+                f"Registry correction source no longer matches the registered {name} digest"
+            )
+        evidence[name] = {"path": relative, "sha256": expected_sha256}
+    return evidence
 
 
 def repository_license_file(source: Path) -> Path:
@@ -1326,6 +1401,16 @@ def prepare(args: argparse.Namespace) -> int:
         assert license_record is not None
         assert toolchain_path is not None and toolchain is not None and export_commit is not None
         assert config_relative is not None and config_path is not None and config is not None
+        correction_evidence = (
+            correction_source_evidence(
+                correction,
+                checkout=source,
+                repository=repository,
+                commit=commit,
+            )
+            if correction is not None
+            else None
+        )
         report["license"] = license_record
         lakefile_relative = repository_relative_path(source, lakefile)
         toolchain_relative = repository_relative_path(source, toolchain_path)
@@ -1336,9 +1421,11 @@ def prepare(args: argparse.Namespace) -> int:
                 "lean4export_commit": export_commit,
                 "challenge": {
                     "module": config["challenge_module"],
+                    **(correction_evidence["challenge"] if correction_evidence else {}),
                 },
                 "solution": {
                     "module": config["solution_module"],
+                    **(correction_evidence["solution"] if correction_evidence else {}),
                 },
                 "formalization": {
                     "path": metadata_relative.as_posix(),

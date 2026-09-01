@@ -142,6 +142,90 @@ class RegistryCorrectionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "separate orcid field"):
             submission_contract.registry_correction(json.dumps(value))
 
+    def test_correction_source_evidence_is_inherited_from_exact_baseline_bytes(self):
+        correction = self.correction()
+        repository = "example/project"
+        commit = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "lean").mkdir()
+            challenge = checkout / "lean" / "Challenge.lean"
+            solution = checkout / "lean" / "Solution.lean"
+            challenge.write_text("theorem challenge : True := trivial\n")
+            solution.write_text("theorem solution : True := trivial\n")
+            baseline = {
+                "id": correction["based_on"]["id"],
+                "version": correction["based_on"]["version"],
+                "source": {"repository": repository, "commit": commit},
+                "formalization": {
+                    "challenge_path": "lean/Challenge.lean",
+                    "solution_path": "lean/Solution.lean",
+                },
+                "verification": {
+                    "challenge_sha256": verifier.sha256(challenge),
+                    "solution_sha256": verifier.sha256(solution),
+                },
+            }
+            raw = json.dumps(baseline, separators=(",", ":")).encode()
+            correction["baseline"]["sha256"] = hashlib.sha256(raw).hexdigest()
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = raw
+            evidence = verifier.correction_source_evidence(
+                correction,
+                checkout=checkout,
+                repository=repository,
+                commit=commit,
+                open_url=mock.Mock(return_value=response),
+            )
+
+        self.assertEqual(
+            evidence,
+            {
+                "challenge": {
+                    "path": "lean/Challenge.lean",
+                    "sha256": baseline["verification"]["challenge_sha256"],
+                },
+                "solution": {
+                    "path": "lean/Solution.lean",
+                    "sha256": baseline["verification"]["solution_sha256"],
+                },
+            },
+        )
+
+    def test_correction_source_evidence_rejects_changed_registered_source(self):
+        correction = self.correction()
+        repository = "example/project"
+        commit = "b" * 40
+        baseline = {
+            "id": correction["based_on"]["id"],
+            "version": correction["based_on"]["version"],
+            "source": {"repository": repository, "commit": commit},
+            "formalization": {
+                "challenge_path": "Challenge.lean",
+                "solution_path": "Solution.lean",
+            },
+            "verification": {
+                "challenge_sha256": "0" * 64,
+                "solution_sha256": "0" * 64,
+            },
+        }
+        raw = json.dumps(baseline, separators=(",", ":")).encode()
+        correction["baseline"]["sha256"] = hashlib.sha256(raw).hexdigest()
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = raw
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "Challenge.lean").write_text("changed\n")
+            (checkout / "Solution.lean").write_text("changed\n")
+            with self.assertRaisesRegex(VerificationError, "registered challenge digest"):
+                verifier.correction_source_evidence(
+                    correction,
+                    checkout=checkout,
+                    repository=repository,
+                    commit=commit,
+                    open_url=mock.Mock(return_value=response),
+                )
+
 
 class VerifySubmissionTests(unittest.TestCase):
     def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
