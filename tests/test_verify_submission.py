@@ -170,14 +170,21 @@ class RegistryCorrectionContractTests(unittest.TestCase):
             correction["baseline"]["sha256"] = hashlib.sha256(raw).hexdigest()
             response = mock.MagicMock()
             response.__enter__.return_value.read.return_value = raw
+            open_url = mock.Mock(return_value=response)
             evidence = verifier.correction_source_evidence(
                 correction,
                 checkout=checkout,
                 repository=repository,
                 commit=commit,
-                open_url=mock.Mock(return_value=response),
+                open_url=open_url,
             )
 
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://data.palomar-registry.org/"
+            f"entries/{correction['based_on']['id']}-v2.json",
+        )
         self.assertEqual(
             evidence,
             {
