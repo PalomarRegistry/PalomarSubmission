@@ -34,6 +34,7 @@ from scripts.verify_submission import (
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
+    challenge_export_lean_path,
     comparator_failure,
     compile_canonical_challenge,
     detect_spdx_identifier,
@@ -50,11 +51,11 @@ from scripts.verify_submission import (
     parse_lean_header,
     project_tree_url,
     protected_comparator_config,
-    protected_lean_path,
     reject_committed_build_artifacts,
     reject_untrusted_package_artifacts,
     remove_untrusted_lake_state,
     repository_license_file,
+    require_distinct_challenge_root,
     require_protected_paths,
     resolve_module_source,
     run,
@@ -2751,23 +2752,54 @@ review:
         )
         self.assertIn("--unrestricted-network", networked)
 
-    def test_protected_lean_path_precedes_candidate_shadow_modules(self):
-        canonical = Path("/protected/Challenge.olean")
-        value = protected_lean_path(
-            canonical,
+    def test_challenge_export_path_carries_no_candidate_build_output(self):
+        # The Challenge export resolves against Palomar's own artifacts only.
+        # No candidate entry can answer an import the canonical Challenge
+        # makes, and no candidate module can be reached under the Challenge's
+        # root component (PalomarSubmission#108).
+        value = challenge_export_lean_path(
+            Path("/protected"),
             [Path("/toolchain/lib/lean"), Path("/mathlib/lib/lean")],
-            "/evil/lib/lean:/source/.lake/build/lib/lean",
         )
         self.assertEqual(
             value.split(":"),
-            [
-                "/protected",
-                "/toolchain/lib/lean",
-                "/mathlib/lib/lean",
-                "/evil/lib/lean",
-                "/source/.lake/build/lib/lean",
-            ],
+            ["/protected", "/toolchain/lib/lean", "/mathlib/lib/lean"],
         )
+
+    def test_challenge_root_owned_by_a_trusted_package_is_rejected(self):
+        # `Mathlib.Statement` would make the protected directory answer for
+        # every `Mathlib.*` import the Challenge itself makes, because Lean
+        # picks a search path entry by root component alone.
+        with tempfile.TemporaryDirectory() as directory:
+            trusted = Path(directory) / "mathlib" / "lib" / "lean"
+            (trusted / "Mathlib" / "Data").mkdir(parents=True)
+            with self.assertRaises(VerificationError) as caught:
+                require_distinct_challenge_root("Mathlib.Statement", [trusted])
+            self.assertEqual(
+                caught.exception.code, "comparator.challenge_module_root_conflict"
+            )
+            self.assertEqual(caught.exception.owner, "submitter")
+            require_distinct_challenge_root("Palomar.Erdos730.Challenge", [trusted])
+            require_distinct_challenge_root("Challenge", [trusted])
+
+    def test_single_component_challenge_root_is_compared_without_a_suffix(self):
+        # The root of `Challenge` is `Challenge`, not `Challenge.lean`; taking
+        # it from the source suffix missed a directory-only trusted root.
+        with tempfile.TemporaryDirectory() as directory:
+            trusted = Path(directory) / "lib" / "lean"
+            (trusted / "Challenge" / "Basic").mkdir(parents=True)
+            with self.assertRaises(VerificationError):
+                require_distinct_challenge_root("Challenge", [trusted])
+
+    def test_challenge_root_matching_a_trusted_flat_module_is_rejected(self):
+        # A trusted package may publish `Init.olean` rather than an `Init/`
+        # directory; Lean accepts either as the search path entry for `Init.*`.
+        with tempfile.TemporaryDirectory() as directory:
+            trusted = Path(directory) / "lib" / "lean"
+            trusted.mkdir(parents=True)
+            (trusted / "Init.olean").write_bytes(b"trusted")
+            with self.assertRaises(VerificationError):
+                require_distinct_challenge_root("Init.Statement", [trusted])
 
     def test_hostile_canonical_build_cannot_publish_sibling_modules(self):
         with tempfile.TemporaryDirectory() as directory:

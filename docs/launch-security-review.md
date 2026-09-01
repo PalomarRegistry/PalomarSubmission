@@ -54,10 +54,12 @@ artifact as hostile. Its security-relevant sequence is:
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
    outer Landrun/systemd boundary with a verifier-protected, byte-identical copy
    of a submitted configuration that already requires `"enable_nanoda": true`.
-   Resolve the protected
-   Challenge module, Lean core, and frozen trusted modules before candidate
-   paths in Comparator's `LEAN_PATH`; candidate output cannot replace any of
-   them. Require both Lean's kernel and the pinned independent NanoDa kernel to
+   Export the Challenge against the protected Challenge module, Lean core and
+   frozen trusted modules alone, with no candidate path; export the Solution
+   against the path Lake computed for the candidate. Candidate output cannot
+   replace anything the Challenge export reads, and a candidate Challenge that
+   differs from the canonical one is rejected by the statement comparison.
+   Require both Lean's kernel and the pinned independent NanoDa kernel to
    accept the exported proof.
 7. Write the bounded report after sandboxed execution, outside every
    sandbox-writable directory, and upload it as a run artifact. There is no

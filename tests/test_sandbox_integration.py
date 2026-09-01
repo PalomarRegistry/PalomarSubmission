@@ -8,8 +8,8 @@ from pathlib import Path
 
 from scripts.render_challenge import executable_paths as renderer_executable_paths
 from scripts.verify_submission import (
+    challenge_export_lean_path,
     compile_canonical_challenge,
-    protected_lean_path,
     remove_untrusted_lake_state,
     system_readable_paths,
     tool_snapshot,
@@ -211,11 +211,14 @@ class SandboxIntegrationTests(unittest.TestCase):
             check_source = work / "CheckProtected.lean"
             check_source.write_text("import Challenge\nexample : True := probe\n")
             protected_environment = environment.copy()
-            protected_environment["LEAN_PATH"] = protected_lean_path(
-                canonical,
+            protected_environment["LEAN_PATH"] = challenge_export_lean_path(
+                work / "canonical-challenge",
                 trusted_paths,
-                str(candidate),
             )
+            # The candidate's build output is not on the Challenge export's
+            # path at all, so its `Challenge.olean` cannot be reached whatever
+            # order Lean would have searched in.
+            self.assertNotIn(str(candidate), protected_environment["LEAN_PATH"])
             subprocess.run(
                 [str(lean), str(check_source)],
                 check=True,
@@ -266,10 +269,9 @@ class SandboxIntegrationTests(unittest.TestCase):
             check_source = work / "CheckProtected.lean"
             check_source.write_text("import Challenge\nexample : True := probe\n")
             protected_environment = environment.copy()
-            protected_environment["LEAN_PATH"] = protected_lean_path(
-                canonical,
+            protected_environment["LEAN_PATH"] = challenge_export_lean_path(
+                work / "canonical-challenge",
                 trusted_paths,
-                "",
             )
             subprocess.run(
                 [str(lean), str(check_source)],
