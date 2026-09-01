@@ -1012,10 +1012,15 @@ class VerifySubmissionTests(unittest.TestCase):
             "TauCetiProject/TauCeti",
         )
         tauceti = next(root for root in roots if root["repository"] == "TauCetiProject/TauCeti")
+        mathlib = next(
+            root for root in roots if root["repository"] == "leanprover-community/mathlib4"
+        )
+        self.assertIs(mathlib["include_semver_release_tags"], True)
         self.assertEqual(
             tauceti["accepted_revisions"],
             ["221bb56a017bb794421eac4fa543d7a5e85add75"],
         )
+        self.assertNotIn("include_semver_release_tags", tauceti)
         cslib = next(
             root for root in roots if root["repository"] == "leanprover/cslib"
         )
@@ -1023,6 +1028,7 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertEqual(cslib["official_ref"], "refs/heads/main")
         self.assertEqual(cslib["trust_level"], "qualified")
         self.assertNotIn("accepted_revisions", cslib)
+        self.assertNotIn("include_semver_release_tags", cslib)
         self.assertEqual(
             canonical_repository("LeanProver/CSLib", aliases),
             "leanprover/cslib",
@@ -3978,6 +3984,54 @@ review:
                 git_env={"PATH": "/usr/bin"},
             )
         run_mock.assert_not_called()
+
+    def test_canonical_semver_release_tag_accepts_a_diverged_revision(self):
+        revision = "3" * 40
+        remote = mock.Mock(returncode=0)
+        fetch = mock.Mock(returncode=0)
+        ancestry = mock.Mock(returncode=1)
+        tags = mock.Mock(
+            returncode=0,
+            stdout=f"{revision}\trefs/tags/v4.33.1\n",
+        )
+        with mock.patch(
+            "scripts.verify_submission.run",
+            side_effect=[remote, fetch, ancestry, tags],
+        ) as run_mock:
+            verify_official_revision(
+                Path("/source/.lake/packages/mathlib"),
+                repository="leanprover-community/mathlib4",
+                revision=revision,
+                official_ref="refs/heads/master",
+                git_env={"PATH": "/usr/bin"},
+                include_semver_release_tags=True,
+            )
+        tag_command = run_mock.call_args_list[3].args[0]
+        self.assertIn("ls-remote", tag_command)
+        self.assertIn("palomar-official", tag_command)
+
+    def test_nonrelease_tag_does_not_broaden_canonical_history(self):
+        revision = "4" * 40
+        remote = mock.Mock(returncode=0)
+        fetch = mock.Mock(returncode=0)
+        ancestry = mock.Mock(returncode=1)
+        tags = mock.Mock(
+            returncode=0,
+            stdout=f"{revision}\trefs/tags/nightly-testing-2026-08-21\n",
+        )
+        with mock.patch(
+            "scripts.verify_submission.run",
+            side_effect=[remote, fetch, ancestry, tags],
+        ):
+            with self.assertRaisesRegex(VerificationError, "not an ancestor"):
+                verify_official_revision(
+                    Path("/source/.lake/packages/mathlib"),
+                    repository="leanprover-community/mathlib4",
+                    revision=revision,
+                    official_ref="refs/heads/master",
+                    git_env={"PATH": "/usr/bin"},
+                    include_semver_release_tags=True,
+                )
 
     def test_writable_dependency_source_is_untrusted(self):
         with tempfile.TemporaryDirectory() as directory:

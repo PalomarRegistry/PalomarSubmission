@@ -82,6 +82,11 @@ not this credential-free verification workflow.
   the submitted manifest. Git hooks, global/system Git configuration, local
   transport, and interactive credential prompts are disabled. The verifier
   does not run `lake update` or dependency post-update hooks.
+- An allowlisted Challenge root must belong to its canonical branch history or,
+  only where its trusted-root configuration opts in, be named exactly by a
+  canonical semantic-version release tag. The fallback queries the canonical
+  remote after branch ancestry fails; submitted and non-release tags do not
+  expand the accepted history.
 - Checkout containment uses the verifier-owned clone path supplied by the
   caller, never ancestor Git metadata or submitted source. The renderer
   revalidates every nested project-path component when preparing its workspace.
