@@ -642,8 +642,7 @@ def correction_source_evidence(
     baseline_path = baseline_binding["path"]
     encoded_path = "/".join(quote(part, safe="") for part in baseline_path.split("/"))
     request = Request(
-        "https://raw.githubusercontent.com/PalomarRegistry/PalomarDatabase/"
-        f"main/{encoded_path}",
+        f"https://data.palomar-registry.org/{encoded_path}",
         headers={"User-Agent": "PalomarSubmission/correction-validation"},
     )
     try:
@@ -651,7 +650,7 @@ def correction_source_evidence(
             raw = response.read(MAX_CORRECTION_BASELINE_BYTES + 1)
     except (HTTPError, URLError, OSError) as error:
         raise VerificationError(
-            "Registry correction baseline could not be read from PalomarDatabase"
+            "Registry correction baseline could not be read from the published Registry"
         ) from error
     if len(raw) > MAX_CORRECTION_BASELINE_BYTES:
         raise VerificationError("Registry correction baseline exceeds the 2 MiB bound")
