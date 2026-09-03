@@ -32,6 +32,7 @@ from scripts.render_challenge import (
     static_html_sanitize,
     toolchain_verso_commit,
     trusted_lakefile,
+    validated_audit_declarations,
     verify_sandbox_confinement,
 )
 from scripts.render_report import AcceptedRenderPaths
@@ -1639,12 +1640,50 @@ end Example
                     challenge_module="Challenge",
                     lean=Path("/tools/lean"),
                     environment={},
+                    audit_declarations=[
+                        {
+                            "name": "Example.headline",
+                            "declaration": "theorem Example.headline : True",
+                        }
+                    ],
                 )
-            self.assertEqual(metadata["schema_version"], 2)
+            self.assertEqual(metadata["schema_version"], 3)
             self.assertEqual(metadata["imports"], ["Batteries", "Mathlib"])
             self.assertEqual(metadata["module_doc"], "# Module title\n\nMetadata body.")
             self.assertEqual(metadata["declarations"], ["Example.headline"])
+            self.assertEqual(
+                metadata["audit_declarations"],
+                [
+                    {
+                        "name": "Example.headline",
+                        "declaration": "theorem Example.headline : True",
+                    }
+                ],
+            )
             self.assertEqual(metadata["solution_imports"], ["ErdosUnitDistance"])
+
+    def test_audit_declarations_are_an_exact_bounded_correspondence(self):
+        declarations = ["Example.first", "Example.second"]
+        rows = [
+            {"name": "Example.first", "declaration": "theorem Example.first : True"},
+            {"name": "Example.second", "declaration": "def Example.second : Nat"},
+        ]
+        self.assertEqual(validated_audit_declarations(rows, declarations), rows)
+
+        invalid = [
+            rows[:1],
+            [rows[1], rows[0]],
+            [{**rows[0], "source": "submitted"}, rows[1]],
+            [{"name": "Example.first", "declaration": " \n"}, rows[1]],
+            [
+                {"name": "Example.first", "declaration": "x" * (512 * 1024)},
+                rows[1],
+            ],
+        ]
+        for value in invalid:
+            with self.subTest(value=value[0] if value else value):
+                with self.assertRaises(VerificationError):
+                    validated_audit_declarations(value, declarations)
 
     def test_module_doc_parser_skips_strings_and_nested_regular_comments(self):
         source = '''def fake := "/-! nope -/"\n/- outer /-! nested -/ -/\n/-! real doc -/'''
@@ -1760,6 +1799,8 @@ instPartialOrderElement</span></body></html>'''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             channel = root / "diagnostic.json"
+            audit = root / "palomar-audit.json"
+            audit.write_text(json.dumps([]))
             args = argparse.Namespace(
                 challenge=str(root / "Challenge.lean"),
                 solution=str(root / "Solution.lean"),
@@ -1768,6 +1809,7 @@ instPartialOrderElement</span></body></html>'''
                 lean=sys.executable,
                 input_dir=str(root / "raw"),
                 output_dir=str(root / "clean"),
+                audit_declarations=str(audit),
                 diagnostic_out=str(channel),
             )
             with (
