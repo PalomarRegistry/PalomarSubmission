@@ -165,7 +165,8 @@ directories of every package it owns, and runs with network disabled. Trusted
 build directories are then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
-copies only that one module into a fresh protected directory. Comparator's
+copies only its exact module artifact set into a fresh protected directory under
+an unpredictable per-run top-level alias. Comparator's
 `LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
 directory before all candidate build paths. Candidate Lake
 configuration can still build arbitrary proof dependencies in its own fresh
@@ -197,12 +198,12 @@ trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
-solution, export, and NanoDa replay operations. Intake requires the submitted
-Comparator configuration to contain the exact JSON boolean
-`"enable_nanoda": true`; false, missing, or non-boolean values fail. The runner
-copies those validated bytes unchanged to a protected path before executing
-candidate code. There is no compatibility rewrite that can conceal a disabled
-independent-kernel check.
+solution, export, and NanoDa replay operations. The submitted `enable_nanoda`
+field is non-authoritative: the runner writes a protected configuration that
+always enables NanoDa and replaces only the Challenge module name with the
+per-run protected alias before executing candidate code. Comparator's redundant
+`lake build` of that exact alias is skipped by the trusted adapter because the
+verifier has already compiled it outside the candidate Lake plan.
 Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
 The pinned Landrun binary is built without cgo so its pre-Landlock-v8

@@ -17,6 +17,16 @@ on both sides, follows the constants used by that type, and permits its body to
 differ. The axiom pass separately traverses the Solution proof and named
 definition bodies and rejects axioms outside `permitted_axioms`.
 
+At this pinned revision Comparator invokes Landrun as `lake build <module>`
+without a `--` delimiter before the command. Palomar's trusted adapter depends
+on that exact shape only to skip the redundant build of the already-compiled,
+per-run protected Challenge alias. Any Comparator pin update must recheck this
+argv contract; a changed shape fails closed rather than silently selecting a
+candidate Challenge. Comparator still builds the submitted Solution normally.
+If the Solution does not import the submitted Challenge, its Lake build need
+not build that Challenge; the separate renderer continues to validate the
+submitted Challenge through the candidate Lake plan.
+
 Configured `theorem_names` are holes in the same sense, and the walk treats
 them so wherever it reaches them. A named theorem is compared by statement,
 and its proof is not compared even when some other declaration's value

@@ -285,6 +285,7 @@ SANDBOX_ENVIRONMENT = (
     "COMPARATOR_LEAN4EXPORT",
     "COMPARATOR_NANODA",
     "PALOMAR_LANDRUN_REAL",
+    "PALOMAR_PROTECTED_CHALLENGE_MODULE",
 )
 
 
@@ -1055,9 +1056,17 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def protected_challenge_module(config: dict[str, Any]) -> str:
+    """Give the canonical statement an unpredictable per-run top-level namespace."""
+    del config
+    return f"PalomarCanonical{secrets.token_hex(12)}.Challenge"
+
+
 def protected_comparator_config(source: Path, destination: Path) -> Path:
-    """Write Palomar's trusted config with the independent replay forced on."""
+    """Write Palomar's trusted config with its canonical Challenge alias."""
     config = load_comparator_config(source)
+    challenge_module = protected_challenge_module(config)
+    config["challenge_module"] = challenge_module
     config["enable_nanoda"] = True
     write_json(destination, config)
     # Validate the bytes Comparator will actually consume, not only the
@@ -1066,6 +1075,8 @@ def protected_comparator_config(source: Path, destination: Path) -> Path:
     protected = load_comparator_config(destination)
     if protected.get("enable_nanoda") is not True:
         raise VerificationError("protected Comparator configuration did not enable NanoDa")
+    if protected.get("challenge_module") != challenge_module:
+        raise VerificationError("protected Comparator configuration lost its Challenge alias")
     return destination.resolve(strict=True)
 
 
@@ -4173,7 +4184,12 @@ def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
     return "\n".join(line[:400] for line in chosen)
 
 
-def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> VerificationError:
+def comparator_failure(
+    returncode: int,
+    log: str,
+    *,
+    canonical_artifacts: tuple[Path, ...],
+) -> VerificationError:
     """Say what a nonzero Comparator exit means, and whose problem it is.
 
     Comparator judges a submission, but it can also fail without judging one.
@@ -4194,7 +4210,7 @@ def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> Ve
             ),
             retryable=True,
         )
-    if str(canonical_root) in log:
+    if any(str(artifact) in log for artifact in canonical_artifacts):
         return VerificationError(
             "Comparator could not read the Challenge module that Palomar compiled",
             code="palomar.canonical_challenge_unreadable",
@@ -4256,6 +4272,7 @@ def compile_canonical_challenge(
     checkout: Path,
     challenge_source: Path | None = None,
     challenge_module: str = "Challenge",
+    published_module: str | None = None,
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
@@ -4268,8 +4285,9 @@ def compile_canonical_challenge(
     """Compile Challenge directly against frozen trusted dependencies.
 
     Candidate Lake configuration never participates in this compilation. The
-    resulting module is prepended to Comparator's LEAN_PATH so its Challenge
-    export cannot be replaced by candidate build output.
+    resulting module is published under a verifier-owned alias and prepended to
+    Comparator's LEAN_PATH so its Challenge export cannot be replaced by
+    candidate build output or capture a sibling module namespace.
     """
     output_dir = work / "canonical-challenge"
     scratch = work / "canonical-challenge-scratch"
@@ -4323,7 +4341,9 @@ def compile_canonical_challenge(
             "LEAN_SRC_PATH": os.pathsep.join(str(path) for path in sorted(set(source_paths))),
         }
     )
-    module_suffix = module_source_suffix(challenge_module).with_suffix(".olean")
+    module_suffix = module_source_suffix(
+        published_module or challenge_module
+    ).with_suffix(".olean")
     compiled_olean = scratch.joinpath(*module_suffix.parts)
     compiled_olean.parent.mkdir(parents=True, exist_ok=True)
     sandboxed_run(
@@ -4590,6 +4610,9 @@ def execute(args: argparse.Namespace) -> int:
         comparator_config = protected_comparator_config(
             comparator_path, work / "protected-comparator.json"
         )
+        protected_config = load_comparator_config(comparator_config)
+        protected_challenge = protected_config["challenge_module"]
+        env["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
         report["stage"] = "setup"
         readable_paths = sorted(
             {checkout.resolve(), comparator_config, *system_readable_paths()}
@@ -4763,6 +4786,7 @@ def execute(args: argparse.Namespace) -> int:
             checkout=checkout,
             challenge_source=challenge_source,
             challenge_module=report["comparator"]["challenge_module"],
+            published_module=protected_challenge,
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,
@@ -4881,7 +4905,13 @@ def execute(args: argparse.Namespace) -> int:
         log = (proc.stdout + "\n" + proc.stderr).strip()
         report["comparator_log_tail"] = log[-20000:]
         if proc.returncode:
-            error = comparator_failure(proc.returncode, log, canonical_root=canonical_root)
+            error = comparator_failure(
+                proc.returncode,
+                log,
+                canonical_artifacts=canonical_challenge_artifacts(
+                    canonical_olean, module_system=True
+                ),
+            )
             report["status"] = "error" if error.owner == "palomar" else "fail"
             report["errors"].append(str(error))
             report_diagnostic(report, error, stage="comparator")

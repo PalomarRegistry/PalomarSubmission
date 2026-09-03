@@ -74,14 +74,17 @@ Git dependencies hosted anywhere other than GitHub. Palomar must be able to
 preserve the complete source graph consumed by the accepted build in ordinary
 Git. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
-allowlisted dependencies; its protected module is the statement Comparator
-exports. Common submitted prebuilt artifacts are rejected early, and no
-candidate build output can replace the protected statement or frozen trusted
-dependency modules. Only this statement surface is restricted; arbitrary pinned
-dependencies remain available to the proof in `Solution.lean`. Tau Ceti and
-CSLib imports are recorded as qualified trust surfaces; no other statement
-dependency is accepted, including one from a project Palomar has already
-indexed.
+allowlisted dependencies; its protected module is published under an
+unpredictable per-run verifier-owned top-level namespace and is the statement
+Comparator exports. The alias prevents a Challenge and Solution that share a
+submitted top-level namespace from capturing one another through Lean's
+package-prefix search. Common submitted prebuilt artifacts are rejected early,
+and no candidate build output can replace the protected statement or frozen
+trusted dependency modules. Only this statement surface is restricted;
+arbitrary pinned dependencies remain available to the proof in `Solution.lean`.
+Tau Ceti and CSLib imports are recorded as qualified trust surfaces; no other
+statement dependency is accepted, including one from a project Palomar has
+already indexed.
 
 NanoDa replay is a registry invariant, not a submitter option. The optional
 `enable_nanoda` field in a submitted `comparator.json` is retained for upstream
