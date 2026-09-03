@@ -86,6 +86,13 @@ Tau Ceti and CSLib imports are recorded as qualified trust surfaces; no other
 statement dependency is accepted, including one from a project Palomar has
 already indexed.
 
+An allowlisted root normally has to be an ancestor of its configured canonical
+branch. A root may explicitly also accept exact semantic-version release tags
+from that same canonical repository. Mathlib uses this narrow exception because
+an official patch release can add a toolchain-bump commit to the previous
+release while `master` has already advanced on the next release line. Arbitrary,
+nightly, and repository-local tags do not broaden the trusted history.
+
 NanoDa replay is a registry invariant, not a submitter option. The optional
 `enable_nanoda` field in a submitted `comparator.json` is retained for upstream
 compatibility but is deliberately non-authoritative: missing, false, or any
