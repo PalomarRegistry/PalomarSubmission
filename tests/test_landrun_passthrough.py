@@ -1,6 +1,10 @@
 import unittest
 
-from scripts.landrun_passthrough import adapted_arguments, command_index
+from scripts.landrun_passthrough import (
+    adapted_arguments,
+    command_index,
+    skips_protected_challenge_build,
+)
 
 
 class LandrunPassthroughTests(unittest.TestCase):
@@ -55,6 +59,23 @@ class LandrunPassthroughTests(unittest.TestCase):
         self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", adapted)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", adapted)
         self.assertIn("GIT_TERMINAL_PROMPT=0", adapted)
+
+    def test_skips_only_the_verifier_owned_challenge_alias_build(self) -> None:
+        environment = {
+            "PALOMAR_PROTECTED_CHALLENGE_MODULE": "PalomarCanonical123.Challenge"
+        }
+        self.assertTrue(skips_protected_challenge_build(
+            ["--best-effort", "--", "lake", "build", "PalomarCanonical123.Challenge"],
+            environment,
+        ))
+        self.assertFalse(skips_protected_challenge_build(
+            ["--best-effort", "--", "lake", "build", "Project.Solution"],
+            environment,
+        ))
+        self.assertFalse(skips_protected_challenge_build(
+            ["--best-effort", "--", "/tools/lean4export", "PalomarCanonical123.Challenge"],
+            environment,
+        ))
 
 
 if __name__ == "__main__":

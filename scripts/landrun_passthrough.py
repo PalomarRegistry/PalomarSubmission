@@ -44,6 +44,20 @@ FIXED_ENVIRONMENT = (
 )
 
 
+def skips_protected_challenge_build(
+    arguments: list[str], environment: dict[str, str]
+) -> bool:
+    """The verifier has already built Comparator's protected Challenge alias."""
+    protected = environment.get("PALOMAR_PROTECTED_CHALLENGE_MODULE")
+    if protected is None:
+        return False
+    if not protected or any(character in protected for character in ("\0", "\n", "\r")):
+        raise ValueError("invalid protected Challenge module")
+    index = command_index(arguments)
+    command = arguments[index:]
+    return command == ["lake", "build", protected]
+
+
 def command_index(arguments: list[str]) -> int:
     index = 0
     while index < len(arguments):
@@ -77,6 +91,8 @@ def main() -> int:
         if not real.is_file():
             raise ValueError("PALOMAR_LANDRUN_REAL is not a file")
         arguments = sys.argv[1:]
+        if skips_protected_challenge_build(arguments, os.environ):
+            return 0
         os.execv(str(real), [str(real), *adapted_arguments(arguments)])
     except (KeyError, OSError, ValueError) as error:
         print(f"landrun adapter: {error}", file=sys.stderr)

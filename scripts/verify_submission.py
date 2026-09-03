@@ -285,6 +285,7 @@ SANDBOX_ENVIRONMENT = (
     "COMPARATOR_LEAN4EXPORT",
     "COMPARATOR_NANODA",
     "PALOMAR_LANDRUN_REAL",
+    "PALOMAR_PROTECTED_CHALLENGE_MODULE",
 )
 
 
@@ -1055,9 +1056,19 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def protected_challenge_module(config: dict[str, Any]) -> str:
+    """Give the canonical statement a collision-resistant top-level namespace."""
+    encoded = json.dumps(
+        config, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return f"PalomarCanonical{hashlib.sha256(encoded).hexdigest()[:24]}.Challenge"
+
+
 def protected_comparator_config(source: Path, destination: Path) -> Path:
-    """Write Palomar's trusted config with the independent replay forced on."""
+    """Write Palomar's trusted config with its canonical Challenge alias."""
     config = load_comparator_config(source)
+    challenge_module = protected_challenge_module(config)
+    config["challenge_module"] = challenge_module
     config["enable_nanoda"] = True
     write_json(destination, config)
     # Validate the bytes Comparator will actually consume, not only the
@@ -1066,6 +1077,8 @@ def protected_comparator_config(source: Path, destination: Path) -> Path:
     protected = load_comparator_config(destination)
     if protected.get("enable_nanoda") is not True:
         raise VerificationError("protected Comparator configuration did not enable NanoDa")
+    if protected.get("challenge_module") != challenge_module:
+        raise VerificationError("protected Comparator configuration lost its Challenge alias")
     return destination.resolve(strict=True)
 
 
@@ -4256,6 +4269,7 @@ def compile_canonical_challenge(
     checkout: Path,
     challenge_source: Path | None = None,
     challenge_module: str = "Challenge",
+    published_module: str | None = None,
     lean: Path,
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
@@ -4268,8 +4282,9 @@ def compile_canonical_challenge(
     """Compile Challenge directly against frozen trusted dependencies.
 
     Candidate Lake configuration never participates in this compilation. The
-    resulting module is prepended to Comparator's LEAN_PATH so its Challenge
-    export cannot be replaced by candidate build output.
+    resulting module is published under a verifier-owned alias and prepended to
+    Comparator's LEAN_PATH so its Challenge export cannot be replaced by
+    candidate build output or capture a sibling module namespace.
     """
     output_dir = work / "canonical-challenge"
     scratch = work / "canonical-challenge-scratch"
@@ -4323,7 +4338,9 @@ def compile_canonical_challenge(
             "LEAN_SRC_PATH": os.pathsep.join(str(path) for path in sorted(set(source_paths))),
         }
     )
-    module_suffix = module_source_suffix(challenge_module).with_suffix(".olean")
+    module_suffix = module_source_suffix(
+        published_module or challenge_module
+    ).with_suffix(".olean")
     compiled_olean = scratch.joinpath(*module_suffix.parts)
     compiled_olean.parent.mkdir(parents=True, exist_ok=True)
     sandboxed_run(
@@ -4590,6 +4607,9 @@ def execute(args: argparse.Namespace) -> int:
         comparator_config = protected_comparator_config(
             comparator_path, work / "protected-comparator.json"
         )
+        protected_config = load_comparator_config(comparator_config)
+        protected_challenge = protected_config["challenge_module"]
+        env["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
         report["stage"] = "setup"
         readable_paths = sorted(
             {checkout.resolve(), comparator_config, *system_readable_paths()}
@@ -4763,6 +4783,7 @@ def execute(args: argparse.Namespace) -> int:
             checkout=checkout,
             challenge_source=challenge_source,
             challenge_module=report["comparator"]["challenge_module"],
+            published_module=protected_challenge,
             lean=lean,
             lean_prefix=lean_prefix,
             allowlist=allowlist,

@@ -228,6 +228,75 @@ class SandboxIntegrationTests(unittest.TestCase):
         os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
         "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
     )
+    def test_protected_alias_does_not_capture_a_sibling_solution_module(self):
+        """A search root owns a top-level prefix, not one object-file path."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            work = Path(directory).resolve()
+            source = work / "source"
+            (source / "Shared").mkdir(parents=True)
+            challenge_source = source / "Shared" / "Challenge.lean"
+            challenge_source.write_text("theorem challengeProbe : True := by trivial\n")
+            solution_source = source / "Shared" / "Solution.lean"
+            solution_source.write_text("theorem solutionProbe : True := by trivial\n")
+            lean, lean_prefix, landrun, environment, executable_paths = canonical_toolchain()
+            canonical, _dependencies, trusted_paths = compile_canonical_challenge(
+                work,
+                source,
+                checkout=source,
+                challenge_source=challenge_source,
+                challenge_module="Shared.Challenge",
+                published_module="PalomarCanonicalProbe.Challenge",
+                lean=lean,
+                lean_prefix=lean_prefix,
+                allowlist={},
+                environment=environment,
+                landrun=landrun,
+                readable_paths=sorted({source.resolve(), *system_readable_paths()}),
+                executable_paths=executable_paths,
+                tools=tool_snapshot([lean, landrun]),
+            )
+            candidate = work / "candidate-build" / "lib" / "lean"
+            (candidate / "Shared").mkdir(parents=True)
+            subprocess.run(
+                [
+                    str(lean),
+                    "-R",
+                    str(source),
+                    "-o",
+                    str(candidate / "Shared" / "Solution.olean"),
+                    str(solution_source),
+                ],
+                check=True,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            check_source = work / "CheckBoth.lean"
+            check_source.write_text(
+                "import PalomarCanonicalProbe.Challenge\n"
+                "import Shared.Solution\n"
+                "#check challengeProbe\n"
+                "#check solutionProbe\n"
+            )
+            protected_environment = environment.copy()
+            protected_environment["LEAN_PATH"] = protected_lean_path(
+                canonical,
+                trusted_paths,
+                str(candidate),
+                protected_root=work / "canonical-challenge",
+            )
+            subprocess.run(
+                [str(lean), "-R", str(work), str(check_source)],
+                check=True,
+                env=protected_environment,
+                capture_output=True,
+                text=True,
+            )
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
+    )
     def test_module_system_challenge_publishes_every_artifact(self):
         # A module-system source compiles to a public module plus private,
         # server and IR sidecars. Importing it fails unless all four reach the

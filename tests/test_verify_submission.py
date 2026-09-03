@@ -1093,7 +1093,15 @@ class VerifySubmissionTests(unittest.TestCase):
 
             protected = Path(directory) / "protected.json"
             protected_comparator_config(path, protected)
-            self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
+            protected_values = json.loads(protected.read_text())
+            self.assertTrue(protected_values["enable_nanoda"])
+            self.assertRegex(
+                protected_values["challenge_module"],
+                r"^PalomarCanonical[0-9a-f]{24}\.Challenge$",
+            )
+            self.assertNotEqual(
+                protected_values["challenge_module"], config["challenge_module"]
+            )
             self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
 
             protected.unlink()
@@ -2697,6 +2705,7 @@ review:
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
                 "COMPARATOR_NANODA": "/tools/nanoda_bin",
+                "PALOMAR_PROTECTED_CHALLENGE_MODULE": "PalomarCanonical123.Challenge",
                 "SECRET": "no",
             },
             readable_directories=(Path("/source"),),
@@ -2721,6 +2730,7 @@ review:
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)
         self.assertIn("GIT_TERMINAL_PROMPT", command)
         self.assertIn("COMPARATOR_NANODA", command)
+        self.assertIn("PALOMAR_PROTECTED_CHALLENGE_MODULE", command)
         self.assertNotIn("SECRET", command)
         self.assertIn("GIT_CONFIG_GLOBAL", command)
         self.assertIn("GIT_CONFIG_NOSYSTEM", command)
