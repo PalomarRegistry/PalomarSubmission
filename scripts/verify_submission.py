@@ -1057,11 +1057,9 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
 
 
 def protected_challenge_module(config: dict[str, Any]) -> str:
-    """Give the canonical statement a collision-resistant top-level namespace."""
-    encoded = json.dumps(
-        config, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return f"PalomarCanonical{hashlib.sha256(encoded).hexdigest()[:24]}.Challenge"
+    """Give the canonical statement an unpredictable per-run top-level namespace."""
+    del config
+    return f"PalomarCanonical{secrets.token_hex(12)}.Challenge"
 
 
 def protected_comparator_config(source: Path, destination: Path) -> Path:
@@ -4186,7 +4184,12 @@ def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
     return "\n".join(line[:400] for line in chosen)
 
 
-def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> VerificationError:
+def comparator_failure(
+    returncode: int,
+    log: str,
+    *,
+    canonical_artifacts: tuple[Path, ...],
+) -> VerificationError:
     """Say what a nonzero Comparator exit means, and whose problem it is.
 
     Comparator judges a submission, but it can also fail without judging one.
@@ -4207,7 +4210,7 @@ def comparator_failure(returncode: int, log: str, *, canonical_root: Path) -> Ve
             ),
             retryable=True,
         )
-    if str(canonical_root) in log:
+    if any(str(artifact) in log for artifact in canonical_artifacts):
         return VerificationError(
             "Comparator could not read the Challenge module that Palomar compiled",
             code="palomar.canonical_challenge_unreadable",
@@ -4902,7 +4905,13 @@ def execute(args: argparse.Namespace) -> int:
         log = (proc.stdout + "\n" + proc.stderr).strip()
         report["comparator_log_tail"] = log[-20000:]
         if proc.returncode:
-            error = comparator_failure(proc.returncode, log, canonical_root=canonical_root)
+            error = comparator_failure(
+                proc.returncode,
+                log,
+                canonical_artifacts=canonical_challenge_artifacts(
+                    canonical_olean, module_system=True
+                ),
+            )
             report["status"] = "error" if error.owner == "palomar" else "fail"
             report["errors"].append(str(error))
             report_diagnostic(report, error, stage="comparator")

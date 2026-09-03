@@ -1092,7 +1092,12 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
 
             protected = Path(directory) / "protected.json"
-            protected_comparator_config(path, protected)
+            with mock.patch(
+                "scripts.verify_submission.secrets.token_hex",
+                return_value="ab" * 12,
+            ) as nonce:
+                protected_comparator_config(path, protected)
+            nonce.assert_called_once_with(12)
             protected_values = json.loads(protected.read_text())
             self.assertTrue(protected_values["enable_nanoda"])
             self.assertRegex(
@@ -2966,7 +2971,13 @@ review:
             + ["Challenge/Basic.lean:42:8: error: unknown identifier `foo`",
                "uncaught exception: Challenge and solution theorem statement do not match: 'main'"]
         )
-        error = comparator_failure(1, log, canonical_root=Path("/work/canonical-challenge"))
+        error = comparator_failure(
+            1,
+            log,
+            canonical_artifacts=(
+                Path("/work/canonical-challenge/PalomarCanonical123/Challenge.olean"),
+            ),
+        )
         diagnostic = error.diagnostic("comparator")
         self.assertEqual(diagnostic["code"], "comparator.rejected")
         self.assertEqual(diagnostic["owner"], "submitter")
@@ -2978,25 +2989,46 @@ review:
 
     def test_unreadable_canonical_challenge_is_palomars(self):
         canonical_root = Path("/work/canonical-challenge")
+        canonical_artifact = canonical_root / "PalomarCanonical123/Challenge.olean"
         log = (
             "Building Challenge.Basic\nBuild completed successfully (2012 jobs).\n"
             f"uncaught exception: failed to open file "
-            f"'{canonical_root}/Challenge/Basic.olean.server': No such file or directory\n"
+            f"'{canonical_artifact}.server': No such file or directory\n"
             "uncaught exception: Child exited with 1"
         )
-        error = comparator_failure(1, log, canonical_root=canonical_root)
+        error = comparator_failure(
+            1,
+            log,
+            canonical_artifacts=(
+                canonical_artifact,
+                Path(f"{canonical_artifact}.private"),
+                Path(f"{canonical_artifact}.server"),
+                canonical_artifact.with_suffix(".ir"),
+            ),
+        )
         diagnostic = error.diagnostic("comparator")
         self.assertEqual(diagnostic["code"], "palomar.canonical_challenge_unreadable")
         self.assertEqual(diagnostic["owner"], "palomar")
         self.assertTrue(diagnostic["retryable"])
-        self.assertIn("Basic.olean.server", diagnostic["explanation"])
+        self.assertIn("Challenge.olean.server", diagnostic["explanation"])
         self.assertNotIn("new submission", diagnostic["next_action"])
+
+    def test_an_unrelated_file_under_the_canonical_root_is_not_palomars(self):
+        error = comparator_failure(
+            1,
+            "error: object file '/work/canonical-challenge/Other/Helper.olean' does not exist",
+            canonical_artifacts=(
+                Path("/work/canonical-challenge/PalomarCanonical123/Challenge.olean"),
+            ),
+        )
+        self.assertEqual(error.code, "comparator.rejected")
+        self.assertEqual(error.owner, "submitter")
 
     def test_comparator_sandbox_failure_stays_palomars(self):
         error = comparator_failure(
             1,
             "landrun adapter: could not apply the policy",
-            canonical_root=Path("/work/canonical-challenge"),
+            canonical_artifacts=(Path("/work/canonical-challenge/Challenge.olean"),),
         )
         self.assertEqual(error.code, "palomar.comparator_sandbox_failed")
         self.assertEqual(error.owner, "palomar")

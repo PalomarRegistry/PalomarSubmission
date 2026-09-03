@@ -68,6 +68,18 @@ class LandrunPassthroughTests(unittest.TestCase):
             ["--best-effort", "--", "lake", "build", "PalomarCanonical123.Challenge"],
             environment,
         ))
+        # Comparator's pinned argv has no Landrun delimiter before the command.
+        self.assertTrue(skips_protected_challenge_build(
+            [
+                "--best-effort",
+                "--ro",
+                "/source",
+                "lake",
+                "build",
+                "PalomarCanonical123.Challenge",
+            ],
+            environment,
+        ))
         self.assertFalse(skips_protected_challenge_build(
             ["--best-effort", "--", "lake", "build", "Project.Solution"],
             environment,

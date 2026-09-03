@@ -74,8 +74,8 @@ Git dependencies hosted anywhere other than GitHub. Palomar must be able to
 preserve the complete source graph consumed by the accepted build in ordinary
 Git. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
-allowlisted dependencies; its protected module is published under a
-collision-resistant verifier-owned top-level namespace and is the statement
+allowlisted dependencies; its protected module is published under an
+unpredictable per-run verifier-owned top-level namespace and is the statement
 Comparator exports. The alias prevents a Challenge and Solution that share a
 submitted top-level namespace from capturing one another through Lean's
 package-prefix search. Common submitted prebuilt artifacts are rejected early,
