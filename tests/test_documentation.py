@@ -26,9 +26,11 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
     against the workflow file. That invitation is only worth making if the two
     are kept in agreement, and prose does not fail on its own."""
 
-    def test_the_workflow_is_dispatch_only(self):
-        self.assertEqual(list(triggers(WORKFLOW)), ["workflow_dispatch"])
-        self.assertIn("single trigger, `workflow_dispatch`", SECURITY)
+    def test_the_workflow_has_only_the_two_documented_triggers(self):
+        self.assertEqual(
+            set(triggers(WORKFLOW)), {"workflow_call", "workflow_dispatch"}
+        )
+        self.assertIn("`workflow_dispatch` and `workflow_call`", SECURITY)
 
     def test_there_is_one_job_and_it_only_reads(self):
         self.assertEqual(list(WORKFLOW["jobs"]), ["verify"])
@@ -43,7 +45,8 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         # them is an identity or a review has to be rechecked when it changes.
         inputs = triggers(WORKFLOW)["workflow_dispatch"]["inputs"]
         self.assertEqual(
-            sorted(inputs), ["commit", "mode", "options", "repository", "request_id"]
+            sorted(inputs),
+            ["commit", "mode", "options", "pipeline_commit", "repository", "request_id"],
         )
         self.assertEqual(
             sorted(OPTIONAL_FIELDS),
@@ -65,6 +68,20 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         # for, so the number a reader can check is the one on the command line.
         self.assertIn("--execution-budget-seconds 19800", WORKFLOW_TEXT)
         self.assertIn("19,800 seconds", SECURITY)
+
+    def test_standard_profile_matches_the_workflow(self):
+        profile = json.loads((ROOT / "verification-profile.json").read_text())
+        job = WORKFLOW["jobs"]["verify"]
+        self.assertEqual(job["runs-on"], profile["runner"]["label"])
+        self.assertEqual(job["timeout-minutes"], profile["limits"]["job_timeout_minutes"])
+        self.assertEqual(int(job["env"]["LAKE_JOBS"]), profile["limits"]["lake_jobs"])
+        for commit in (
+            profile["trusted_tools"]["comparator_commit"],
+            profile["trusted_tools"]["landrun_commit"],
+            profile["trusted_tools"]["nanoda_commit"],
+        ):
+            self.assertIn(commit, WORKFLOW_TEXT)
+        self.assertIn("`palomar-standard-v1`", SECURITY)
 
     def test_the_only_output_is_the_bounded_report_artifact(self):
         uploads = [

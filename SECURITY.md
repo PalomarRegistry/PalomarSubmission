@@ -36,12 +36,15 @@ environment.
 ## Defensive boundary
 
 The shape of the pipeline is short enough to check against the file.
-[`.github/workflows/submission.yml`](.github/workflows/submission.yml) has a
-single trigger, `workflow_dispatch`, so a run happens because something
-dispatched it, ordinarily the submission server; no push, comment, or pull
-request starts one. There is one job, `verify`, and its `permissions` block is
-`contents: read`. Its inputs are a repository, a commit, an opaque submission
-id, a closed `preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
+[`.github/workflows/submission.yml`](.github/workflows/submission.yml) has two
+explicit triggers, `workflow_dispatch` and `workflow_call`; no push, comment,
+or pull request starts one. The server dispatches authoritative registry runs.
+A public repository may call the same job as a predictive mechanical preflight,
+but that caller has no Palomar state or credential and cannot register its
+result. There is one job, `verify`, and its `permissions` block is
+`contents: read`. Its inputs are a repository, a commit, a pinned pipeline
+commit for reusable calls, an opaque submission id, a closed
+`preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
 allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
 relationship with its optional evidence. That evidence is submitter-written
@@ -327,10 +330,12 @@ required. The
 verifier enforces the wall-clock allowance its caller passes, which
 [`.github/workflows/submission.yml`](.github/workflows/submission.yml) sets to
 19,800 seconds, five and a half hours, and applies no CPU
-quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
-descriptors, and files up to 1 TiB. These are emergency host-containment
-ceilings, not acceptance criteria; deployments may raise them on larger
-workers.
+quota. [`verification-profile.json`](verification-profile.json) defines the
+single accepted `palomar-standard-v1` envelope: a fixed GitHub-hosted runner
+label, absolute memory ceilings, minimum free workspace, fixed Lake
+parallelism, and the task, descriptor, file-size, and wall-clock limits. The
+workflow checks host capacity before candidate execution, and every mechanical
+report binds the profile id, contents digest, runner, and limits.
 
 The automatic GitHub-hosted tier currently supplies 330 minutes of verifier
 capacity inside its 350-minute job. Reaching that capacity, an OOM ceiling, a
@@ -338,10 +343,11 @@ task/file ceiling, or disk exhaustion produces the explicit retryable outcome
 `infrastructure/resource-exhausted` and never a mathematical rejection or
 changes-requested result. The report includes bounded per-phase elapsed time,
 CPU time, maximum resident memory, observed task peak, and approximate peak
-workspace disk consumption. A ten-hour submission can be retried by running the
-same trusted workflow on a worker with the required lifetime; lack of such a
-worker leaves verification inconclusive rather than changing what Palomar
-accepts.
+workspace disk consumption. Resource supervision runs outside the confined
+unit, then reads the unit's result and cgroup memory events before collection;
+an OOM therefore cannot kill the only observer capable of classifying it.
+Lack of a worker satisfying the profile leaves verification inconclusive rather
+than changing what Palomar accepts.
 
 The registry database is inside that boundary too, and two of its controls are
 weaker than the phrase "CI checks it" suggests. `PalomarDatabase` validates

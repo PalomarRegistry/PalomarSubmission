@@ -10,6 +10,37 @@ run-name: >-
 # workflow. The run name carries the submission id because dispatching does
 # not return a run id, and the server has to find the run it started.
 on:
+  # A repository may call the exact same full job as a mechanical preflight.
+  # It has no Palomar state or credentials and is predictive only; the server
+  # remains the authority that dispatches registry verification.
+  workflow_call:
+    inputs:
+      repository:
+        description: Public GitHub repository in owner/name form
+        required: true
+        type: string
+      commit:
+        description: Full 40-character commit to verify
+        required: true
+        type: string
+      pipeline_commit:
+        description: Full PalomarSubmission commit used in this workflow's uses reference
+        required: true
+        type: string
+      request_id:
+        description: Caller-chosen lowercase identifier for the preflight artifact
+        required: true
+        type: string
+      mode:
+        description: Use full for a complete mechanical preflight
+        required: false
+        default: full
+        type: string
+      options:
+        description: JSON object of optional submission fields
+        required: false
+        default: "{}"
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -19,6 +50,9 @@ on:
       commit:
         description: Full 40-character commit to verify
         required: true
+      pipeline_commit:
+        description: Optional PalomarSubmission commit; dispatches use this workflow revision by default
+        required: false
         type: string
       request_id:
         description: Opaque submission id from the submission server
@@ -40,8 +74,10 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
+    env:
+      LAKE_JOBS: "4"
     permissions:
       contents: read
     # One group per submission, so two admitted submissions may verify at the
@@ -70,9 +106,20 @@ jobs:
       - name: Record verification deadline origin
         run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Validate pinned pipeline revision
+        env:
+          PIPELINE_COMMIT: ${{ inputs.pipeline_commit || github.workflow_sha }}
+        run: |
+          if [[ ! "$PIPELINE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "pipeline_commit must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+
       - name: Checkout submission pipeline
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: PalomarRegistry/PalomarSubmission
+          ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
           path: pipeline
           persist-credentials: false
 
@@ -111,6 +158,10 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
+
+      - name: Check palomar-standard-v1 runner capacity
+        if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
+        run: python pipeline/scripts/verification_profile.py --disk-path "$RUNNER_TEMP"
 
       - name: Install pinned elan
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'

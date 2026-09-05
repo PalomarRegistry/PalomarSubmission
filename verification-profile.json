@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "palomar-standard-v1",
+  "runner": {
+    "provider": "github-hosted",
+    "label": "ubuntu-24.04",
+    "architecture": "x86_64"
+  },
+  "limits": {
+    "job_timeout_minutes": 350,
+    "execution_budget_seconds": 19800,
+    "memory_high_bytes": 13958643712,
+    "memory_max_bytes": 15032385536,
+    "minimum_workspace_free_bytes": 21474836480,
+    "tasks_max": 32768,
+    "open_files_max": 1048576,
+    "file_size_max_bytes": 1099511627776,
+    "lake_jobs": 4
+  },
+  "trusted_tools": {
+    "comparator_commit": "575674928e239f5bc452aab72d1dd7b0f1326494",
+    "landrun_commit": "811cfff51ceaf3d9843708aa6d22e9b84ccac8b4",
+    "nanoda_commit": "68d5ca9db226849b41a6fff59d796ff19d0a8840",
+    "lean4export": "release derived from the submitted Lean toolchain"
+  },
+  "cache_policy": "fresh submitted .lake state; pinned Mathlib cache artifacts when available"
+}
