@@ -31,6 +31,32 @@ repository. The run carries the submission identifier in its name, and the
 report leaves as an artifact rather than as a comment, so nothing here needs a
 credential that can write anywhere.
 
+The complete job is also a reusable workflow. A public repository may call it
+at an exact PalomarSubmission commit as a predictive mechanical preflight. It
+runs the same verifier under the checked-in `palomar-standard-v1` profile, but
+has no Palomar state or credentials and is not itself a registry submission.
+Every mechanical report records the profile id and digest.
+
+The optional `verification_profile` field in `comparator.json` names that
+envelope. Its only accepted value is currently `palomar-standard-v1`; omitting
+it selects the same default. Submitters cannot set memory or time limits.
+
+Pin the reusable workflow to a full commit, just as Palomar pins submitted
+source:
+
+```yaml
+jobs:
+  palomar-preflight:
+    uses: PalomarRegistry/PalomarSubmission/.github/workflows/submission.yml@<full-commit>
+    with:
+      repository: ${{ github.repository }}
+      commit: ${{ github.sha }}
+      pipeline_commit: <same-full-commit-as-the-uses-reference>
+      request_id: preflight001
+      mode: full
+      options: '{"comparator_config_path":"comparator.json","authorization_relationship":"maintainer"}'
+```
+
 The workflow has `preflight` and `full` modes. Both check out `main` and invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says

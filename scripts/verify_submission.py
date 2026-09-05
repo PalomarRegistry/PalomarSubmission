@@ -39,6 +39,10 @@ from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
     VerificationError,
 )
+from scripts.verification_profile import (  # noqa: E402
+    PROFILE_PATH,
+    load_profile,
+)
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 MAX_LICENSE_BYTES = 1024 * 1024
@@ -53,7 +57,11 @@ COMPARATOR_REQUIRED_KEYS = {
     "theorem_names",
     "permitted_axioms",
 }
-COMPARATOR_ALLOWED_KEYS = COMPARATOR_REQUIRED_KEYS | {"definition_names", "enable_nanoda"}
+COMPARATOR_ALLOWED_KEYS = COMPARATOR_REQUIRED_KEYS | {
+    "definition_names",
+    "enable_nanoda",
+    "verification_profile",
+}
 COMPILED_ARTIFACT_SUFFIXES = {
     ".a",
     ".bc",
@@ -406,12 +414,14 @@ def report_diagnostic(
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
+VERIFICATION_PROFILE = load_profile()
+VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
 PERMISSIVE_RESOURCE_PROPERTIES = (
-    "MemoryHigh=95%",
-    "MemoryMax=98%",
-    "TasksMax=32768",
-    "LimitNOFILE=1048576",
-    f"LimitFSIZE={1024**4}",
+    f"MemoryHigh={VERIFICATION_LIMITS['memory_high_bytes']}",
+    f"MemoryMax={VERIFICATION_LIMITS['memory_max_bytes']}",
+    f"TasksMax={VERIFICATION_LIMITS['tasks_max']}",
+    f"LimitNOFILE={VERIFICATION_LIMITS['open_files_max']}",
+    f"LimitFSIZE={VERIFICATION_LIMITS['file_size_max_bytes']}",
 )
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
@@ -628,6 +638,17 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verification_profile_evidence() -> dict[str, Any]:
+    """Bind a report to the exact fixed resource envelope that produced it."""
+    return {
+        "id": VERIFICATION_PROFILE["id"],
+        "sha256": sha256(PROFILE_PATH),
+        "runner": dict(VERIFICATION_PROFILE["runner"]),
+        "limits": dict(VERIFICATION_LIMITS),
+        "trusted_tools": dict(VERIFICATION_PROFILE["trusted_tools"]),
+    }
 
 
 def correction_source_evidence(
@@ -1037,6 +1058,14 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
             f"comparator.json has unknown keys: {', '.join(sorted(unknown))}",
             code="comparator.unknown_key",
         )
+    verification_profile = config.get("verification_profile", VERIFICATION_PROFILE["id"])
+    if verification_profile != VERIFICATION_PROFILE["id"]:
+        raise VerificationError(
+            "comparator verification_profile must be "
+            f"{VERIFICATION_PROFILE['id']!r}",
+            code="comparator.unsupported_verification_profile",
+            field="verification_profile",
+        )
     module_source_suffix(config["challenge_module"])
     module_source_suffix(config["solution_module"])
     if config["challenge_module"] == config["solution_module"]:
@@ -1067,6 +1096,8 @@ def protected_comparator_config(source: Path, destination: Path) -> Path:
     config = load_comparator_config(source)
     challenge_module = protected_challenge_module(config)
     config["challenge_module"] = challenge_module
+    # This field selects Palomar's envelope; Comparator does not interpret it.
+    config.pop("verification_profile", None)
     config["enable_nanoda"] = True
     write_json(destination, config)
     # Validate the bytes Comparator will actually consume, not only the
@@ -1091,6 +1122,7 @@ def prepare(args: argparse.Namespace) -> int:
         "status": "error",
         "stage": "intake",
         "phase": "preparation",
+        "verification_profile": verification_profile_evidence(),
         "checked_at": now(),
         "errors": [],
         "warnings": [],
@@ -2409,6 +2441,7 @@ def systemd_command(
     timeout: int = 600,
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
+    unit_name: str | None = None,
 ) -> list[str]:
     global _SYSTEMD_MANAGER
 
@@ -2417,7 +2450,6 @@ def systemd_command(
         raise VerificationError("systemd-run is required for fail-closed confinement")
     common = [
         "--quiet",
-        "--collect",
         "--pipe",
         "--wait",
         "--property=RestrictAddressFamilies=~AF_UNIX",
@@ -2432,6 +2464,12 @@ def systemd_command(
         f"--property=RuntimeMaxSec={max(1, timeout)}s",
         f"--working-directory={cwd}",
     ]
+    if unit_name is None:
+        common.append("--collect")
+    else:
+        if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
+            raise VerificationError("invalid verifier-owned systemd unit name")
+        common.append(f"--unit={unit_name}")
     if not unrestricted_network:
         common.append("--property=PrivateNetwork=yes")
     for property_value in resource_properties:
@@ -2492,6 +2530,104 @@ def systemd_command(
     return [*result, "--", *command]
 
 
+def systemd_unit_outcome(
+    unit_name: str,
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    """Read cgroup termination evidence before systemd is allowed to collect it."""
+    def unavailable(message: str) -> VerificationError:
+        return VerificationError(
+            message,
+            code="provider.resource_telemetry_missing",
+            owner="provider",
+            next_action="Do not change the repository. Retry the same commit later.",
+            retryable=True,
+        )
+
+    if _SYSTEMD_MANAGER not in {"system", "user"}:
+        raise unavailable("systemd confinement manager is unavailable")
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        raise unavailable("systemctl is required to inspect confined phases")
+    manager = [systemctl] if _SYSTEMD_MANAGER == "system" else [systemctl, "--user"]
+    unit = f"{unit_name}.service"
+    properties = [
+        "Result",
+        "ExecMainCode",
+        "ExecMainStatus",
+        "ControlGroup",
+        "MemoryPeak",
+        "CPUUsageNSec",
+    ]
+    proc = run(
+        [*manager, "show", unit, *[f"--property={name}" for name in properties]],
+        cwd=cwd,
+        env=environment,
+        timeout=30,
+        check=False,
+    )
+    try:
+        if proc.returncode:
+            raise unavailable("could not inspect the completed confined phase")
+        outcome = {}
+        for line in proc.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in properties:
+                outcome[key] = value
+        if "Result" not in outcome or "ControlGroup" not in outcome:
+            raise unavailable("completed confined phase has incomplete systemd evidence")
+        events = {"oom": 0, "oom_kill": 0}
+        control_group = outcome.get("ControlGroup", "")
+        if control_group.startswith("/") and ".." not in Path(control_group).parts:
+            event_path = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "memory.events"
+            try:
+                for line in event_path.read_text(encoding="utf-8").splitlines():
+                    name, _, raw = line.partition(" ")
+                    if name in events and raw.isdigit():
+                        events[name] = int(raw)
+            except OSError:
+                # Result remains authoritative when this kernel does not expose
+                # cgroup-v2 memory events to the runner.
+                pass
+        return {**outcome, "memory_events": events}
+    finally:
+        run(
+            [*manager, "stop", unit],
+            cwd=cwd,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+        run(
+            [*manager, "reset-failed", unit],
+            cwd=cwd,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+
+
+def append_resource_outcome(path: Path, phase: str, outcome: dict[str, Any]) -> None:
+    def numeric(name: str) -> int:
+        value = str(outcome.get(name) or "")
+        return int(value) if value.isdigit() else 0
+
+    record = {
+        "phase": f"{phase}:cgroup",
+        "systemd_result": outcome.get("Result"),
+        "exec_main_code": outcome.get("ExecMainCode"),
+        "exec_main_status": outcome.get("ExecMainStatus"),
+        "memory_peak_bytes": numeric("MemoryPeak"),
+        "cpu_usage_nanoseconds": numeric("CPUUsageNSec"),
+        "memory_events": outcome.get("memory_events", {"oom": 0, "oom_kill": 0}),
+    }
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+
 def sandboxed_run(
     command: list[str],
     *,
@@ -2521,14 +2657,29 @@ def sandboxed_run(
         readable_directories=[cwd],
         unrestricted_network=unrestricted_network,
     )
-    systemd_payload = confined
+    phase = Path(command[0]).name[:80] or "phase"
+    unit_name = f"palomar-{secrets.token_hex(12)}"
+    confined_command = systemd_command(
+        confined,
+        cwd=cwd,
+        environment=environment,
+        timeout=timeout,
+        unrestricted_network=unrestricted_network,
+        resource_properties=tuple(
+            dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
+        ),
+        unit_name=unit_name,
+    )
+    observed_command = confined_command
     if _RESOURCE_METRICS_PATH is not None:
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         python = Path(sys.executable).resolve()
         if not metrics_wrapper.is_file():
             raise VerificationError("trusted resource measurement wrapper is missing")
-        phase = Path(command[0]).name[:80] or "phase"
-        systemd_payload = [
+        # The observer deliberately wraps systemd-run rather than running in
+        # the confined unit. An OOM must not kill the only process capable of
+        # recording that the OOM happened.
+        observed_command = [
             str(python),
             str(metrics_wrapper),
             "--output",
@@ -2538,34 +2689,38 @@ def sandboxed_run(
             "--disk-path",
             str(_RESOURCE_DISK_PATH or cwd),
             "--",
-            *confined,
+            *confined_command,
         ]
     proc = run(
-        systemd_command(
-            systemd_payload,
-            cwd=cwd,
-            environment=environment,
-            timeout=timeout,
-            unrestricted_network=unrestricted_network,
-            resource_properties=tuple(
-                dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
-            ),
-        ),
+        observed_command,
         cwd=cwd,
         env=environment,
         timeout=timeout,
         check=False,
     )
+    outcome: dict[str, Any] = {}
+    # Failed transient services remain inspectable until reset. Successful
+    # services may be collected immediately, and need no termination diagnosis.
+    if proc.returncode:
+        outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
+        if _RESOURCE_METRICS_PATH is not None:
+            append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
     verify_tool_snapshot(tools)
     # Payload output is attacker-controlled and must never manufacture an
     # infrastructure outcome merely by printing an OOM or timeout phrase.
     # Signal-style wrapper exits are the bounded evidence available here;
     # Python-enforced wall-clock expiry is reported by TimeoutExpired.
     resource_signals = {124, 137, 143, 152, 153}
-    if proc.returncode in resource_signals:
+    memory_events = outcome.get("memory_events", {})
+    resource_results = {"oom-kill", "resources", "timeout", "watchdog"}
+    if (
+        proc.returncode in resource_signals
+        or outcome.get("Result") in resource_results
+        or int(memory_events.get("oom_kill", 0)) > 0
+    ):
         raise ResourceExhausted(
             f"worker resource ceiling reached while running {Path(command[0]).name} "
-            f"(exit {proc.returncode})"
+            f"(exit {proc.returncode}, result {outcome.get('Result')})"
         )
     if check and proc.returncode:
         detail = (proc.stderr or proc.stdout).strip()[-8000:]
