@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -6,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.render_challenge import CORE_NOTATION_AUDIT_SOURCE
 from scripts.render_challenge import executable_paths as renderer_executable_paths
 from scripts.verify_submission import (
     compile_canonical_challenge,
@@ -18,6 +20,142 @@ from scripts.verify_submission import (
 
 
 class SandboxIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_TEST_LEAN to compile the core-notation audit probe",
+    )
+    def test_core_notation_audit_does_not_load_submission_pretty_printers(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            project = Path(directory).resolve()
+            shutil.copyfile(CORE_NOTATION_AUDIT_SOURCE, project / "PalomarAudit.lean")
+            (project / "Challenge.lean").write_text(
+                '''import Lean
+
+open Lean PrettyPrinter Delaborator
+
+syntax "SPOOFED" : term
+syntax "source_lie" : term
+macro_rules | `(source_lie) => `(True)
+
+@[app_delab Eq]
+meta def spoofEq : Delab := `(SPOOFED)
+
+def Probe.Wrapper (p : Prop) : Prop := p
+
+@[app_unexpander Probe.Wrapper]
+meta def spoofWrapper : Unexpander
+  | `($_ $p) => `(SPOOFED)
+  | _ => throw ()
+
+theorem Probe.eqZero : (0 : Nat) = 0 := rfl
+theorem Probe.macroTruth : source_lie := trivial
+theorem Probe.wrapped : Probe.Wrapper True := trivial
+def Probe.number : Nat := 0
+theorem Probe.proofPayload :
+    @Eq (Subtype fun n : Nat => Eq n 0) ⟨0, rfl⟩ ⟨0, rfl⟩ := rfl
+''',
+                encoding="utf-8",
+            )
+            (project / "lakefile.toml").write_text(
+                '''name = "CoreNotationAuditTest"
+defaultTargets = ["Challenge", "palomar-audit"]
+
+[[lean_lib]]
+name = "Challenge"
+roots = ["Challenge"]
+
+[[lean_exe]]
+name = "palomar-audit"
+root = "PalomarAudit"
+supportInterpreter = true
+''',
+                encoding="utf-8",
+            )
+            lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
+            lake = (lean.parent / "lake").resolve(strict=True)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{lean.parent}:{environment['PATH']}"
+            subprocess.run(
+                [str(lake), "build"],
+                cwd=project,
+                env=environment,
+                check=True,
+                text=True,
+            )
+            result = subprocess.run(
+                [
+                    str(lake),
+                    "env",
+                    str(project / ".lake" / "build" / "bin" / "palomar-audit"),
+                    "Challenge",
+                    "theorem",
+                    "Probe.eqZero",
+                    "theorem",
+                    "Probe.macroTruth",
+                    "theorem",
+                    "Probe.wrapped",
+                    "def",
+                    "Probe.number",
+                    "theorem",
+                    "Probe.proofPayload",
+                ],
+                cwd=project,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            rows = json.loads(result.stdout)
+            self.assertEqual(
+                rows[:4],
+                [
+                    {
+                        "name": "Probe.eqZero",
+                        "declaration": "theorem Probe.eqZero : Eq 0 0",
+                    },
+                    {
+                        "name": "Probe.macroTruth",
+                        "declaration": "theorem Probe.macroTruth : True",
+                    },
+                    {
+                        "name": "Probe.wrapped",
+                        "declaration": "theorem Probe.wrapped : Probe.Wrapper True",
+                    },
+                    {
+                        "name": "Probe.number",
+                        "declaration": "def Probe.number : Nat",
+                    },
+                ],
+            )
+            self.assertEqual(rows[4]["name"], "Probe.proofPayload")
+            self.assertTrue(
+                rows[4]["declaration"].startswith("theorem Probe.proofPayload : Eq ")
+            )
+            self.assertIn("rfl", rows[4]["declaration"])
+            self.assertNotIn("⋯", result.stdout)
+
+            for arguments, diagnostic in (
+                (("theorem", "Probe.number"), "kind does not match"),
+                (("theorem", "Nat.add"), "is not defined by Challenge"),
+                (("theorem", "«Probe.eqZero»"), "not an unambiguous dotted Lean name"),
+            ):
+                rejected = subprocess.run(
+                    [
+                        str(lake),
+                        "env",
+                        str(project / ".lake" / "build" / "bin" / "palomar-audit"),
+                        "Challenge",
+                        *arguments,
+                    ],
+                    cwd=project,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(diagnostic, rejected.stderr)
+
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LANDRUN"),
         "set PALOMAR_TEST_LANDRUN to exercise the real Landrun/systemd boundary",
