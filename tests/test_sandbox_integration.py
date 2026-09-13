@@ -53,6 +53,20 @@ theorem Probe.wrapped : Probe.Wrapper True := trivial
 def Probe.number : Nat := 0
 theorem Probe.proofPayload :
     @Eq (Subtype fun n : Nat => Eq n 0) ⟨0, rfl⟩ ⟨0, rfl⟩ := rfl
+
+-- Mathlib's `FunLike F α β` abbreviates `DFunLike F α fun _ => β`; an instance
+-- stated through the abbreviation only type-checks at `DFunLike.coe` when the
+-- kernel may unfold it. The proxy environment holds the abbreviation as an
+-- opaque axiom, so the copied theorem type must not be kernel-rechecked there.
+class Probe.DFunLike (F : Sort u) (α : outParam (Sort v)) (β : outParam (α → Sort w)) where
+  coe : F → (a : α) → β a
+abbrev Probe.FunLike (F : Sort u) (α : Sort v) (β : Sort w) : Sort (max (max 1 u) v w) :=
+  Probe.DFunLike F α fun _ => β
+structure Probe.Box where
+  val : Nat → Nat
+instance Probe.Box.instFunLike : Probe.FunLike Probe.Box Nat Nat where
+  coe b := b.val
+theorem Probe.abbrevInstance (b : Probe.Box) : Probe.DFunLike.coe b 0 = b.val 0 := rfl
 ''',
                 encoding="utf-8",
             )
@@ -98,6 +112,8 @@ supportInterpreter = true
                     "Probe.number",
                     "theorem",
                     "Probe.proofPayload",
+                    "theorem",
+                    "Probe.abbrevInstance",
                 ],
                 cwd=project,
                 env=environment,
@@ -106,6 +122,12 @@ supportInterpreter = true
                 text=True,
             )
             rows = json.loads(result.stdout)
+            self.assertEqual(rows[5]["name"], "Probe.abbrevInstance")
+            self.assertTrue(
+                rows[5]["declaration"].startswith(
+                    "theorem Probe.abbrevInstance (b : Probe.Box) : Eq (Probe.DFunLike.coe b 0)"
+                )
+            )
             self.assertEqual(
                 rows[:4],
                 [
