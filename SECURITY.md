@@ -170,7 +170,8 @@ directories of every package it owns, and runs with network disabled. Trusted
 build directories are then frozen read/execute-only. The verifier compiles `Challenge.lean`
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
-copies only that one module into a fresh protected directory. Comparator's
+copies only its exact module artifact set into a fresh protected directory under
+an unpredictable per-run top-level alias. Comparator's
 `LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
 directory before all candidate build paths. Candidate Lake
 configuration can still build arbitrary proof dependencies in its own fresh
@@ -202,12 +203,12 @@ trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
 Comparator continues to use its own Landrun domains for its separate challenge,
-solution, export, and NanoDa replay operations. Intake requires the submitted
-Comparator configuration to contain the exact JSON boolean
-`"enable_nanoda": true`; false, missing, or non-boolean values fail. The runner
-copies those validated bytes unchanged to a protected path before executing
-candidate code. There is no compatibility rewrite that can conceal a disabled
-independent-kernel check.
+solution, export, and NanoDa replay operations. The submitted `enable_nanoda`
+field is non-authoritative: the runner writes a protected configuration that
+always enables NanoDa and replaces only the Challenge module name with the
+per-run protected alias before executing candidate code. Comparator's redundant
+`lake build` of that exact alias is skipped by the trusted adapter because the
+verifier has already compiled it outside the candidate Lake plan.
 Linux Landlock domains compose by intersection:
 the inner policy cannot widen the outer policy's filesystem or network access.
 The pinned Landrun binary is built without cgo so its pre-Landlock-v8
@@ -250,6 +251,28 @@ outbound-network denial is proved for each of them. The renderer has no frozen
 trusted build directories, so the verifier's frozen-write probe has nothing to
 assert there and is not run. Both callers use a probe contract that removes
 its owned probe files even when the sandbox runner fails.
+
+Render metadata schema 3 adds one `audit_declarations` row for every compared
+declaration. The audit executable is built from trusted source in a separate
+project outside candidate-writable state. It loads the compiled Challenge with
+Lean environment extensions disabled, with the root build pinned first and
+candidate copies of toolchain module namespaces rejected. It then resets the
+search path to the toolchain alone and copies only declaration types into a
+fresh environment whose pretty-printer extensions come from that toolchain.
+The JSON handoff remains outside every candidate-writable directory. The
+printer disables notation unexpansion explicitly and raises its proof, depth,
+and step limits; if a printer resource limit is nevertheless reached, Lean
+marks the omitted subterm with `⋯`. Consequently,
+submitted delaborators, unexpanders, formatters, notation, and macros cannot
+choose what this secondary rendering says. The PalomarWeb schema-3 consumer
+must be deployed before this producer begins publishing schema 3, because old
+Web versions reject metadata versions they do not know.
+
+This view is deliberately narrower than a semantic audit. It does not expose a
+misleading instance, a silently inserted coercion, or the body hidden behind a
+plausibly named definition. A reviewer still has to read the pinned source and
+the definitions it uses; the core-notation rendering closes notation and macro
+spoofing only.
 
 Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
 protected Comparator configuration, and the verifier script are outside the

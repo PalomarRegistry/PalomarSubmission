@@ -144,6 +144,8 @@ def main() -> int:
     comparator_config = protected_comparator_config(
         source_comparator, work / "protected-comparator.json"
     )
+    protected_challenge = load_comparator_config(comparator_config)["challenge_module"]
+    environment["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
     readable_paths = sorted({source, comparator_config, *system_readable_paths()})
     tools = tool_snapshot(
         [
@@ -307,6 +309,7 @@ def main() -> int:
         checkout=source,
         challenge_source=challenge_source,
         challenge_module=config["challenge_module"],
+        published_module=protected_challenge,
         lean=lean,
         lean_prefix=lean_prefix,
         allowlist=allowlist,
@@ -316,8 +319,9 @@ def main() -> int:
         executable_paths=executable_paths,
         tools=tools,
     )
-    readable_paths = sorted({*readable_paths, canonical.parent})
-    require_protected_paths([canonical], candidate_writable)
+    canonical_root = (work / "canonical-challenge").resolve()
+    readable_paths = sorted({*readable_paths, canonical_root})
+    require_protected_paths([canonical_root, canonical], candidate_writable)
     audit = audit_challenge_sources(
         source,
         checkout=source,
@@ -377,6 +381,7 @@ def main() -> int:
         canonical,
         trusted_lean_paths,
         environment["LEAN_PATH"],
+        protected_root=canonical_root,
     )
     # These builds exercise arbitrary proof-dependency compatibility. Lake may
     # put workspace directories before the inherited path while building; the

@@ -52,13 +52,15 @@ artifact as hostile. Its security-relevant sequence is:
    dependency list and source bytes before candidate Challenge/Solution
    compilation and comparison.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
-   outer Landrun/systemd boundary with a verifier-protected, byte-identical copy
-   of a submitted configuration that already requires `"enable_nanoda": true`.
-   Resolve the protected
-   Challenge module, Lean core, and frozen trusted modules before candidate
-   paths in Comparator's `LEAN_PATH`; candidate output cannot replace any of
-   them. Require both Lean's kernel and the pinned independent NanoDa kernel to
-   accept the exported proof.
+   outer Landrun/systemd boundary with a verifier-authored protected
+   configuration that forces `"enable_nanoda": true` and replaces only the
+   Challenge module name with the canonical alias.
+   Publish the protected Challenge under a collision-resistant verifier-owned
+   top-level module alias, then resolve that alias, Lean core, and frozen trusted
+   modules before candidate paths in Comparator's `LEAN_PATH`; candidate output
+   cannot replace any of them, and the protected root cannot capture a sibling
+   Solution under the submitted Challenge namespace. Require both Lean's kernel
+   and the pinned independent NanoDa kernel to accept the exported proof.
 7. Write the bounded report after sandboxed execution, outside every
    sandbox-writable directory, and upload it as a run artifact. There is no
    second job: the submission server collects the artifact, so nothing here
@@ -153,9 +155,11 @@ The workflow pins Comparator commit
 exports Challenge and Solution environments, checks configured declarations and
 their dependency closures, enforces the permitted-axiom set, and replays the
 comparison through both Lean's kernel and the pinned independent NanoDa kernel.
-The verifier accepts only the exact JSON boolean `"enable_nanoda": true` and
-passes a byte-identical protected copy to Comparator; it does not rewrite a
-submitter-selected value. Comparator's own Landrun domains remain in place.
+The submitted `enable_nanoda` compatibility field is non-authoritative: the
+verifier forces the exact JSON boolean `true` in the protected configuration
+that Comparator consumes. It also replaces the submitted Challenge module name
+with the canonical alias while leaving the Solution and declaration selection
+unchanged. Comparator's own Landrun domains remain in place.
 They are nested inside Palomar's outer domain, so they can narrow but not widen
 Palomar's filesystem or network policy. Palomar independently protects
 the Challenge module because Comparator assumes the supplied Challenge build is
