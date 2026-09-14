@@ -545,7 +545,9 @@ def run(
         proc.kill()
         proc.wait()
         for reader in readers:
-            reader.join()
+            # Descendants (including a service owned by systemd) may still
+            # hold these pipes. Return control so the caller can stop them.
+            reader.join(timeout=1)
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
@@ -2614,10 +2616,13 @@ def systemd_unit_outcome(
         if _SYSTEMD_MANAGER == "system":
             sudo = shutil.which("sudo")
             cleanup_manager = [sudo, "-n", *manager] if sudo else manager
-        for action in ("stop", "reset-failed"):
+        # A timed-out worker may ignore SIGTERM. Kill the remaining cgroup
+        # before stop so cleanup does not depend on the manager's stop timeout.
+        for action in (["kill", "--signal=KILL", "--kill-whom=all"],
+                       ["stop"], ["reset-failed"]):
             try:
                 subprocess.run(
-                    [*cleanup_manager, action, unit], cwd=cwd, env=environment,
+                    [*cleanup_manager, *action, unit], cwd=cwd, env=environment,
                     timeout=10, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             except (OSError, subprocess.TimeoutExpired):

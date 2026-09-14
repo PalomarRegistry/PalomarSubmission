@@ -18,8 +18,8 @@ jobs:
       commit: ${{ github.sha }}
       pipeline_commit: ${{ github.sha }}
       request_id: preflight001
-      mode: preflight
-      options: '{"project_path":"tests/fixtures/reusable-preflight","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
+      mode: full
+      options: '{"project_path":"tests/fixtures/reusable-preflight","comparator_config_path":"tests/fixtures/reusable-preflight/comparator.json","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5

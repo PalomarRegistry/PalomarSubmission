@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -62,13 +63,16 @@ class CapacityReportTests(unittest.TestCase):
                 "palomar-" + "a" * 24, cwd=Path.cwd(), environment={}
             )
         self.assertEqual(outcome["Result"], "timeout")
-        self.assertEqual(calls[1][:4], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop"])
-        self.assertEqual(calls[2][3], "reset-failed")
+        self.assertEqual(calls[1][:6], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "kill",
+                                      "--signal=KILL", "--kill-whom=all"])
+        self.assertEqual(calls[2][3], "stop")
+        self.assertEqual(calls[3][3], "reset-failed")
 
 
 @unittest.skipUnless(os.environ.get("PALOMAR_TEST_LANDRUN"), "requires real Landrun/systemd")
 class RealResourceBoundaryTests(unittest.TestCase):
-    def run_phase(self, code, *, memory="256M", timeout=30, expected=None):
+    def run_phase(self, code, *, memory="256M", timeout=30, expected=None,
+                  extra_properties=()):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             work = Path(directory).resolve()
             scratch = work / "scratch"
@@ -85,7 +89,9 @@ class RealResourceBoundaryTests(unittest.TestCase):
             with mock.patch.object(verifier, "_SYSTEMD_MANAGER", None), \
                  mock.patch.object(verifier, "_EXECUTION_DEADLINE", None), \
                  mock.patch.object(verifier, "_RESOURCE_METRICS_PATH", metrics), \
-                 mock.patch.object(verifier, "_RESOURCE_DISK_PATH", work):
+                 mock.patch.object(verifier, "_RESOURCE_DISK_PATH", work), \
+                 mock.patch.object(verifier, "systemd_command",
+                                   wraps=verifier.systemd_command) as command_spy:
                 def invoke():
                     return verifier.sandboxed_run(
                         [str(python), "-c", code], cwd=work, environment=environment,
@@ -95,7 +101,8 @@ class RealResourceBoundaryTests(unittest.TestCase):
                         tools=verifier.tool_snapshot([python, landrun]), timeout=timeout,
                         # A tiny, deterministic fixture ceiling; production swap policy is unchanged.
                         resource_properties=(f"MemoryMax={memory}", "MemoryHigh=infinity",
-                                             "MemorySwapMax=0", "TimeoutStopSec=2s"),
+                                             "MemorySwapMax=0", "TimeoutStopSec=2s",
+                                             *extra_properties),
                     )
                 if expected:
                     with self.assertRaises(expected) as raised:
@@ -104,6 +111,15 @@ class RealResourceBoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual(invoke().returncode, 0)
                     error = None
+                unit = command_spy.call_args.kwargs["unit_name"] + ".service"
+                manager = ["systemctl"]
+                if verifier._SYSTEMD_MANAGER == "user":
+                    manager.append("--user")
+                active = subprocess.run(
+                    [*manager, "is-active", unit], capture_output=True, text=True, timeout=10,
+                )
+                self.assertNotEqual(active.stdout.strip(), "active", unit)
+                self.assertNotEqual(active.stdout.strip(), "deactivating", unit)
             self.assertTrue(metrics.exists(), f"No worker telemetry; phase error: {error}")
             records = [json.loads(line) for line in metrics.read_text().splitlines()]
             # The payload has write access only to scratch, never the trusted metrics.
@@ -125,10 +141,13 @@ class RealResourceBoundaryTests(unittest.TestCase):
         self.assertTrue(any(row.get("systemd_result") == "oom-kill" for row in records), records)
 
     def test_real_timeout_is_inconclusive_and_stops_the_unit(self):
+        started = time.monotonic()
         records, _ = self.run_phase(
-            "import time; time.sleep(30)", timeout=2,
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+            timeout=2, extra_properties=("RuntimeMaxSec=60s", "TimeoutStopSec=60s"),
             expected=(subprocess.TimeoutExpired, verifier.ResourceExhausted),
         )
+        self.assertLess(time.monotonic() - started, 30)
         self.assertTrue(any(":cgroup" in row["phase"] for row in records), records)
 
     def test_deliberate_exit_137_is_not_oom(self):
