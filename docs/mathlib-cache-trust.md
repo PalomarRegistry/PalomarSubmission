@@ -155,12 +155,24 @@ uses the following staged path in
    metadata is `ProofWidgets4.tar.gz` and its adjacent `.trace`. Build and that
    pair are moved into the fresh canonical `.lake` root, while staged `config`
    is discarded. Revisions with tracked widget assets skip this step.
-2. Under Landrun/systemd with network disabled, the cache client selected by
+2. Before discovery, the renderer inspects the authenticated Mathlib
+   `Cache/IO.lean`. Legacy clients that pin a separately released `leantar`
+   supply both its semantic version and the canonical `digama0/leangz` release
+   URL policy there; an incomplete or different legacy policy fails closed.
+   Trusted credential-free `curl` downloads the corresponding x86-64 Linux
+   archive under a 16 MiB file limit. Palomar accepts exactly one bounded
+   regular `leantar` member beneath the expected archive directory, writes it
+   into the fresh cache directory, and checks its exact reported version in a
+   network-disabled Landrun/systemd process. The binary's digest is checked
+   again after discovery and the same file is moved across the cache-directory
+   reset for unpacking. Modern Mathlib obtains `leantar` from the selected Lean
+   toolchain and skips this bootstrap.
+3. Under Landrun/systemd with network disabled, the cache client selected by
    the accepted dependency checkout is forced to a local empty `file://`
    backend. Palomar treats its output only as a request-key declaration: it
    parses the attempted 16-hex archive names and requires the reported count to
    equal the unique key set, with a hard limit of 10,000 archives.
-3. A verifier-selected `curl`, outside candidate execution but still inside a
+4. A verifier-selected `curl`, outside candidate execution but still inside a
    resource-limited systemd unit, fetches exactly those names from
    the fixed official `mathlib4-master` container, with the legacy `mathlib4`
    container as a fallback. It runs under
@@ -173,7 +185,7 @@ uses the following staged path in
    result but does not prevent those bytes from first crossing the network or
    consuming the phase's wall-time budget. These resource controls do not
    authenticate archive meaning.
-4. With network disabled again, the selected cache client unpacks the
+5. With network disabled again, the selected cache client unpacks the
    downloaded files and the renderer performs its Lean/Verso build. On a
    successful unpack, the download directory is removed immediately afterward.
 
@@ -181,8 +193,8 @@ This split prevents submitted Lake configuration, submitted Lean code, and the
 Mathlib cache client from holding network access. The one Lake process with
 network access is restricted to the independently authenticated, disposable
 legacy ProofWidgets source and release target. None of these controls makes the
-downloaded release or fixed Azure bytes cryptographically equivalent to its
-pinned source.
+downloaded ProofWidgets release, `leantar` release, or fixed Azure bytes
+cryptographically equivalent to its pinned source.
 
 The mechanical-verification artifact records the source/dependency revisions
 and workflow URL. The render artifact additionally records cache archive counts

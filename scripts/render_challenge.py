@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -89,6 +90,8 @@ MAX_BUILD_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CACHE_ARCHIVES = 10_000
 MAX_CACHE_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_CACHE_TOOL_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_CACHE_TOOL_BYTES = 32 * 1024 * 1024
 # GitHub-hosted Actions jobs may run for at most six hours. Keep the confined
 # build's own deadline at that ceiling too; the workflow job remains the final
 # authority if setup time means it reaches GitHub's limit first.
@@ -112,6 +115,13 @@ CACHE_DOWNLOAD_PROPERTIES = (
     "LimitNOFILE=16384",
     f"LimitFSIZE={MAX_CACHE_ARCHIVE_BYTES}",
     "RuntimeMaxSec=1800",
+)
+CACHE_TOOL_DOWNLOAD_PROPERTIES = (
+    "MemoryMax=1G",
+    "TasksMax=64",
+    "LimitNOFILE=1024",
+    f"LimitFSIZE={MAX_CACHE_TOOL_ARCHIVE_BYTES}",
+    "RuntimeMaxSec=300",
 )
 
 # Mathlib's canonical cache moved new master-built artifacts to the
@@ -1899,17 +1909,21 @@ def discover_mathlib_cache_hashes(
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
+    cache_dir: Path | None = None,
+    empty_cache: Path | None = None,
 ) -> tuple[set[str], Path]:
     """Compute cache keys without giving Lake, Lean, or cache code network access."""
-    cache_dir = workspace / ".lake" / "config" / "mathlib-cache"
-    empty_cache = workspace / ".lake" / "config" / "empty-mathlib-cache"
-    for directory in (cache_dir, empty_cache):
-        if directory.is_symlink():
-            directory.unlink()
-        elif directory.exists():
-            shutil.rmtree(directory)
-    cache_dir.mkdir()
-    (empty_cache / "f").mkdir(parents=True)
+    default_cache = workspace / ".lake" / "config" / "mathlib-cache"
+    default_empty = workspace / ".lake" / "config" / "empty-mathlib-cache"
+    if (cache_dir is None) != (empty_cache is None):
+        raise VerificationError("Mathlib cache discovery directories are incomplete")
+    if cache_dir is None:
+        cache_dir, empty_cache = default_cache, default_empty
+        prepare_mathlib_cache_discovery_directories(cache_dir, empty_cache)
+    elif cache_dir != default_cache or empty_cache != default_empty:
+        raise VerificationError("Mathlib cache discovery directories are unexpected")
+    assert empty_cache is not None
+
     cache_env = environment.copy()
     cache_env["MATHLIB_CACHE_DIR"] = str(cache_dir.resolve())
     cache_env["MATHLIB_CACHE_GET_URL"] = f"file://{empty_cache.resolve()}"
@@ -1945,6 +1959,25 @@ def discover_mathlib_cache_hashes(
     return hashes, cache_dir
 
 
+def prepare_mathlib_cache_discovery_directories(
+    cache_dir: Path, empty_cache: Path
+) -> None:
+    """Create the two fresh renderer-owned cache directories."""
+    for directory in (cache_dir, empty_cache):
+        if directory.is_symlink():
+            directory.unlink()
+        elif directory.exists():
+            shutil.rmtree(directory)
+    cache_dir.mkdir()
+    (empty_cache / "f").mkdir(parents=True)
+
+
+@dataclass(frozen=True)
+class PreparedMathlibCacheTool:
+    path: Path
+    sha256: str
+
+
 def download_mathlib_cache(
     hashes: set[str],
     cache_dir: Path,
@@ -1953,6 +1986,7 @@ def download_mathlib_cache(
     environment: dict[str, str],
     curl: Path,
     env_tool: Path,
+    preserved_tool: PreparedMathlibCacheTool | None = None,
 ) -> tuple[int, int]:
     """Fetch any available fixed-host cache bytes without requiring a cache hit.
 
@@ -1960,11 +1994,31 @@ def download_mathlib_cache(
     revision may legitimately have no published archives yet; the confined
     build below can compile the required target from source in that case.
     """
-    if cache_dir.is_symlink():
-        cache_dir.unlink()
-    elif cache_dir.exists():
-        shutil.rmtree(cache_dir)
-    cache_dir.mkdir()
+    held_tool = trusted_work / "mathlib-cache-preserved-tool"
+    if held_tool.exists() or held_tool.is_symlink():
+        raise VerificationError("Mathlib cache preserved-tool path is not fresh")
+    try:
+        if preserved_tool is not None:
+            tool = preserved_tool.path
+            if (
+                tool.parent != cache_dir.resolve()
+                or tool.is_symlink()
+                or not tool.is_file()
+                or tool.stat().st_size > MAX_CACHE_TOOL_BYTES
+                or sha256(tool) != preserved_tool.sha256
+            ):
+                raise VerificationError("prepared Mathlib cache tool changed during discovery")
+            os.replace(tool, held_tool)
+        if cache_dir.is_symlink():
+            cache_dir.unlink()
+        elif cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        cache_dir.mkdir()
+        if preserved_tool is not None:
+            os.replace(held_tool, cache_dir / preserved_tool.path.name)
+    except Exception:
+        held_tool.unlink(missing_ok=True)
+        raise
     config = trusted_work / "mathlib-cache-download.conf"
     if config.is_symlink() or (config.exists() and not config.is_file()):
         raise VerificationError("invalid Mathlib cache download configuration path")
@@ -2035,6 +2089,15 @@ def download_mathlib_cache(
             downloaded = set()
             total = 0
             for path in cache_dir.iterdir():
+                if preserved_tool is not None and path == cache_dir / preserved_tool.path.name:
+                    if (
+                        path.is_symlink()
+                        or not path.is_file()
+                        or path.stat().st_size > MAX_CACHE_TOOL_BYTES
+                        or sha256(path) != preserved_tool.sha256
+                    ):
+                        raise VerificationError("prepared Mathlib cache tool changed during download")
+                    continue
                 if (
                     path.is_symlink()
                     or not path.is_file()
@@ -2052,6 +2115,7 @@ def download_mathlib_cache(
                     raise VerificationError("Mathlib cache downloads exceed the byte cap")
     finally:
         config.unlink(missing_ok=True)
+        held_tool.unlink(missing_ok=True)
     return len(downloaded), total
 
 
@@ -2175,6 +2239,162 @@ def proofwidgets_source_layout(
     if widget_js.exists() or widget_js.is_symlink() or not all(legacy_markers):
         raise VerificationError("ProofWidgets has an unsupported widget release layout")
     return "legacy"
+
+
+def legacy_mathlib_leantar_version(mathlib_dir: Path) -> str | None:
+    """Read the legacy cache tool pin from authenticated Mathlib source."""
+    source = mathlib_dir / "Cache" / "IO.lean"
+    if source.is_symlink() or not source.is_file() or source.stat().st_size > 1024 * 1024:
+        raise VerificationError("Mathlib cache tool source is missing or invalid")
+    text = source.read_text(encoding="utf-8")
+    match = re.search(
+        r'\bdef\s+LEANTARVERSION\s*:=\s*\n\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+        text,
+    )
+    if match is None:
+        if "LEANTARVERSION" in text or "leangz/releases/download" in text:
+            raise VerificationError("Mathlib has an unsupported legacy cache tool policy")
+        return None
+    required = (
+        'IO.CACHEDIR / s!"leantar-{LEANTARVERSION}{EXE}"',
+        's!"https://github.com/digama0/leangz/releases/download/'
+        'v{LEANTARVERSION}/leantar-v{LEANTARVERSION}-{target}.{ext}"',
+    )
+    if not all(marker in text for marker in required):
+        raise VerificationError("Mathlib has an unsupported legacy cache tool policy")
+    return match.group(1)
+
+
+def prepare_legacy_mathlib_cache_tool(
+    workspace: Path,
+    cache_dir: Path,
+    *,
+    checkout: Path,
+    trusted_work: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    curl: Path,
+    env_tool: Path,
+    git: Path,
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> PreparedMathlibCacheTool | None:
+    """Install a bounded, source-pinned legacy leantar before offline discovery."""
+    packages = manifest_packages(workspace)
+    mathlib = next(
+        (
+            package
+            for package in packages
+            if package["repository"].lower() == "leanprover-community/mathlib4"
+        ),
+        None,
+    )
+    if mathlib is None:
+        return None
+    mathlib_dir = package_checkout(workspace, mathlib, checkout=checkout)
+    validate_materialized_git_package(
+        mathlib_dir,
+        mathlib,
+        git=git,
+        environment=environment,
+    )
+    version = legacy_mathlib_leantar_version(mathlib_dir)
+    if version is None:
+        return None
+
+    target = f"leantar-v{version}-x86_64-unknown-linux-musl"
+    archive = trusted_work / f"{target}.tar.gz"
+    binary = cache_dir / f"leantar-{version}"
+    if archive.exists() or archive.is_symlink() or binary.exists() or binary.is_symlink():
+        raise VerificationError("legacy Mathlib cache tool path is not fresh")
+    clean_env = {
+        "HOME": environment["HOME"],
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": environment["TMPDIR"],
+        "LANG": "C.UTF-8",
+    }
+    command = [
+        str(env_tool),
+        "-i",
+        *(f"{name}={value}" for name, value in clean_env.items()),
+        str(curl),
+        "--disable",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--remove-on-error",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--location",
+        "--max-filesize",
+        str(MAX_CACHE_TOOL_ARCHIVE_BYTES),
+        "--output",
+        str(archive),
+        f"https://github.com/digama0/leangz/releases/download/v{version}/{target}.tar.gz",
+    ]
+    try:
+        run(
+            systemd_command(
+                command,
+                cwd=trusted_work,
+                environment=environment,
+                unrestricted_network=True,
+                resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
+            ),
+            cwd=trusted_work,
+            env=environment,
+            timeout=300,
+        )
+        if (
+            archive.is_symlink()
+            or not archive.is_file()
+            or archive.stat().st_size == 0
+            or archive.stat().st_size > MAX_CACHE_TOOL_ARCHIVE_BYTES
+        ):
+            raise VerificationError("legacy Mathlib cache tool archive is invalid")
+        with tarfile.open(archive, mode="r:gz") as bundle:
+            members = bundle.getmembers()
+            expected_directory = f"{target}/"
+            expected_binary = f"{target}/leantar"
+            if (
+                len(members) != 2
+                or members[0].name.rstrip("/") + "/" != expected_directory
+                or not members[0].isdir()
+                or members[1].name != expected_binary
+                or not members[1].isfile()
+                or members[1].size <= 0
+                or members[1].size > MAX_CACHE_TOOL_BYTES
+            ):
+                raise VerificationError("legacy Mathlib cache tool archive has unexpected contents")
+            extracted = bundle.extractfile(members[1])
+            if extracted is None:
+                raise VerificationError("legacy Mathlib cache tool archive has no executable")
+            content = extracted.read(MAX_CACHE_TOOL_BYTES + 1)
+            if len(content) != members[1].size:
+                raise VerificationError("legacy Mathlib cache tool archive has an invalid executable")
+        replace_workspace_file(binary, content)
+        binary.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        digest = sha256(binary)
+        validation_tools = {**tools, binary.resolve(): digest}
+        validated = sandboxed_run(
+            [str(binary.resolve()), "--version"],
+            cwd=workspace,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=[cache_dir.resolve()],
+            readable_paths=[workspace.resolve()],
+            executable_paths=sorted({*executable_paths, binary.resolve()}),
+            tools=validation_tools,
+            timeout=60,
+            resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
+        )
+        if validated.stdout.strip() != f"leantar {version}":
+            raise VerificationError("legacy Mathlib cache tool reports an unexpected version")
+        return PreparedMathlibCacheTool(binary.resolve(), digest)
+    finally:
+        archive.unlink(missing_ok=True)
 
 
 def _validate_legacy_proofwidgets_promotion(promotions: tuple[Any, ...]) -> None:
@@ -2317,12 +2537,14 @@ def stage_legacy_proofwidgets_release(
 def hydrate_mathlib_cache(
     workspace: Path,
     *,
+    checkout: Path,
     trusted_work: Path,
     environment: dict[str, str],
     lake: Path,
     landrun: Path,
     curl: Path,
     env_tool: Path,
+    git: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -2334,6 +2556,22 @@ def hydrate_mathlib_cache(
     # that there is no Mathlib cache to hydrate.
     if not any(package["name"] == "mathlib" for package in manifest_packages(workspace)):
         return {"requested": 0, "downloaded": 0, "bytes": 0}
+    cache_dir = workspace / ".lake" / "config" / "mathlib-cache"
+    empty_cache = workspace / ".lake" / "config" / "empty-mathlib-cache"
+    prepare_mathlib_cache_discovery_directories(cache_dir, empty_cache)
+    prepared_tool = prepare_legacy_mathlib_cache_tool(
+        workspace,
+        cache_dir,
+        checkout=checkout,
+        trusted_work=trusted_work,
+        environment=environment,
+        landrun=landrun,
+        curl=curl,
+        env_tool=env_tool,
+        git=git,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
     hashes, cache_dir = discover_mathlib_cache_hashes(
         workspace,
         environment=environment,
@@ -2343,6 +2581,8 @@ def hydrate_mathlib_cache(
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
+        cache_dir=cache_dir,
+        empty_cache=empty_cache,
     )
     downloaded, total = download_mathlib_cache(
         hashes,
@@ -2351,6 +2591,7 @@ def hydrate_mathlib_cache(
         environment=environment,
         curl=curl,
         env_tool=env_tool,
+        preserved_tool=prepared_tool,
     )
     cache_env = environment.copy()
     cache_env["MATHLIB_CACHE_DIR"] = str(cache_dir.resolve())
@@ -2714,12 +2955,14 @@ def execute(args: argparse.Namespace) -> int:
         tools[audit_executable] = sha256(audit_executable)
         report["mathlib_cache"] = hydrate_mathlib_cache(
             workspace,
+            checkout=workspace_checkout,
             trusted_work=work,
             environment=env,
             lake=lake,
             landrun=landrun,
             curl=curl,
             env_tool=env_tool,
+            git=git,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=allowed_exec,

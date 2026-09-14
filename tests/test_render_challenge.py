@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import html
+import io
 import json
 import os
 import pathlib
@@ -8,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -18,6 +20,7 @@ from scripts.render_challenge import (
     BUILD_TIMEOUT_SECONDS,
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
+    PreparedMathlibCacheTool,
     artifact_manifest,
     compatible_verso_toolchain,
     core_notation_audit_lean_path,
@@ -25,11 +28,13 @@ from scripts.render_challenge import (
     execute,
     extract_module_doc,
     hydrate_mathlib_cache,
+    legacy_mathlib_leantar_version,
     merge_renderer_manifest,
     parsed_challenge_metadata,
     parser,
     prepare,
     prepare_build_metadata_files,
+    prepare_legacy_mathlib_cache_tool,
     prepare_workspace,
     proofwidgets_source_layout,
     sanitize_bundle,
@@ -259,16 +264,22 @@ class RenderChallengeTests(unittest.TestCase):
                     "scripts.render_challenge.download_mathlib_cache",
                     return_value=(0, 0),
                 ),
+                mock.patch(
+                    "scripts.render_challenge.prepare_legacy_mathlib_cache_tool",
+                    return_value=None,
+                ),
                 mock.patch("scripts.render_challenge.sandboxed_run") as sandbox,
             ):
                 result = hydrate_mathlib_cache(
                     root,
+                    checkout=root,
                     trusted_work=root,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     lake=Path("/tools/lake"),
                     landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    git=Path("/usr/bin/git"),
                     writable_directories=[],
                     readable_paths=[],
                     executable_paths=[],
@@ -301,12 +312,14 @@ class RenderChallengeTests(unittest.TestCase):
             ) as discover:
                 result = hydrate_mathlib_cache(
                     root,
+                    checkout=root,
                     trusted_work=root,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     lake=Path("/tools/lake"),
                     landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    git=Path("/usr/bin/git"),
                     writable_directories=[],
                     readable_paths=[],
                     executable_paths=[],
@@ -315,6 +328,142 @@ class RenderChallengeTests(unittest.TestCase):
 
         self.assertEqual(result, {"requested": 0, "downloaded": 0, "bytes": 0})
         discover.assert_not_called()
+
+    def test_legacy_mathlib_cache_tool_version_comes_from_its_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mathlib = Path(directory)
+            source = mathlib / "Cache" / "IO.lean"
+            source.parent.mkdir()
+            source.write_text(
+                '''def LEANTARVERSION :=
+  "0.1.17"
+def LEANTARBIN :=
+  IO.CACHEDIR / s!"leantar-{LEANTARVERSION}{EXE}"
+def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARVERSION}/leantar-v{LEANTARVERSION}-{target}.{ext}"
+''',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(legacy_mathlib_leantar_version(mathlib), "0.1.17")
+
+            source.write_text(
+                source.read_text(encoding="utf-8").replace("digama0/leangz", "attacker/tool"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(VerificationError, "unsupported legacy"):
+                legacy_mathlib_leantar_version(mathlib)
+
+    def test_legacy_mathlib_cache_tool_is_bounded_extracted_and_confined(self):
+        revision = "2" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            workspace = checkout / "project"
+            mathlib = workspace / ".lake/packages/mathlib"
+            cache = workspace / ".lake/config/mathlib-cache"
+            (mathlib / "Cache").mkdir(parents=True)
+            cache.mkdir(parents=True)
+            self.write_manifest(
+                workspace,
+                [
+                    {
+                        "name": "mathlib",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/mathlib4",
+                        "rev": revision,
+                    }
+                ],
+            )
+            (mathlib / "Cache/IO.lean").write_text(
+                '''def LEANTARVERSION :=
+  "0.1.16"
+def LEANTARBIN :=
+  IO.CACHEDIR / s!"leantar-{LEANTARVERSION}{EXE}"
+def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARVERSION}/leantar-v{LEANTARVERSION}-{target}.{ext}"
+''',
+                encoding="utf-8",
+            )
+
+            def download(command, **_kwargs):
+                archive = Path(command[command.index("--output") + 1])
+                target = "leantar-v0.1.16-x86_64-unknown-linux-musl"
+                with tarfile.open(archive, mode="w:gz") as bundle:
+                    directory_info = tarfile.TarInfo(target)
+                    directory_info.type = tarfile.DIRTYPE
+                    bundle.addfile(directory_info)
+                    content = b"trusted leantar fixture"
+                    binary_info = tarfile.TarInfo(f"{target}/leantar")
+                    binary_info.size = len(content)
+                    binary_info.mode = 0o755
+                    bundle.addfile(binary_info, io.BytesIO(content))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch("scripts.render_challenge.validate_materialized_git_package"),
+                mock.patch("scripts.render_challenge.systemd_command", side_effect=lambda c, **k: c),
+                mock.patch("scripts.render_challenge.run", side_effect=download),
+                mock.patch(
+                    "scripts.render_challenge.sandboxed_run",
+                    return_value=subprocess.CompletedProcess([], 0, "leantar 0.1.16\n", ""),
+                ) as sandbox,
+            ):
+                prepared = prepare_legacy_mathlib_cache_tool(
+                    workspace,
+                    cache,
+                    checkout=checkout,
+                    trusted_work=root,
+                    environment={"HOME": str(root), "TMPDIR": str(root)},
+                    landrun=Path("/tools/landrun"),
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    git=Path("/usr/bin/git"),
+                    executable_paths=[],
+                    tools={},
+                )
+
+            self.assertIsNotNone(prepared)
+            assert prepared is not None
+            self.assertEqual(prepared.path.read_bytes(), b"trusted leantar fixture")
+            self.assertEqual(prepared.sha256, hashlib.sha256(prepared.path.read_bytes()).hexdigest())
+            self.assertEqual(
+                sandbox.call_args.args[0],
+                [str(prepared.path), "--version"],
+            )
+            self.assertFalse(sandbox.call_args.kwargs.get("unrestricted_network", False))
+
+    def test_mathlib_cache_download_preserves_the_validated_legacy_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            cache.mkdir()
+            tool = cache / "leantar-0.1.16"
+            tool.write_bytes(b"validated tool")
+            prepared = PreparedMathlibCacheTool(tool.resolve(), hashlib.sha256(tool.read_bytes()).hexdigest())
+            digest = "0123456789abcdef"
+
+            def download(*_args, **_kwargs):
+                (cache / f"{digest}.ltar").write_bytes(b"archive")
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            with (
+                mock.patch("scripts.render_challenge.run", side_effect=download),
+                mock.patch(
+                    "scripts.render_challenge.systemd_command",
+                    side_effect=lambda command, **_kwargs: command,
+                ),
+            ):
+                downloaded, size = download_mathlib_cache(
+                    {digest},
+                    cache,
+                    trusted_work=root,
+                    environment={"HOME": str(root), "TMPDIR": str(root)},
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    preserved_tool=prepared,
+                )
+
+            self.assertEqual((downloaded, size), (1, len(b"archive")))
+            self.assertEqual((cache / "leantar-0.1.16").read_bytes(), b"validated tool")
 
     def write_manifest(self, root: Path, packages: list[dict[str, object]]) -> None:
         (root / "lake-manifest.json").write_text(

@@ -256,12 +256,19 @@ merged render workspace and submitted configuration are not exposed. Afterward
 the renderer rechecks every source inode, accepts exactly the expected release
 archive/trace pair and a confined generated build tree, and atomically promotes
 those outputs without promoting Lake configuration. Modern ProofWidgets skips
-this phase. Trusted `curl` separately fetches fixed-host Mathlib cache archives
-outside candidate execution. All cache discovery, unpack, render, audit, and
-sanitization phases remain network-disabled. The renderer has no frozen trusted
-build directories, so the verifier's frozen-write probe has nothing to assert
-there and is not run. Both callers use a probe contract that removes its owned
-probe files even when the sandbox runner fails.
+this phase. The legacy Mathlib cache client also predates the toolchain-bundled
+`leantar`: the renderer reads its version and canonical release URL policy from
+the same authenticated Mathlib checkout, downloads the corresponding fixed
+x86-64 Linux archive with trusted credential-free `curl`, accepts only its one
+bounded regular executable, and checks the reported version in a
+network-disabled sandbox. Its digest is rechecked after cache discovery and the
+same file is preserved into cache unpacking. Trusted `curl` separately fetches
+fixed-host Mathlib cache archives outside candidate execution. All cache
+discovery, unpack, render, audit, and sanitization phases remain
+network-disabled. The renderer has no frozen trusted build directories, so the
+verifier's frozen-write probe has nothing to assert there and is not run. Both
+callers use a probe contract that removes its owned probe files even when the
+sandbox runner fails.
 
 Render metadata schema 3 adds one `audit_declarations` row for every compared
 declaration. The audit executable is built from trusted source in a separate
