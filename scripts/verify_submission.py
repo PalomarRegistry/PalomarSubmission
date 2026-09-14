@@ -1793,6 +1793,7 @@ def allowed_roots() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         repository = root.get("repository")
         official_ref = root.get("official_ref")
         accepted_revisions = root.get("accepted_revisions", [])
+        include_semver_release_tags = root.get("include_semver_release_tags", False)
         trust_level = root.get("trust_level")
         repository_aliases = root.get("repository_aliases", [])
         if (
@@ -1807,6 +1808,7 @@ def allowed_roots() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
                 for revision in accepted_revisions
             )
             or len(set(accepted_revisions)) != len(accepted_revisions)
+            or type(include_semver_release_tags) is not bool
             or trust_level not in {"high", "qualified"}
             or root.get("include_pinned_manifest_closure") is not True
             or not isinstance(repository_aliases, list)
@@ -1847,6 +1849,7 @@ def verify_official_revision(
     official_ref: str,
     accepted_revisions: list[str] | None = None,
     git_env: dict[str, str],
+    include_semver_release_tags: bool = False,
 ) -> None:
     """Require a package commit to occur in the canonical repository's official history."""
     if revision in (accepted_revisions or []):
@@ -1881,8 +1884,18 @@ def verify_official_revision(
         check=False,
     )
     if ancestry.returncode == 1:
+        if include_semver_release_tags:
+            tags = revision_release_tags(
+                git,
+                revision,
+                env=git_env,
+                remote="palomar-official",
+            )
+            if any(VERSION_RE.fullmatch(tag) for tag in tags):
+                return
         raise VerificationError(
-            f"{repository} revision {revision} is not an ancestor of canonical {official_ref}"
+            f"{repository} revision {revision} is not an ancestor of canonical {official_ref} "
+            "and is not named by an accepted canonical release tag"
         )
     if ancestry.returncode:
         raise VerificationError(f"could not establish official ancestry for {repository}")
@@ -1931,6 +1944,9 @@ def package_allowlist(
                 official_ref=str(root["official_ref"]),
                 accepted_revisions=list(root.get("accepted_revisions", [])),
                 git_env=git_env,
+                include_semver_release_tags=bool(
+                    root.get("include_semver_release_tags", False)
+                ),
             )
             nested = manifest_packages(package_dir)
             closure = {root_package["name"]}
@@ -2921,7 +2937,9 @@ def verify_sandbox_confinement(
 TAG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]*$")
 
 
-def revision_release_tags(git: list[str], revision: str, *, env: dict[str, str]) -> list[str]:
+def revision_release_tags(
+    git: list[str], revision: str, *, env: dict[str, str], remote: str = "origin"
+) -> list[str]:
     """The remote's tag names that point at exactly this revision.
 
     Lake builds a GitHub release download URL from ``git describe --tags
@@ -2930,7 +2948,7 @@ def revision_release_tags(git: list[str], revision: str, *, env: dict[str, str])
     when the tag naming its pinned revision exists in the local checkout.
     """
     listing = run(
-        [*git, "ls-remote", "--tags", "origin"],
+        [*git, "ls-remote", "--tags", remote],
         env=env,
         timeout=EXECUTION_BUDGET_SECONDS,
     ).stdout
