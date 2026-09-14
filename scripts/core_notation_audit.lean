@@ -75,9 +75,16 @@ private partial def addTypeProxy
     type := dependency.type
     isUnsafe := false
   }
+  -- The proxies exist only so the trusted printer can resolve the constants a
+  -- type mentions. Their types were already kernel-checked in the submitted
+  -- module and again by the mechanical stage. Rechecking them here, in an
+  -- environment that holds every Mathlib definition as an opaque axiom, fails
+  -- whenever a type needs an abbreviation (`FunLike`, `SmallCategory`) or an
+  -- instance diamond unfolded, so the kernel is skipped for the copy.
   let ctx : Core.Context := {
     fileName := "<palomar-core-notation-audit-proxy>"
     fileMap := default
+    options := ({} : Options).setBool `debug.skipKernelTC true
   }
   let (_, state) ← (Lean.addDecl proxy).toIO ctx { env }
   set (state.env, seen)
