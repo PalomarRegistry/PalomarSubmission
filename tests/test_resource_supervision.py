@@ -15,6 +15,19 @@ from scripts.verification_profile import VerificationProfileError
 
 
 class CapacityReportTests(unittest.TestCase):
+    def test_parent_timeout_does_not_record_an_active_unit_as_successful(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.jsonl"
+            verifier.append_resource_outcome(
+                path, "worker", {"Result": "success", "ActiveState": "active"},
+                supervisor_timeout=True,
+            )
+            record = json.loads(path.read_text())
+        self.assertTrue(record["supervisor_timeout"])
+        self.assertIsNone(record["systemd_result"])
+        self.assertEqual(record["systemd_result_before_cleanup"], "success")
+        self.assertEqual(record["systemd_active_state"], "active")
+
     def test_undersized_host_emits_a_terminal_provider_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "report.json"
@@ -145,10 +158,12 @@ class RealResourceBoundaryTests(unittest.TestCase):
         records, _ = self.run_phase(
             "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
             timeout=2, extra_properties=("RuntimeMaxSec=60s", "TimeoutStopSec=60s"),
-            expected=(subprocess.TimeoutExpired, verifier.ResourceExhausted),
+            expected=subprocess.TimeoutExpired,
         )
         self.assertLess(time.monotonic() - started, 30)
-        self.assertTrue(any(":cgroup" in row["phase"] for row in records), records)
+        timeout_records = [row for row in records if row.get("supervisor_timeout")]
+        self.assertTrue(timeout_records, records)
+        self.assertTrue(all(row["systemd_result"] is None for row in timeout_records))
 
     def test_deliberate_exit_137_is_not_oom(self):
         records, error = self.run_phase("raise SystemExit(137)", expected=verifier.VerificationError)

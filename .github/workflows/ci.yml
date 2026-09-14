@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   reusable_preflight:
+    # Fork-only commits cannot be checked out from the upstream pipeline repo.
+    if: github.repository == 'PalomarRegistry/PalomarSubmission'
     # A real call with a pull_request/push payload: the called job must read
     # its inputs context rather than expecting dispatch inputs in that payload.
     uses: ./.github/workflows/submission.yml

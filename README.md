@@ -64,6 +64,8 @@ jobs:
 
 Keep `pipeline_commit` equal to the workflow's `uses` SHA. This explicit input
 is for reusable callers only; server dispatches check out their workflow revision.
+The caller asserts this pairing: the workflow validates the SHA format but
+cannot check that it matches `uses`. Third-party preflight reports are advisory.
 The `inputs` context is materialized as the verifier's request for either trigger,
 so a caller's push or pull-request event cannot replace the supplied inputs.
 

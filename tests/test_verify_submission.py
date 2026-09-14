@@ -4820,7 +4820,9 @@ class DispatchWorkflowTests(unittest.TestCase):
         concurrency = self.workflow()["jobs"]["verify"]["concurrency"]
         self.assertEqual(
             concurrency["group"],
-            "palomar-verify-${{ inputs.mode }}-${{ inputs.request_id }}",
+            "palomar-verify-${{ inputs.pipeline_commit && "
+            "format('call-{0}-{1}-', github.run_id, github.run_attempt) || '' }}"
+            "${{ inputs.mode }}-${{ inputs.request_id }}",
         )
         self.assertEqual(concurrency["cancel-in-progress"], "false")
 

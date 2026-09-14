@@ -383,7 +383,11 @@ approximate workspace usage are measured inside the systemd unit, outside
 Landrun. If that observer dies with the workload, the parent reads the unit's
 trusted termination result and available cgroup evidence, then stops/resets it
 with a bounded cleanup budget. Absent post-mortem cgroup files are not proof
-that no OOM occurred. The report binds the profile id and digest; the profile
+that no OOM occurred. When the parent reaches its deadline, the record marks
+`supervisor_timeout` and keeps the observed unit result in
+`systemd_result_before_cleanup`. It leaves `systemd_result` unset because a
+still-running unit's initial `Result=success` is not a termination verdict.
+The report binds the profile id and digest; the profile
 is not a submitter-selectable Comparator configuration field.
 
 The registry database is inside that boundary too, and two of its controls are

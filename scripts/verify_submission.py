@@ -548,8 +548,8 @@ def run(
             # Descendants (including a service owned by systemd) may still
             # hold these pipes. Return control so the caller can stop them.
             reader.join(timeout=1)
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        stdout = bytes(stdout_bytes).decode("utf-8", errors="replace")
+        stderr = bytes(stderr_bytes).decode("utf-8", errors="replace")
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
     for reader in readers:
         reader.join()
@@ -2575,6 +2575,7 @@ def systemd_unit_outcome(
     unit = f"{unit_name}.service"
     properties = [
         "Result",
+        "ActiveState",
         "ExecMainCode",
         "ExecMainStatus",
         "ControlGroup",
@@ -2629,20 +2630,28 @@ def systemd_unit_outcome(
                 pass  # Cleanup must not replace the phase's diagnostic.
 
 
-def append_resource_outcome(path: Path, phase: str, outcome: dict[str, Any]) -> None:
+def append_resource_outcome(
+    path: Path, phase: str, outcome: dict[str, Any], *, supervisor_timeout: bool = False,
+) -> None:
     def numeric(name: str) -> int:
         value = str(outcome.get(name) or "")
         return int(value) if value.isdigit() else 0
 
     record = {
         "phase": f"{phase}:cgroup",
-        "systemd_result": outcome.get("Result"),
+        # A still-running unit starts with Result=success. That snapshot is
+        # not a successful termination when the parent has reached its deadline.
+        "systemd_result": None if supervisor_timeout else outcome.get("Result"),
+        "supervisor_timeout": supervisor_timeout,
+        "systemd_active_state": outcome.get("ActiveState"),
         "exec_main_code": outcome.get("ExecMainCode"),
         "exec_main_status": outcome.get("ExecMainStatus"),
         "memory_peak_bytes": numeric("MemoryPeak"),
         "cpu_usage_nanoseconds": numeric("CPUUsageNSec"),
         "memory_events": outcome.get("memory_events", {"oom": 0, "oom_kill": 0}),
     }
+    if supervisor_timeout:
+        record["systemd_result_before_cleanup"] = outcome.get("Result")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -2719,7 +2728,9 @@ def sandboxed_run(
         try:
             outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
             if _RESOURCE_METRICS_PATH is not None:
-                append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
+                append_resource_outcome(
+                    _RESOURCE_METRICS_PATH, phase, outcome, supervisor_timeout=True,
+                )
         except VerificationError:
             pass  # The parent's observed wall-clock expiry is already sufficient.
         raise

@@ -74,6 +74,10 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         job = WORKFLOW["jobs"]["verify"]
         self.assertEqual(job["runs-on"], profile["runner"]["label"])
         self.assertEqual(job["timeout-minutes"], profile["limits"]["job_timeout_minutes"])
+        self.assertIn(
+            f"--execution-budget-seconds {profile['limits']['execution_budget_seconds']}",
+            WORKFLOW_TEXT,
+        )
         for commit in (
             profile["trusted_tools"]["comparator_commit"],
             profile["trusted_tools"]["landrun_commit"],
