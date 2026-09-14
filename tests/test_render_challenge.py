@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
@@ -30,7 +31,9 @@ from scripts.render_challenge import (
     prepare,
     prepare_build_metadata_files,
     prepare_workspace,
+    proofwidgets_source_layout,
     sanitize_bundle,
+    stage_legacy_proofwidgets_release,
     static_html_sanitize,
     toolchain_verso_commit,
     trusted_lakefile,
@@ -319,6 +322,266 @@ class RenderChallengeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def initialize_proofwidgets_source(
+        self, root: Path, lakefile: str, *, tracked_widgets: bool
+    ) -> Path:
+        package = root / "proofwidgets"
+        package.mkdir()
+        (package / "lakefile.lean").write_text(lakefile, encoding="utf-8")
+        if tracked_widgets:
+            widgets = package / "widget" / "js"
+            widgets.mkdir(parents=True)
+            (widgets / "index.js").write_text("export const proofwidgets = true;\n")
+        subprocess.run(["git", "init", "--quiet", str(package)], check=True)
+        subprocess.run(["git", "-C", str(package), "add", "--all"], check=True)
+        return package
+
+    def test_proofwidgets_layout_recognizes_the_legacy_release_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self.initialize_proofwidgets_source(
+                root,
+                '''import Lake
+package proofwidgets where
+  preferReleaseBuild := true
+  buildArchive? := "ProofWidgets4.tar.gz"
+  releaseRepo := "https://github.com/leanprover-community/ProofWidgets4"
+''',
+                tracked_widgets=False,
+            )
+
+            self.assertEqual(
+                proofwidgets_source_layout(
+                    package,
+                    git=Path(shutil.which("git") or "git"),
+                    environment=os.environ.copy(),
+                ),
+                "legacy",
+            )
+
+    def test_proofwidgets_layout_recognizes_tracked_modern_widgets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self.initialize_proofwidgets_source(
+                root,
+                "import Lake\npackage proofwidgets where\n",
+                tracked_widgets=True,
+            )
+
+            self.assertEqual(
+                proofwidgets_source_layout(
+                    package,
+                    git=Path(shutil.which("git") or "git"),
+                    environment=os.environ.copy(),
+                ),
+                "modern",
+            )
+
+    def test_proofwidgets_layout_rejects_a_mixed_release_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self.initialize_proofwidgets_source(
+                root,
+                '''import Lake
+package proofwidgets where
+  preferReleaseBuild := true
+  buildArchive? := "ProofWidgets4.tar.gz"
+''',
+                tracked_widgets=False,
+            )
+
+            with self.assertRaisesRegex(VerificationError, "incomplete legacy"):
+                proofwidgets_source_layout(
+                    package,
+                    git=Path(shutil.which("git") or "git"),
+                    environment=os.environ.copy(),
+                )
+
+    def test_legacy_proofwidgets_release_is_staged_from_mathlibs_exact_pin(self):
+        revision = "1" * 40
+        mathlib_revision = "2" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / "checkout"
+            workspace = checkout / "project"
+            package_root = workspace / ".lake" / "packages"
+            proofwidgets = package_root / "proofwidgets"
+            mathlib = package_root / "mathlib"
+            proofwidgets.mkdir(parents=True)
+            mathlib.mkdir()
+            self.write_manifest(
+                workspace,
+                [
+                    {
+                        "name": "mathlib",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/mathlib4",
+                        "rev": mathlib_revision,
+                    },
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": revision,
+                    },
+                ],
+            )
+            self.write_manifest(
+                mathlib,
+                [
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": revision,
+                    }
+                ],
+            )
+
+            def stage(*_args, **kwargs):
+                source = kwargs["destination"]
+                root_package = source / ".lake" / "packages" / "proofwidgets"
+                lake_root = root_package / ".lake"
+                (lake_root / "config").mkdir(parents=True)
+                (lake_root / "build" / "js").mkdir(parents=True)
+                return types.SimpleNamespace(
+                    source=source,
+                    root_package=root_package,
+                    lake_roots=(lake_root,),
+                    source_snapshots=(),
+                )
+
+            def promotions(_workspace, staged, **_kwargs):
+                staged_build = staged / ".lake/packages/proofwidgets/.lake/build"
+                canonical_build = proofwidgets / ".lake/build"
+                return (
+                    types.SimpleNamespace(
+                        name="proofwidgets",
+                        staged_build=staged_build,
+                        canonical_build=canonical_build,
+                        metadata=(
+                            (
+                                staged_build.parent / "ProofWidgets4.tar.gz",
+                                canonical_build.parent / "ProofWidgets4.tar.gz",
+                            ),
+                            (
+                                staged_build.parent / "ProofWidgets4.tar.gz.trace",
+                                canonical_build.parent / "ProofWidgets4.tar.gz.trace",
+                            ),
+                        ),
+                    ),
+                )
+
+            with (
+                mock.patch(
+                    "scripts.render_challenge.validate_materialized_git_package"
+                ) as validate_checkout,
+                mock.patch(
+                    "scripts.render_challenge.proofwidgets_source_layout",
+                    return_value="legacy",
+                ),
+                mock.patch("scripts.render_challenge.reset_trusted_lake_state") as reset,
+                mock.patch(
+                    "scripts.render_challenge.system_readable_paths",
+                    return_value=[Path("/system/certificates")],
+                ),
+                mock.patch(
+                    "scripts.render_challenge.stage_trusted_closure", side_effect=stage
+                ) as stage_closure,
+                mock.patch("scripts.render_challenge.sandboxed_run") as sandbox,
+                mock.patch(
+                    "scripts.render_challenge.validate_trusted_source_snapshots"
+                ) as validate_sources,
+                mock.patch(
+                    "scripts.render_challenge.validate_staged_lake_promotions",
+                    side_effect=promotions,
+                ),
+                mock.patch("scripts.render_challenge.promote_staged_lake_state") as promote,
+            ):
+                layout = stage_legacy_proofwidgets_release(
+                    workspace,
+                    checkout=checkout,
+                    environment={"HOME": str(workspace), "TMPDIR": str(workspace)},
+                    lake=Path("/tools/lake"),
+                    landrun=Path("/tools/landrun"),
+                    git=Path("/tools/git"),
+                    executable_paths=[],
+                    tools={},
+                )
+
+        self.assertEqual(layout, "legacy")
+        self.assertEqual(validate_checkout.call_count, 2)
+        reset.assert_called_once()
+        self.assertEqual(stage_closure.call_args.kwargs["closure"], {"proofwidgets"})
+        self.assertEqual(stage_closure.call_args.kwargs["root_name"], "proofwidgets")
+        self.assertEqual(
+            sandbox.call_args.args[0],
+            ["/tools/lake", "build", "proofwidgets:release"],
+        )
+        self.assertTrue(sandbox.call_args.kwargs["unrestricted_network"])
+        self.assertIn(
+            Path("/system/certificates"), sandbox.call_args.kwargs["readable_paths"]
+        )
+        validate_sources.assert_called_once_with(())
+        promote.assert_called_once()
+
+    def test_legacy_proofwidgets_must_match_mathlibs_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / "checkout"
+            workspace = checkout / "project"
+            package_root = workspace / ".lake" / "packages"
+            proofwidgets = package_root / "proofwidgets"
+            mathlib = package_root / "mathlib"
+            proofwidgets.mkdir(parents=True)
+            mathlib.mkdir()
+            self.write_manifest(
+                workspace,
+                [
+                    {
+                        "name": "mathlib",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/mathlib4",
+                        "rev": "2" * 40,
+                    },
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": "1" * 40,
+                    },
+                ],
+            )
+            self.write_manifest(
+                mathlib,
+                [
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": "3" * 40,
+                    }
+                ],
+            )
+            with (
+                mock.patch("scripts.render_challenge.validate_materialized_git_package"),
+                mock.patch(
+                    "scripts.render_challenge.proofwidgets_source_layout",
+                    return_value="legacy",
+                ),
+                mock.patch("scripts.render_challenge.sandboxed_run") as sandbox,
+            ):
+                with self.assertRaisesRegex(VerificationError, "authenticated Mathlib"):
+                    stage_legacy_proofwidgets_release(
+                        workspace,
+                        checkout=checkout,
+                        environment={},
+                        lake=Path("/tools/lake"),
+                        landrun=Path("/tools/landrun"),
+                        git=Path("/tools/git"),
+                        executable_paths=[],
+                        tools={},
+                    )
+        sandbox.assert_not_called()
+
     def test_a_project_without_proofwidgets_grants_no_build_sidecars(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -354,6 +617,34 @@ class RenderChallengeTests(unittest.TestCase):
             )
             for path in granted:
                 self.assertEqual(path.read_bytes(), b"")
+
+    def test_legacy_proofwidgets_grants_only_the_lockfile_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_manifest(
+                root,
+                [
+                    {
+                        "name": "proofwidgets",
+                        "type": "git",
+                        "url": "https://github.com/leanprover-community/ProofWidgets4",
+                        "rev": "0" * 40,
+                    }
+                ],
+            )
+            (root / ".lake/packages/proofwidgets/widget").mkdir(parents=True)
+
+            granted = prepare_build_metadata_files(root, "legacy")
+
+            self.assertEqual(
+                granted,
+                (
+                    (
+                        root
+                        / ".lake/packages/proofwidgets/widget/package-lock.json.hash"
+                    ).resolve(),
+                ),
+            )
 
     def test_an_impostor_proofwidgets_package_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

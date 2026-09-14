@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -48,22 +49,31 @@ from scripts.verify_submission import (  # noqa: E402
     module_source_suffix,
     normalized_repository_path,
     now,
+    package_checkout,
     parse_lean_header,
+    promote_staged_lake_state,
     require_protected_paths,
+    reset_trusted_lake_state,
     resolve_release_commit,
     resolve_repository_path,
     run,
     sandboxed_run,
     sha256,
+    stage_trusted_closure,
     supported_toolchain,
+    system_readable_paths,
     systemd_command,
     tool_snapshot,
     tree_size,
+    validate_staged_lake_promotions,
+    validate_trusted_source_snapshots,
     verify_sandbox_confinement,
     write_json,
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
+PROOFWIDGETS_REPOSITORY = "leanprover-community/proofwidgets4"
+PROOFWIDGETS_RELEASE_ARCHIVE = "ProofWidgets4.tar.gz"
 MISSING_DECLARATION_CODE = "challenge.declaration_not_rendered"
 MISSING_DECLARATION_EXIT = 3
 MAX_REPORTED_DECLARATIONS = 50
@@ -2045,6 +2055,265 @@ def download_mathlib_cache(
     return len(downloaded), total
 
 
+def validate_materialized_git_package(
+    package_dir: Path,
+    package: dict[str, str],
+    *,
+    git: Path,
+    environment: dict[str, str],
+) -> None:
+    """Bind a network-enabled package action to its materialized Git identity."""
+    git_env = environment.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    command = [
+        str(git),
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.file.allow=never",
+        "-C",
+        str(package_dir),
+    ]
+    head = run([*command, "rev-parse", "HEAD"], env=git_env).stdout.strip()
+    if head != package["revision"]:
+        raise VerificationError(
+            f"materialized {package['name']} checkout does not match lake-manifest.json"
+        )
+    origin = run([*command, "remote", "get-url", "origin"], env=git_env).stdout.strip()
+    if (github_repository(origin) or "").lower() != package["repository"].lower():
+        raise VerificationError(f"materialized {package['name']} checkout has an unexpected origin")
+    changes = run(
+        [*command, "status", "--porcelain=v1", "--untracked-files=all"],
+        env=git_env,
+    ).stdout.strip()
+    if changes:
+        raise VerificationError(
+            f"materialized {package['name']} source changed before trusted release staging"
+        )
+
+
+def proofwidgets_source_layout(
+    package_dir: Path,
+    *,
+    git: Path,
+    environment: dict[str, str],
+) -> str:
+    """Classify canonical ProofWidgets source, failing closed on mixed layouts."""
+    lakefiles = [
+        path
+        for path in (package_dir / "lakefile.lean", package_dir / "lakefile.toml")
+        if path.exists() or path.is_symlink()
+    ]
+    if (
+        len(lakefiles) != 1
+        or lakefiles[0].is_symlink()
+        or not lakefiles[0].is_file()
+        or lakefiles[0].stat().st_size > 1024 * 1024
+    ):
+        raise VerificationError("ProofWidgets has an ambiguous or invalid Lake configuration")
+    lakefile = lakefiles[0].read_text(encoding="utf-8")
+    legacy_markers = (
+        re.search(r"\bpreferReleaseBuild\s*:=\s*true\b", lakefile) is not None,
+        re.search(
+            rf'\bbuildArchive\?\s*:=\s*"{re.escape(PROOFWIDGETS_RELEASE_ARCHIVE)}"',
+            lakefile,
+        )
+        is not None,
+        re.search(
+            r'\breleaseRepo\s*:=\s*"https://github\.com/'
+            r'leanprover-community/ProofWidgets4"',
+            lakefile,
+        )
+        is not None,
+    )
+    if any(legacy_markers) and not all(legacy_markers):
+        raise VerificationError("ProofWidgets has an incomplete legacy release configuration")
+
+    git_env = environment.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    tracked = run(
+        [
+            str(git),
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.file.allow=never",
+            "-C",
+            str(package_dir),
+            "ls-files",
+            "-z",
+            "--",
+            "widget/js",
+        ],
+        env=git_env,
+    ).stdout
+    tracked_js = bool(tracked.rstrip("\0"))
+    widget_js = package_dir / "widget" / "js"
+    real_widget_js = widget_js.is_dir() and not widget_js.is_symlink()
+    if tracked_js != real_widget_js:
+        raise VerificationError("ProofWidgets tracked widget layout does not match its checkout")
+    if tracked_js:
+        if any(legacy_markers):
+            raise VerificationError("ProofWidgets mixes tracked widgets with legacy release policy")
+        return "modern"
+    if widget_js.exists() or widget_js.is_symlink() or not all(legacy_markers):
+        raise VerificationError("ProofWidgets has an unsupported widget release layout")
+    return "legacy"
+
+
+def _validate_legacy_proofwidgets_promotion(promotions: tuple[Any, ...]) -> None:
+    """Narrow generic Lake promotion to ProofWidgets' one official archive pair."""
+    if len(promotions) != 1 or promotions[0].name != "proofwidgets":
+        raise VerificationError("legacy ProofWidgets staging produced an unexpected package set")
+    promotion = promotions[0]
+    expected = {
+        promotion.canonical_build.parent / PROOFWIDGETS_RELEASE_ARCHIVE,
+        promotion.canonical_build.parent / f"{PROOFWIDGETS_RELEASE_ARCHIVE}.trace",
+    }
+    if {destination for _source, destination in promotion.metadata} != expected:
+        raise VerificationError("legacy ProofWidgets staging produced unexpected release metadata")
+    staged_js = promotion.staged_build / "js"
+    if staged_js.is_symlink() or not staged_js.is_dir():
+        raise VerificationError("legacy ProofWidgets release contains no generated widget directory")
+
+
+def stage_legacy_proofwidgets_release(
+    workspace: Path,
+    *,
+    checkout: Path,
+    environment: dict[str, str],
+    lake: Path,
+    landrun: Path,
+    git: Path,
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> str | None:
+    """Fetch one authenticated legacy ProofWidgets release in disposable state."""
+    packages = manifest_packages(workspace)
+    proofwidgets = next(
+        (package for package in packages if package["name"] == "proofwidgets"),
+        None,
+    )
+    if proofwidgets is None:
+        return None
+    if proofwidgets["repository"].lower() != PROOFWIDGETS_REPOSITORY:
+        raise VerificationError("renderer requires the canonical pinned ProofWidgets package")
+    package_dir = package_checkout(workspace, proofwidgets, checkout=checkout)
+    validate_materialized_git_package(
+        package_dir,
+        proofwidgets,
+        git=git,
+        environment=environment,
+    )
+    layout = proofwidgets_source_layout(package_dir, git=git, environment=environment)
+    if layout == "modern":
+        return layout
+
+    mathlib = next(
+        (
+            package
+            for package in packages
+            if package["repository"].lower() == "leanprover-community/mathlib4"
+        ),
+        None,
+    )
+    if mathlib is None:
+        raise VerificationError(
+            "legacy ProofWidgets release is not authenticated by a pinned Mathlib manifest"
+        )
+    mathlib_dir = package_checkout(workspace, mathlib, checkout=checkout)
+    validate_materialized_git_package(
+        mathlib_dir,
+        mathlib,
+        git=git,
+        environment=environment,
+    )
+    authoritative = [
+        package
+        for package in manifest_packages(mathlib_dir)
+        if package["name"] == "proofwidgets"
+    ]
+    if (
+        len(authoritative) != 1
+        or authoritative[0]["repository"].lower() != PROOFWIDGETS_REPOSITORY
+        or authoritative[0]["revision"] != proofwidgets["revision"]
+    ):
+        raise VerificationError(
+            "ProofWidgets revision does not match the authenticated Mathlib manifest"
+        )
+
+    reset_trusted_lake_state(
+        workspace,
+        {"proofwidgets"},
+        packages=packages,
+        checkout=checkout,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".palomar-proofwidgets-release-", dir=checkout.parent
+    ) as staging_directory:
+        staged = stage_trusted_closure(
+            workspace,
+            checkout=checkout,
+            packages=packages,
+            closure={"proofwidgets"},
+            root_name="proofwidgets",
+            destination=Path(staging_directory),
+        )
+        staged_home = staged.root_package / ".lake" / "config" / "home"
+        staged_temporary = staged.root_package / ".lake" / "config" / "tmp"
+        staged_home.mkdir()
+        staged_temporary.mkdir()
+        staged_env = environment.copy()
+        staged_env.update(
+            {
+                "HOME": str(staged_home.resolve()),
+                "TMPDIR": str(staged_temporary.resolve()),
+                "LEAN_ABORT_ON_PANIC": "1",
+            }
+        )
+        sandboxed_run(
+            [str(lake), "build", "proofwidgets:release"],
+            cwd=staged.root_package,
+            environment=staged_env,
+            landrun=landrun,
+            writable_directories=list(staged.lake_roots),
+            readable_paths=sorted({staged.source, *system_readable_paths()}),
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=1800,
+            unrestricted_network=True,
+            resource_properties=CACHE_DOWNLOAD_PROPERTIES,
+        )
+        validate_trusted_source_snapshots(staged.source_snapshots)
+        promotions = validate_staged_lake_promotions(
+            workspace,
+            staged.source,
+            checkout=checkout,
+            packages=packages,
+            closure={"proofwidgets"},
+            root_name="proofwidgets",
+        )
+        _validate_legacy_proofwidgets_promotion(promotions)
+        promote_staged_lake_state(promotions)
+    return layout
+
+
 def hydrate_mathlib_cache(
     workspace: Path,
     *,
@@ -2102,7 +2371,9 @@ def hydrate_mathlib_cache(
     return {"requested": len(hashes), "downloaded": downloaded, "bytes": total}
 
 
-def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
+def prepare_build_metadata_files(
+    workspace: Path, proofwidgets_layout: str | None = None
+) -> tuple[Path, ...]:
     """Create only the sidecars Lake must update beside tracked ProofWidgets assets."""
     proofwidgets = next(
         (
@@ -2116,13 +2387,19 @@ def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
     # widget assets for Lake to rebuild, so it needs no sidecars granted.
     if proofwidgets is None:
         return ()
-    if proofwidgets["repository"].lower() != "leanprover-community/proofwidgets4":
+    if proofwidgets["repository"].lower() != PROOFWIDGETS_REPOSITORY:
         raise VerificationError("renderer requires the canonical pinned ProofWidgets package")
     package_dir = workspace / ".lake" / "packages" / "proofwidgets"
-    relative_paths = (
-        Path("widget/package-lock.json.hash"),
-        Path("widget/js/lake.trace.hash"),
-    )
+    if proofwidgets_layout is None:
+        widget_js = package_dir / "widget" / "js"
+        proofwidgets_layout = (
+            "modern" if widget_js.is_dir() and not widget_js.is_symlink() else "legacy"
+        )
+    if proofwidgets_layout not in {"legacy", "modern"}:
+        raise VerificationError("renderer received an invalid ProofWidgets source layout")
+    relative_paths = [Path("widget/package-lock.json.hash")]
+    if proofwidgets_layout == "modern":
+        relative_paths.append(Path("widget/js/lake.trace.hash"))
     result: list[Path] = []
     for relative in relative_paths:
         path = package_dir / relative
@@ -2394,14 +2671,11 @@ def execute(args: argparse.Namespace) -> int:
         )
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
-        # Every phase Landrun confines from here on is network-disabled. The
-        # only outbound step that follows is trusted `curl` fetching Mathlib
-        # cache archives, outside Landrun and without loading submitted Lake
-        # configuration. The trusted Verso clone and the pinned package
-        # fetches above were also outbound and also outside Landrun; neither
-        # executes submitted Lean or Lake code, and no submitted code has run
-        # at this point. Egress denial therefore holds for exactly the
-        # confined phases this probe stands for.
+        # Candidate phases represented by this probe are network-disabled.
+        # The only confined exception below is an independently authenticated
+        # legacy ProofWidgets checkout in a disposable one-package workspace;
+        # it has a separate, narrower filesystem policy. Trusted `curl` also
+        # fetches fixed-host Mathlib cache archives outside candidate execution.
         verify_sandbox_confinement(
             work / "render-landrun-write-denial-probe",
             work / "render-landrun-read-denial-probe",
@@ -2413,6 +2687,16 @@ def execute(args: argparse.Namespace) -> int:
             landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
+            executable_paths=allowed_exec,
+            tools=tools,
+        )
+        proofwidgets_layout = stage_legacy_proofwidgets_release(
+            workspace,
+            checkout=workspace_checkout,
+            environment=env,
+            lake=lake,
+            landrun=landrun,
+            git=git,
             executable_paths=allowed_exec,
             tools=tools,
         )
@@ -2441,7 +2725,7 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=allowed_exec,
             tools=tools,
         )
-        writable_files = prepare_build_metadata_files(workspace)
+        writable_files = prepare_build_metadata_files(workspace, proofwidgets_layout)
 
         report["stage"] = "literate"
         write_json(output, report)
