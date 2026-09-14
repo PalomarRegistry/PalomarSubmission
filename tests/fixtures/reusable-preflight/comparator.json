@@ -1,1 +1,7 @@
-{"challenge_module":"Challenge","solution_module":"Solution","theorem_names":["identity"],"permitted_axioms":[],"enable_nanoda":true}
+{
+  "challenge_module": "Challenge",
+  "solution_module": "Solution",
+  "theorem_names": ["identity"],
+  "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
+  "enable_nanoda": true
+}
