@@ -9,13 +9,13 @@
   "limits": {
     "job_timeout_minutes": 350,
     "execution_budget_seconds": 19800,
-    "memory_high_bytes": 13958643712,
-    "memory_max_bytes": 15032385536,
     "minimum_workspace_free_bytes": 21474836480,
     "tasks_max": 32768,
     "open_files_max": 1048576,
     "file_size_max_bytes": 1099511627776,
-    "lake_jobs": 4
+    "memory_high_percent": 95,
+    "memory_max_percent": 98,
+    "minimum_host_memory_bytes": 15032385536
   },
   "trusted_tools": {
     "comparator_commit": "575674928e239f5bc452aab72d1dd7b0f1326494",

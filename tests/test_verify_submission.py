@@ -818,7 +818,7 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)
         profile = json.loads((REPOSITORY_ROOT / "verification-profile.json").read_text())
         self.assertIn(
-            f"MemoryMax={profile['limits']['memory_max_bytes']}",
+            f"MemoryMax={profile['limits']['memory_max_percent']}%",
             PERMISSIVE_RESOURCE_PROPERTIES,
         )
         self.assertFalse(
@@ -828,7 +828,7 @@ class VerifySubmissionTests(unittest.TestCase):
             )
         )
 
-    def test_clear_resource_termination_is_retryable_not_a_phase_failure(self):
+    def test_payload_exit_137_does_not_establish_resource_exhaustion(self):
         completed = subprocess.CompletedProcess(["systemd-run"], 137, "", "killed")
         with (
             mock.patch("scripts.verify_submission.verify_tool_snapshot"),
@@ -837,10 +837,10 @@ class VerifySubmissionTests(unittest.TestCase):
             mock.patch("scripts.verify_submission.run", return_value=completed),
             mock.patch(
                 "scripts.verify_submission.systemd_unit_outcome",
-                return_value={"Result": "success", "memory_events": {}},
+                return_value={"Result": "exit-code", "memory_events": {}},
             ),
             mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
-            self.assertRaisesRegex(ResourceExhausted, "resource ceiling"),
+            self.assertRaisesRegex(VerificationError, r"failed \(137\)") as raised,
         ):
             sandboxed_run(
                 ["lean", "Challenge.lean"],
@@ -851,6 +851,8 @@ class VerifySubmissionTests(unittest.TestCase):
                 executable_paths=[],
                 tools={},
             )
+
+        self.assertNotIsInstance(raised.exception, ResourceExhausted)
 
     def test_candidate_output_cannot_forge_resource_exhaustion(self):
         completed = subprocess.CompletedProcess(
@@ -1146,7 +1148,6 @@ class VerifySubmissionTests(unittest.TestCase):
                 "definition_names": [],
                 "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
                 "enable_nanoda": False,
-                "verification_profile": "palomar-standard-v1",
             }
             path.write_text(json.dumps(config, indent=2) + "\n")
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
@@ -1169,14 +1170,6 @@ class VerifySubmissionTests(unittest.TestCase):
             )
             self.assertNotIn("verification_profile", protected_values)
             self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
-
-            config["verification_profile"] = "submitter-sized-memory"
-            path.write_text(json.dumps(config))
-            with self.assertRaisesRegex(
-                VerificationError, "verification_profile must be 'palomar-standard-v1'"
-            ):
-                load_comparator_config(path)
-            config["verification_profile"] = "palomar-standard-v1"
 
             protected.unlink()
             valid_json = json.dumps(config)
@@ -4432,7 +4425,7 @@ review:
 
         with (
             mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)) as probe,
             mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
         ):
             command = systemd_command(
@@ -4444,6 +4437,8 @@ review:
         self.assertIn("--unit=palomar-" + "a" * 24, command)
         self.assertNotIn("--collect", command)
         self.assertNotIn("--property=RemainAfterExit=yes", command)
+        self.assertFalse(any(p.startswith("--unit=") for p in probe.call_args.args[0]))
+        self.assertIn("--collect", probe.call_args.args[0])
 
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")
@@ -4800,10 +4795,9 @@ class DispatchWorkflowTests(unittest.TestCase):
     def test_reusable_preflight_uses_the_same_fixed_job(self):
         workflow = self.workflow()
         self.assertEqual(workflow["jobs"]["verify"]["runs-on"], "ubuntu-24.04")
-        self.assertEqual(workflow["jobs"]["verify"]["env"]["LAKE_JOBS"], "4")
         self.assertEqual(
             set(workflow["on"]["workflow_call"]["inputs"]),
-            set(workflow["on"]["workflow_dispatch"]["inputs"]),
+            set(workflow["on"]["workflow_dispatch"]["inputs"]) | {"pipeline_commit"},
         )
         checkout = next(
             step

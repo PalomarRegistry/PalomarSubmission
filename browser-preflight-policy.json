@@ -48,8 +48,7 @@
       "enable_nanoda",
       "permitted_axioms",
       "solution_module",
-      "theorem_names",
-      "verification_profile"
+      "theorem_names"
     ],
     "standard_axioms": [
       "Classical.choice",

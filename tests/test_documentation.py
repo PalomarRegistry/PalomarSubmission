@@ -46,7 +46,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         inputs = triggers(WORKFLOW)["workflow_dispatch"]["inputs"]
         self.assertEqual(
             sorted(inputs),
-            ["commit", "mode", "options", "pipeline_commit", "repository", "request_id"],
+            ["commit", "mode", "options", "repository", "request_id"],
         )
         self.assertEqual(
             sorted(OPTIONAL_FIELDS),
@@ -74,7 +74,6 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         job = WORKFLOW["jobs"]["verify"]
         self.assertEqual(job["runs-on"], profile["runner"]["label"])
         self.assertEqual(job["timeout-minutes"], profile["limits"]["job_timeout_minutes"])
-        self.assertEqual(int(job["env"]["LAKE_JOBS"]), profile["limits"]["lake_jobs"])
         for commit in (
             profile["trusted_tools"]["comparator_commit"],
             profile["trusted_tools"]["landrun_commit"],

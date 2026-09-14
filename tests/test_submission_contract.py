@@ -16,7 +16,7 @@ class SubmissionContractBoundaryTests(unittest.TestCase):
 
     def test_workflow_script_entrypoints_load_one_canonical_verifier(self):
         for script, marker in (
-            ("verify_submission.py", "{prepare,execute}"),
+            ("verify_submission.py", "{check-capacity,prepare,execute}"),
             ("smoke_trusted_challenge.py", "--source SOURCE"),
         ):
             with self.subTest(script=script):

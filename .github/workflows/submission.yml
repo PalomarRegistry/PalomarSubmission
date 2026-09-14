@@ -50,10 +50,6 @@ on:
       commit:
         description: Full 40-character commit to verify
         required: true
-      pipeline_commit:
-        description: Optional PalomarSubmission commit; dispatches use this workflow revision by default
-        required: false
-        type: string
       request_id:
         description: Opaque submission id from the submission server
         required: true
@@ -76,8 +72,6 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
-    env:
-      LAKE_JOBS: "4"
     permissions:
       contents: read
     # One group per submission, so two admitted submissions may verify at the
@@ -140,9 +134,15 @@ jobs:
         id: prepare
         env:
           BUNDLE_GEMFILE: ${{ github.workspace }}/pipeline/Gemfile
+          PALOMAR_INPUTS: ${{ toJSON(inputs) }}
         run: |
+          python - <<'PYTHON'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "submission-inputs.json")
+          path.write_text(json.dumps({"inputs": json.loads(os.environ["PALOMAR_INPUTS"])}))
+          PYTHON
           python pipeline/scripts/verify_submission.py prepare \
-            --event "$GITHUB_EVENT_PATH" \
+            --event "$RUNNER_TEMP/submission-inputs.json" \
             --work-dir "$RUNNER_TEMP/palomar" \
             --output "$RUNNER_TEMP/mechanical-report.json" \
             --licensee "$(command -v bundle)"
@@ -161,7 +161,9 @@ jobs:
 
       - name: Check palomar-standard-v1 runner capacity
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        run: python pipeline/scripts/verification_profile.py --disk-path "$RUNNER_TEMP"
+        run: >-
+          python pipeline/scripts/verify_submission.py check-capacity
+          --disk-path "$RUNNER_TEMP" --output "$RUNNER_TEMP/mechanical-report.json"
 
       - name: Install pinned elan
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'

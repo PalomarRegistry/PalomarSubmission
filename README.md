@@ -37,9 +37,14 @@ runs the same verifier under the checked-in `palomar-standard-v1` profile, but
 has no Palomar state or credentials and is not itself a registry submission.
 Every mechanical report records the profile id and digest.
 
-The optional `verification_profile` field in `comparator.json` names that
-envelope. Its only accepted value is currently `palomar-standard-v1`; omitting
-it selects the same default. Submitters cannot set memory or time limits.
+The profile is workflow/report metadata, not a field in `comparator.json`.
+It records the existing 95%/98% memory pressure/ceiling policy and the
+19,800-second production budget, without adding a CPU quota or changing swap
+policy. The capacity check records host memory, effective memory thresholds,
+and free workspace. A preflight can help detect an expensive failure before
+submission; it does not run Challenge rendering, editorial review, or registration.
+A later run can still differ because of host performance, cache availability,
+or a transient service failure. Normal submission cooldowns apply to all outcomes.
 
 Pin the reusable workflow to a full commit, just as Palomar pins submitted
 source:
@@ -54,10 +59,15 @@ jobs:
       pipeline_commit: <same-full-commit-as-the-uses-reference>
       request_id: preflight001
       mode: full
-      options: '{"comparator_config_path":"comparator.json","authorization_relationship":"maintainer"}'
+      options: '{"comparator_config_path":"comparator.json","authorization_relationship":"I am a responsible author or maintainer"}'
 ```
 
-The workflow has `preflight` and `full` modes. Both check out `main` and invoke
+Keep `pipeline_commit` equal to the workflow's `uses` SHA. This explicit input
+is for reusable callers only; server dispatches check out their workflow revision.
+The `inputs` context is materialized as the verifier's request for either trigger,
+so a caller's push or pull-request event cannot replace the supplied inputs.
+
+The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says
 the submission is ready. Their run names and artifact names are distinct so a

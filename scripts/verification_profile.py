@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load and validate Palomar's single reproducible verification envelope."""
+"""Load and validate Palomar's published verification resource policy."""
 
 from __future__ import annotations
 
@@ -34,20 +34,20 @@ def load_profile() -> dict[str, Any]:
     expected_limits = {
         "job_timeout_minutes",
         "execution_budget_seconds",
-        "memory_high_bytes",
-        "memory_max_bytes",
+        "memory_high_percent",
+        "memory_max_percent",
         "minimum_workspace_free_bytes",
         "tasks_max",
         "open_files_max",
         "file_size_max_bytes",
-        "lake_jobs",
+        "minimum_host_memory_bytes",
     }
     if not isinstance(limits, dict) or set(limits) != expected_limits:
         raise VerificationProfileError("verification profile limits are invalid")
     if any(type(limits[name]) is not int or limits[name] <= 0 for name in expected_limits):
         raise VerificationProfileError("verification profile limits must be positive integers")
-    if limits["memory_high_bytes"] >= limits["memory_max_bytes"]:
-        raise VerificationProfileError("memory_high_bytes must be below memory_max_bytes")
+    if not (limits["memory_high_percent"] < limits["memory_max_percent"] <= 100):
+        raise VerificationProfileError("memory_high_percent must be below memory_max_percent")
     if limits["execution_budget_seconds"] > limits["job_timeout_minutes"] * 60:
         raise VerificationProfileError("execution budget exceeds the job timeout")
     tools = value["trusted_tools"]
@@ -82,9 +82,9 @@ def check_host(profile: dict[str, Any], disk_path: Path) -> dict[str, int | str]
             f"runner architecture {architecture!r} does not satisfy {runner['architecture']}"
         )
     memory = host_memory_bytes()
-    if memory < limits["memory_max_bytes"]:
+    if memory < limits["minimum_host_memory_bytes"]:
         raise VerificationProfileError(
-            f"runner has {memory} memory bytes; profile requires {limits['memory_max_bytes']}"
+            f"runner has {memory} memory bytes; profile requires {limits['minimum_host_memory_bytes']}"
         )
     workspace = shutil.disk_usage(disk_path).free
     if workspace < limits["minimum_workspace_free_bytes"]:
@@ -96,6 +96,8 @@ def check_host(profile: dict[str, Any], disk_path: Path) -> dict[str, int | str]
         "architecture": architecture,
         "memory_bytes": memory,
         "workspace_free_bytes": workspace,
+        "memory_high_bytes": memory * limits["memory_high_percent"] // 100,
+        "memory_max_bytes": memory * limits["memory_max_percent"] // 100,
     }
 
 

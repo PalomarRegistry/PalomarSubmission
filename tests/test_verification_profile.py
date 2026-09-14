@@ -28,7 +28,7 @@ class VerificationProfileTests(unittest.TestCase):
             "scripts.verification_profile.platform.machine", return_value="x86_64"
         ), mock.patch(
             "scripts.verification_profile.host_memory_bytes",
-            return_value=profile["limits"]["memory_max_bytes"] - 1,
+            return_value=profile["limits"]["minimum_host_memory_bytes"] - 1,
         ), self.assertRaisesRegex(VerificationProfileError, "profile requires"):
             check_host(profile, Path(temporary))
 
