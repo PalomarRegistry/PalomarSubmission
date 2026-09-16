@@ -43,7 +43,9 @@ from scripts.verification_profile import (  # noqa: E402
     PROFILE_PATH,
     VerificationProfileError,
     check_host,
+    effective_memory_bytes,
     load_profile,
+    profile_digest,
 )
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
@@ -423,8 +425,8 @@ EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
 VERIFICATION_PROFILE = load_profile()
 VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
 PERMISSIVE_RESOURCE_PROPERTIES = (
-    f"MemoryHigh={VERIFICATION_LIMITS['memory_high_percent']}%",
-    f"MemoryMax={VERIFICATION_LIMITS['memory_max_percent']}%",
+    f"MemoryHigh={effective_memory_bytes() * VERIFICATION_LIMITS['memory_high_percent'] // 100}",
+    f"MemoryMax={effective_memory_bytes() * VERIFICATION_LIMITS['memory_max_percent'] // 100}",
     f"TasksMax={VERIFICATION_LIMITS['tasks_max']}",
     f"LimitNOFILE={VERIFICATION_LIMITS['open_files_max']}",
     f"LimitFSIZE={VERIFICATION_LIMITS['file_size_max_bytes']}",
@@ -433,6 +435,7 @@ _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
 _SYSTEMD_MANAGER: str | None = None
+_RESOURCE_PHASE: str | None = None
 _RESOURCE_METRICS_PATH: Path | None = None
 _RESOURCE_DISK_PATH: Path | None = None
 
@@ -652,7 +655,8 @@ def verification_profile_evidence() -> dict[str, Any]:
     """Record the published policy; the capacity check adds observed host limits."""
     return {
         "id": VERIFICATION_PROFILE["id"],
-        "sha256": sha256(PROFILE_PATH),
+        "sha256": (sha256(PROFILE_PATH) if VERIFICATION_PROFILE["id"] == "palomar-standard-v1"
+                   else profile_digest(VERIFICATION_PROFILE)),
         "runner": dict(VERIFICATION_PROFILE["runner"]),
         "limits": dict(VERIFICATION_LIMITS),
         "trusted_tools": dict(VERIFICATION_PROFILE["trusted_tools"]),
@@ -2016,6 +2020,32 @@ def package_checkout(source: Path, package: dict[str, str], *, checkout: Path) -
     ).resolve()
 
 
+def check_mathlib_toolchain(
+    source: Path, packages: list[dict[str, str]], *, checkout: Path,
+    project_toolchain: str, project_toolchain_path: str,
+) -> list[dict[str, str]]:
+    """Compare the selected project toolchain with the authenticated Mathlib checkout."""
+    _roots, aliases = allowed_roots()
+    evidence = []
+    for package in packages:
+        if canonical_repository(package["repository"], aliases).lower() != "leanprover-community/mathlib4":
+            continue
+        path = package_checkout(source, package, checkout=checkout) / "lean-toolchain"
+        mathlib_toolchain = path.read_text(encoding="utf-8").strip()
+        evidence.append({"revision": package["revision"], "toolchain": mathlib_toolchain})
+        if (parse_lean_version(project_toolchain, TOOLCHAIN_RE)
+                != parse_lean_version(mathlib_toolchain, TOOLCHAIN_RE)):
+            raise VerificationError(
+                f"Project toolchain {project_toolchain_path} selects {project_toolchain}, but canonical "
+                f"Mathlib at {package['revision']} selects {mathlib_toolchain}. Align the project toolchain "
+                "and pinned Mathlib revision, then regenerate lake-manifest.json.",
+                code="toolchain.mathlib_mismatch", owner="submitter", retryable=False,
+                next_action=("Align lean-toolchain and the resolved Mathlib revision; "
+                             "resubmit the updated commit."),
+            )
+    return evidence
+
+
 def trusted_package_url_map(
     packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
@@ -2686,7 +2716,7 @@ def sandboxed_run(
         readable_directories=[cwd],
         unrestricted_network=unrestricted_network,
     )
-    phase = Path(command[0]).name[:80] or "phase"
+    phase = _RESOURCE_PHASE or Path(command[0]).name[:80] or "phase"
     unit_name = f"palomar-{secrets.token_hex(12)}"
     if _RESOURCE_METRICS_PATH is not None:
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
@@ -4628,7 +4658,7 @@ def compile_canonical_challenge(
 
 
 def execute(args: argparse.Namespace) -> int:
-    global _EXECUTION_DEADLINE, _RESOURCE_DISK_PATH, _RESOURCE_METRICS_PATH
+    global _EXECUTION_DEADLINE, _RESOURCE_DISK_PATH, _RESOURCE_METRICS_PATH, _RESOURCE_PHASE
 
     output = Path(args.output).resolve()
     work = Path(args.work_dir).resolve()
@@ -4636,6 +4666,7 @@ def execute(args: argparse.Namespace) -> int:
     if report.get("status") != "pending":
         return 0
     previous_deadline = _EXECUTION_DEADLINE
+    previous_phase = _RESOURCE_PHASE
     previous_metrics_path = _RESOURCE_METRICS_PATH
     previous_disk_path = _RESOURCE_DISK_PATH
     checkout = work / "source"
@@ -4667,6 +4698,8 @@ def execute(args: argparse.Namespace) -> int:
     tools: dict[Path, str] = {}
 
     def guarded_write() -> None:
+        global _RESOURCE_PHASE
+        _RESOURCE_PHASE = str(report.get("stage") or "verification")
         report["resource_usage"] = resource_metrics(metrics_path)
         if tools:
             try:
@@ -4745,6 +4778,7 @@ def execute(args: argparse.Namespace) -> int:
             raise VerificationError("Lake executable is outside the selected Lean toolchain") from error
 
         report["stage"] = "candidate-setup"
+        guarded_write()
         if ensure_lake_manifest(source, checkout):
             report["warnings"].append(
                 "Generated a trusted Lake manifest from contained path-dependency manifests"
@@ -4809,6 +4843,7 @@ def execute(args: argparse.Namespace) -> int:
         protected_challenge = protected_config["challenge_module"]
         env["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
         report["stage"] = "setup"
+        guarded_write()
         readable_paths = sorted(
             {checkout.resolve(), comparator_config, *system_readable_paths()}
         )
@@ -4850,6 +4885,7 @@ def execute(args: argparse.Namespace) -> int:
             ]
         )
         report["stage"] = "confinement-initial"
+        guarded_write()
         # `--best-effort` is accepted only after the composed outer boundary
         # proves that its positive and negative controls work on this runner.
         # No candidate-controlled Lean or Lake code executes before this probe.
@@ -4868,6 +4904,7 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
         report["stage"] = "module-resolution"
+        guarded_write()
         candidate_source_path = lake_environment_value(
             "LEAN_SRC_PATH",
             source=source,
@@ -4929,14 +4966,21 @@ def execute(args: argparse.Namespace) -> int:
             }
         )
         report["stage"] = "dependency-provenance"
+        guarded_write()
         packages = manifest_packages(source)
         allowlist = package_allowlist(
             source, packages, checkout=checkout, base_env=env
+        )
+        report["mathlib_toolchain"] = check_mathlib_toolchain(
+            source, packages, checkout=checkout,
+            project_toolchain=report["lean_toolchain"],
+            project_toolchain_path=report["lean_toolchain_path"],
         )
         reject_untrusted_package_artifacts(
             source, packages, allowlist, checkout=checkout
         )
         report["stage"] = "trusted-cache"
+        guarded_write()
         report["mathlib_cache"] = get_mathlib_cache(
             source,
             checkout=checkout,
@@ -4949,6 +4993,7 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
         )
         report["stage"] = "trusted-roots"
+        guarded_write()
         build_allowlisted_roots(
             source,
             checkout=checkout,
@@ -4975,6 +5020,7 @@ def execute(args: argparse.Namespace) -> int:
         ]
         executable_paths = sorted({*executable_paths, *trusted_build_directories})
         report["stage"] = "canonical-challenge"
+        guarded_write()
         canonical_olean, dependency_sources, trusted_lean_paths = compile_canonical_challenge(
             work,
             source,
@@ -4997,6 +5043,7 @@ def execute(args: argparse.Namespace) -> int:
         # the Challenge olean is covered, not just the olean itself.
         require_protected_paths([canonical_root, canonical_olean], candidate_writable)
         report["stage"] = "challenge-provenance"
+        guarded_write()
         audit = audit_challenge_sources(
             source,
             checkout=checkout,
@@ -5035,6 +5082,7 @@ def execute(args: argparse.Namespace) -> int:
             return 0
 
         report["stage"] = "confinement-final"
+        guarded_write()
         verify_sandbox_confinement(
             work / "landrun-write-denial-probe",
             work / "landrun-read-denial-probe",
@@ -5052,6 +5100,7 @@ def execute(args: argparse.Namespace) -> int:
         )
 
         report["stage"] = "candidate-configuration"
+        guarded_write()
         env["LEAN_PATH"] = lake_environment_value(
             "LEAN_PATH",
             source=source,
@@ -5085,6 +5134,7 @@ def execute(args: argparse.Namespace) -> int:
             protected_root=canonical_root,
         )
         report["stage"] = "comparator"
+        guarded_write()
         proc = sandboxed_run(
             [str(comparator), str(comparator_config)],
             cwd=source,
@@ -5116,11 +5166,14 @@ def execute(args: argparse.Namespace) -> int:
 
         report["status"] = "pass"
         report["stage"] = "complete"
+        guarded_write()
         report["checked_at"] = now()
         guarded_write()
     except (subprocess.TimeoutExpired, ResourceExhausted) as error:
         report["status"] = "error"
+        report["last_active_stage"] = report.get("stage")
         report["stage"] = "resource-exhausted"
+        guarded_write()
         report["error_kind"] = "infrastructure/resource-exhausted"
         report["retryable"] = True
         if isinstance(error, subprocess.TimeoutExpired):
@@ -5145,6 +5198,7 @@ def execute(args: argparse.Namespace) -> int:
     finally:
         _EXECUTION_DEADLINE = previous_deadline
         _RESOURCE_METRICS_PATH = previous_metrics_path
+        _RESOURCE_PHASE = previous_phase
         _RESOURCE_DISK_PATH = previous_disk_path
     return 0
 

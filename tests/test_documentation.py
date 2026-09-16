@@ -32,10 +32,10 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         )
         self.assertIn("`workflow_dispatch` and `workflow_call`", SECURITY)
 
-    def test_there_is_one_job_and_it_only_reads(self):
-        self.assertEqual(list(WORKFLOW["jobs"]), ["verify"])
+    def test_profile_and_verification_jobs_only_read(self):
+        self.assertEqual(list(WORKFLOW["jobs"]), ["profile", "verify"])
         self.assertEqual(WORKFLOW["jobs"]["verify"]["permissions"], {"contents": "read"})
-        self.assertIn("There is one job, `verify`", SECURITY)
+        self.assertIn("There are two jobs: `profile`", SECURITY)
         self.assertIn("`contents: read`", SECURITY)
 
     def test_the_dispatch_carries_no_identity_and_no_review(self):
@@ -46,7 +46,8 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         inputs = triggers(WORKFLOW)["workflow_dispatch"]["inputs"]
         self.assertEqual(
             sorted(inputs),
-            ["commit", "mode", "options", "repository", "request_id"],
+            ["commit", "execution_attempt", "execution_profile", "mode", "options",
+             "repository", "request_id"],
         )
         self.assertEqual(
             sorted(OPTIONAL_FIELDS),
@@ -72,7 +73,8 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
     def test_standard_profile_matches_the_workflow(self):
         profile = json.loads((ROOT / "verification-profile.json").read_text())
         job = WORKFLOW["jobs"]["verify"]
-        self.assertEqual(job["runs-on"], profile["runner"]["label"])
+        self.assertEqual(job["runs-on"], "${{ fromJSON(needs.profile.outputs.labels) }}")
+        self.assertEqual(WORKFLOW["jobs"]["profile"]["runs-on"], profile["runner"]["label"])
         self.assertEqual(job["timeout-minutes"], profile["limits"]["job_timeout_minutes"])
         self.assertIn(
             f"--execution-budget-seconds {profile['limits']['execution_budget_seconds']}",
@@ -92,7 +94,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
             for step in WORKFLOW["jobs"]["verify"]["steps"]
             if str(step.get("uses", "")).startswith("actions/upload-artifact@")
         ]
-        self.assertEqual(len(uploads), 1)
+        self.assertEqual(len(uploads), 3)
         artifact_name = uploads[0]["with"]["name"]
         self.assertIn("preflight-report", artifact_name)
         self.assertIn("mechanical-report", artifact_name)

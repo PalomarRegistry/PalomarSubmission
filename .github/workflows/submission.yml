@@ -4,7 +4,7 @@ run-name: >-
       && format('Preflight submission {0}', inputs.request_id)
       || inputs.mode == 'correction'
       && format('Validate registry correction {0}', inputs.request_id)
-      || format('Verify submission {0}', inputs.request_id) }}
+      || format('Verify submission {0}', inputs.request_id) }}${{ inputs.execution_attempt && format(' [{0}]', inputs.execution_attempt) || '' }}
 
 # Submissions arrive through the submission server, which dispatches this
 # workflow. The run name carries the submission id because dispatching does
@@ -36,6 +36,15 @@ on:
         required: false
         default: full
         type: string
+      execution_profile:
+        description: Approved operator-selected execution profile
+        required: false
+        default: palomar-standard-v1
+        type: string
+      execution_attempt:
+        description: Audited operator attempt identifier
+        required: false
+        type: string
       options:
         description: JSON object of optional submission fields
         required: false
@@ -63,14 +72,45 @@ on:
           - preflight
           - full
           - correction
+      execution_profile:
+        description: Approved operator-selected execution profile
+        required: false
+        default: palomar-standard-v1
+        type: string
+      execution_attempt:
+        description: Audited operator attempt identifier
+        required: false
+        type: string
       options:
         description: JSON object of optional submission fields
         required: false
         type: string
 
 jobs:
-  verify:
+  profile:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      labels: ${{ steps.resolve.outputs.labels }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: PalomarRegistry/PalomarSubmission
+          ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
+          persist-credentials: false
+      - name: Resolve approved execution profile
+        id: resolve
+        env:
+          PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
+          PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
+        run: python3 scripts/verification_profile.py --resolve
+  verify:
+    needs: profile
+    runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
+    env:
+      PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
+      PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
     timeout-minutes: 350
     permissions:
       contents: read
@@ -95,6 +135,7 @@ jobs:
           fi
 
       - name: Checkout submission pipeline
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PalomarRegistry/PalomarSubmission
@@ -102,17 +143,22 @@ jobs:
           path: pipeline
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
         with:
           python-version: "3.11.10"
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        id: ruby
         with:
           ruby-version: "3.3.12"
           bundler-cache: true
           working-directory: pipeline
 
       - name: Install verifier dependencies
+        id: dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
 
       - name: Parse and fetch immutable source
@@ -133,6 +179,7 @@ jobs:
             --licensee "$(command -v bundle)"
 
       - name: Free disk space
+        id: disk
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -145,58 +192,62 @@ jobs:
           swap-storage: false
 
       - name: Check palomar-standard-v1 runner capacity
+        id: capacity
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: >-
           python pipeline/scripts/verify_submission.py check-capacity
           --disk-path "$RUNNER_TEMP" --output "$RUNNER_TEMP/mechanical-report.json"
 
       - name: Install pinned elan
+        id: elan
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 \
+          python3 pipeline/scripts/trusted_download.py \
+            --url https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz \
             --output "$RUNNER_TEMP/elan.tar.gz" \
-            https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
-          echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_TEMP/elan.tar.gz" \
-            | sha256sum --check
+            --sha256 df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         with:
           go-version: "1.24.0"
 
       - name: Build pinned landrun
+        id: landrun
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
           CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build pinned Comparator
+        id: comparator
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
-          git clone --filter=blob:none https://github.com/leanprover/comparator.git "$RUNNER_TEMP/comparator"
-          git -C "$RUNNER_TEMP/comparator" checkout 575674928e239f5bc452aab72d1dd7b0f1326494
+          python3 pipeline/scripts/trusted_git_fetch.py leanprover/comparator 575674928e239f5bc452aab72d1dd7b0f1326494 "$RUNNER_TEMP/comparator"
           cd "$RUNNER_TEMP/comparator"
           lake build comparator
 
       - name: Build pinned NanoDa kernel
+        id: nanoda
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
-          git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git "$RUNNER_TEMP/nanoda"
-          git -C "$RUNNER_TEMP/nanoda" checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
+          python3 pipeline/scripts/trusted_git_fetch.py robsimmons/nanoda_lib 68d5ca9db226849b41a6fff59d796ff19d0a8840 "$RUNNER_TEMP/nanoda"
           cargo build --release --locked --manifest-path "$RUNNER_TEMP/nanoda/Cargo.toml"
 
       - name: Build toolchain-matched lean4export
+        id: exporter
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         env:
           LEAN4EXPORT_COMMIT: ${{ steps.prepare.outputs.lean4export_commit }}
           SUBMISSION_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
         run: |
-          git clone --filter=blob:none https://github.com/leanprover/lean4export.git "$RUNNER_TEMP/lean4export"
-          git -C "$RUNNER_TEMP/lean4export" checkout "$LEAN4EXPORT_COMMIT"
+          python3 pipeline/scripts/trusted_git_fetch.py leanprover/lean4export "$LEAN4EXPORT_COMMIT" "$RUNNER_TEMP/lean4export"
           LEAN4EXPORT_TOOLCHAIN="$(tr -d '\r\n' < "$RUNNER_TEMP/lean4export/lean-toolchain")"
           python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import compatible_lean4export_toolchain; raise SystemExit(not compatible_lean4export_toolchain(sys.argv[1], sys.argv[2]))' \
             "$SUBMISSION_TOOLCHAIN" "$LEAN4EXPORT_TOOLCHAIN"
@@ -204,6 +255,7 @@ jobs:
           ELAN_TOOLCHAIN="$SUBMISSION_TOOLCHAIN" lake build lean4export
 
       - name: Run Comparator and challenge provenance audit
+        id: execute
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
           python pipeline/scripts/verify_submission.py execute \
@@ -219,7 +271,17 @@ jobs:
             --execution-budget-seconds 19800 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      - name: Finalize interrupted mechanical report
+        if: always()
+        env:
+          PALOMAR_INPUTS: ${{ toJSON(inputs) }}
+          PALOMAR_STEPS: ${{ toJSON(steps) }}
+          PALOMAR_WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 pipeline/scripts/workflow_report.py finalize --report "$RUNNER_TEMP/mechanical-report.json"
+
       - name: Upload bounded mechanical report
+        id: upload1
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -228,27 +290,41 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Wait before report upload retry 2
+        if: always() && steps.upload1.outcome == 'failure'
+        run: sleep 5
+
+      - name: Retry bounded mechanical report upload 2
+        id: upload2
+        continue-on-error: true
+        if: always() && steps.upload1.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/mechanical-report.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+      - name: Wait before report upload retry 3
+        if: always() && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        run: sleep 20
+
+      - name: Retry bounded mechanical report upload 3
+        id: upload3
+        continue-on-error: true
+        if: always() && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/mechanical-report.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
       - name: Fail the run when verification did not pass
-        # Every step after intake is conditional on it having succeeded, so a
-        # failed submission skipped its way to a green run and was recorded as
-        # having passed. The report is the outcome; the run has to say so.
         if: always()
         env:
-          PALOMAR_MODE: ${{ inputs.mode }}
-          PALOMAR_READY: ${{ steps.prepare.outputs.ready }}
-        run: |
-          python - <<'PYTHON'
-          import json, pathlib, sys, os
-          report = json.loads(pathlib.Path(os.environ["RUNNER_TEMP"], "mechanical-report.json").read_text())
-          mode = os.environ.get("PALOMAR_MODE", "full")
-          status = report.get("status")
-          if (mode == "preflight" and os.environ.get("PALOMAR_READY") == "true"
-                  and status == "pending"):
-              sys.exit(0)
-          if status == "pass":
-              sys.exit(0)
-          print(f"::error::mechanical verification did not pass: {status}")
-          for problem in report.get("errors", []):
-              print(f"::error::{problem}")
-          sys.exit(1)
-          PYTHON
+          PALOMAR_INPUTS: ${{ toJSON(inputs) }}
+          PALOMAR_STEPS: ${{ toJSON(steps) }}
+        run: python3 pipeline/scripts/workflow_report.py gate --report "$RUNNER_TEMP/mechanical-report.json"

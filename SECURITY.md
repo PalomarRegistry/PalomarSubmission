@@ -42,7 +42,7 @@ authoritative registry runs. This file has no direct push, comment, or pull-requ
 trigger; reusable callers can invoke a mechanical preflight from their own CI.
 A public repository may call the same job as a predictive mechanical preflight,
 but that caller has no Palomar state or credential and cannot register its
-result. There is one job, `verify`, and its `permissions` block is
+result. There are two jobs: `profile` resolves approved runner labels, and `verify`, and its `permissions` block is
 `contents: read`. Its inputs are a repository, a commit, a pinned pipeline
 commit for reusable calls, an opaque submission id, a closed
 `preflight`/`full`/`correction` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
@@ -455,3 +455,34 @@ Please do not test a finding against another person's submission or against
 infrastructure you do not control. We welcome coordinated disclosure and will
 work with reporters to understand the problem, prepare a fix, and agree on when
 technical details can safely become public.
+
+
+## Approved execution profiles and recovery
+
+The `profile` job maps an approved identifier to trusted runner labels. Inputs
+cannot supply runner labels or resource limits. `palomar-standard-v1` remains the
+default. `palomar-namespace-16x32-v1` remains disabled until the existing
+confinement and supervision tests pass on the actual Namespace runner. The
+`qualify-namespace.yml` workflow is a trusted synthetic probe and never accepts
+candidate source or enables production itself.
+
+Memory ceilings use the minimum of host RAM and visible ancestor cgroup limits;
+CPU evidence uses affinity and ancestor quotas. Workload limits are absolute
+bytes derived from that effective memory, preventing a container from sizing
+its worker against the underlying host's RAM. Verification keeps the existing
+execution budget and job timeout. Rendering inherits an explicitly selected
+profile without extending its deadlines.
+
+The stdlib finalizer can report a failed dependency installation without loading
+verifier dependencies. It preserves source-bound terminal diagnoses, finalizes
+interrupted pending reports, and records the selected profile and operator
+attempt. Upload may be attempted three times; the final gate requires successful
+report delivery as well as a passing verifier (or prepared preflight). Runner
+loss before finalization is diagnosed downstream only from the trusted recorded
+GitHub run and job attempt. Candidate log text cannot establish an OOM.
+
+Pinned elan downloads and immutable trusted-tool Git fetches retry transient
+network failures at most three times within a five-minute operation budget and
+the original job allowance. Checksum, authentication, absent revision, and build
+failures do not restart verification. Progress reports preserve semantic stages
+and trusted resource measurements for interrupted runs.

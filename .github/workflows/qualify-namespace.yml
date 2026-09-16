@@ -1,0 +1,35 @@
+name: Qualify Namespace confinement
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    # This probe never accepts candidate source and does not enable production.
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-features
+      - namespace-features:container.privileged=true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11.10"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.24.0"
+      - name: Install trusted probe dependencies
+        run: |
+          python -m pip install --require-hashes --no-deps -r requirements.txt
+          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          echo "PALOMAR_TEST_LANDRUN=$(go env GOPATH)/bin/landrun" >> "$GITHUB_ENV"
+      - name: Record effective capacity
+        run: python scripts/verification_profile.py --profile palomar-namespace-16x32-v1 --allow-disabled --disk-path "$RUNNER_TEMP"
+      - name: Require the existing resource and confinement boundaries
+        run: |
+          python -m unittest -v \
+            tests.test_resource_supervision.RealResourceBoundaryTests \
+            tests.test_sandbox_integration.SandboxIntegrationTests.test_real_read_write_process_and_network_boundary \
+            tests.test_sandbox_integration.SandboxIntegrationTests.test_real_renderer_policy_proves_the_same_controls
