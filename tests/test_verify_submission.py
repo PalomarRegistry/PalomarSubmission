@@ -816,7 +816,11 @@ class VerifySubmissionTests(unittest.TestCase):
 
     def test_default_capacity_supports_ten_hour_verification(self):
         self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)
-        self.assertIn("MemoryMax=98%", PERMISSIVE_RESOURCE_PROPERTIES)
+        profile = json.loads((REPOSITORY_ROOT / "verification-profile.json").read_text())
+        self.assertIn(
+            f"MemoryMax={profile['limits']['memory_max_percent']}%",
+            PERMISSIVE_RESOURCE_PROPERTIES,
+        )
         self.assertFalse(
             any(
                 property_value.startswith("CPUQuota=")
@@ -824,15 +828,19 @@ class VerifySubmissionTests(unittest.TestCase):
             )
         )
 
-    def test_clear_resource_termination_is_retryable_not_a_phase_failure(self):
+    def test_payload_exit_137_does_not_establish_resource_exhaustion(self):
         completed = subprocess.CompletedProcess(["systemd-run"], 137, "", "killed")
         with (
             mock.patch("scripts.verify_submission.verify_tool_snapshot"),
             mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
             mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
             mock.patch("scripts.verify_submission.run", return_value=completed),
+            mock.patch(
+                "scripts.verify_submission.systemd_unit_outcome",
+                return_value={"Result": "exit-code", "memory_events": {}},
+            ),
             mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
-            self.assertRaisesRegex(ResourceExhausted, "resource ceiling"),
+            self.assertRaisesRegex(VerificationError, r"failed \(137\)") as raised,
         ):
             sandboxed_run(
                 ["lean", "Challenge.lean"],
@@ -844,6 +852,8 @@ class VerifySubmissionTests(unittest.TestCase):
                 tools={},
             )
 
+        self.assertNotIsInstance(raised.exception, ResourceExhausted)
+
     def test_candidate_output_cannot_forge_resource_exhaustion(self):
         completed = subprocess.CompletedProcess(
             ["systemd-run"], 0, "out of memory; timed out; no space left on device", ""
@@ -853,6 +863,10 @@ class VerifySubmissionTests(unittest.TestCase):
             mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
             mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
             mock.patch("scripts.verify_submission.run", return_value=completed),
+            mock.patch(
+                "scripts.verify_submission.systemd_unit_outcome",
+                return_value={"Result": "success", "memory_events": {}},
+            ),
             mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
         ):
             result = sandboxed_run(
@@ -865,6 +879,47 @@ class VerifySubmissionTests(unittest.TestCase):
                 tools={},
             )
         self.assertEqual(result.returncode, 0)
+
+    def test_cgroup_oom_is_retryable_even_when_comparator_returns_one(self):
+        completed = subprocess.CompletedProcess(["systemd-run"], 1, "", "")
+        with (
+            mock.patch("scripts.verify_submission.verify_tool_snapshot"),
+            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
+            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission.run", return_value=completed),
+            mock.patch(
+                "scripts.verify_submission.systemd_unit_outcome",
+                return_value={
+                    "Result": "exit-code",
+                    "memory_events": {"oom": 1, "oom_kill": 1},
+                },
+            ),
+            mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
+            self.assertRaisesRegex(ResourceExhausted, "resource ceiling"),
+        ):
+            sandboxed_run(
+                ["comparator", "comparator.json"],
+                cwd=REPOSITORY_ROOT,
+                environment={},
+                landrun=Path("landrun"),
+                writable_directories=[],
+                executable_paths=[],
+                tools={},
+            )
+
+    def test_missing_cgroup_outcome_is_a_retryable_provider_error(self):
+        with (
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+            self.assertRaises(VerificationError) as raised,
+        ):
+            verifier.systemd_unit_outcome(
+                "palomar-" + "a" * 24,
+                cwd=REPOSITORY_ROOT,
+                environment={},
+            )
+        self.assertEqual(raised.exception.owner, "provider")
+        self.assertEqual(raised.exception.code, "provider.resource_telemetry_missing")
+        self.assertTrue(raised.exception.retryable)
 
     def test_resource_wrapper_records_bounded_usage(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1113,6 +1168,7 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertNotEqual(
                 protected_values["challenge_module"], config["challenge_module"]
             )
+            self.assertNotIn("verification_profile", protected_values)
             self.assertFalse(json.loads(path.read_text())["enable_nanoda"])
 
             protected.unlink()
@@ -4363,6 +4419,27 @@ review:
         self.assertIn("--property=MemoryMax=12G", command)
         self.assertIn("--property=TasksMax=512", command)
 
+    def test_named_systemd_unit_avoids_collection_and_blocking_mode(self):
+        def which(command):
+            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
+
+        with (
+            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
+            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)) as probe,
+            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+        ):
+            command = systemd_command(
+                ["true"],
+                cwd=Path("/source"),
+                environment={},
+                unit_name="palomar-" + "a" * 24,
+            )
+        self.assertIn("--unit=palomar-" + "a" * 24, command)
+        self.assertNotIn("--collect", command)
+        self.assertNotIn("--property=RemainAfterExit=yes", command)
+        self.assertFalse(any(p.startswith("--unit=") for p in probe.call_args.args[0]))
+        self.assertIn("--collect", probe.call_args.args[0])
+
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")
         with mock.patch("scripts.verify_submission.sandboxed_run", return_value=proc):
@@ -4710,8 +4787,27 @@ class DispatchWorkflowTests(unittest.TestCase):
         return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
     def test_verification_is_reachable_only_by_dispatch(self):
-        self.assertEqual(list(self.workflow()["on"]), ["workflow_dispatch"])
+        self.assertEqual(
+            set(self.workflow()["on"]), {"workflow_call", "workflow_dispatch"}
+        )
         self.assertEqual(list(self.workflow()["jobs"]), ["verify"])
+
+    def test_reusable_preflight_uses_the_same_fixed_job(self):
+        workflow = self.workflow()
+        self.assertEqual(workflow["jobs"]["verify"]["runs-on"], "ubuntu-24.04")
+        self.assertEqual(
+            set(workflow["on"]["workflow_call"]["inputs"]),
+            set(workflow["on"]["workflow_dispatch"]["inputs"]) | {"pipeline_commit"},
+        )
+        checkout = next(
+            step
+            for step in workflow["jobs"]["verify"]["steps"]
+            if step.get("name") == "Checkout submission pipeline"
+        )
+        self.assertEqual(
+            checkout["with"]["ref"],
+            "${{ inputs.pipeline_commit || github.workflow_sha }}",
+        )
 
     def test_a_slow_run_delays_only_its_own_submission(self):
         """A literal group here serialises every submission ever made.
@@ -4724,7 +4820,9 @@ class DispatchWorkflowTests(unittest.TestCase):
         concurrency = self.workflow()["jobs"]["verify"]["concurrency"]
         self.assertEqual(
             concurrency["group"],
-            "palomar-verify-${{ inputs.mode }}-${{ inputs.request_id }}",
+            "palomar-verify-${{ inputs.pipeline_commit && "
+            "format('call-{0}-{1}-', github.run_id, github.run_attempt) || '' }}"
+            "${{ inputs.mode }}-${{ inputs.request_id }}",
         )
         self.assertEqual(concurrency["cancel-in-progress"], "false")
 

@@ -1,0 +1,19 @@
+project:
+  name: Reusable preflight test fixture
+  description: A tiny fixture for testing workflow input delivery and mechanical preparation.
+  authors: [Palomar maintainers]
+  license: MIT
+  responsible_maintainers: [Palomar maintainers]
+repository:
+  role: substantive-development
+classification:
+  arxiv: [math.LO]
+sources:
+  - title: Reflexivity of equality
+    authors: [Palomar maintainers]
+    relationship: formalizes
+automation:
+  methods:
+    - method: manual
+review:
+  status: self-assessed
