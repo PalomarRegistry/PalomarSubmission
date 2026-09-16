@@ -15,6 +15,29 @@ from scripts.verification_profile import VerificationProfileError
 
 
 class CapacityReportTests(unittest.TestCase):
+    def test_renderer_helpers_import_without_host_capacity_access(self):
+        # The real sanitizer's mount namespace omits /proc and /sys. Importing
+        # shared helpers must not try to calculate the outer supervisor's limits.
+        result = subprocess.run(
+            [sys.executable, "-c", "\n".join((
+                "from unittest.mock import patch",
+                "with patch('scripts.verification_profile.host_memory_bytes',",
+                "           side_effect=FileNotFoundError('/proc/meminfo')):",
+                "    import scripts.render_challenge",
+            ))],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_supervisor_calculates_limits_from_current_effective_capacity(self):
+        with mock.patch.object(verifier, "effective_memory_bytes", return_value=32 * 1024**3):
+            properties = verifier.permissive_resource_properties()
+        self.assertIn(
+            f"MemoryMax={32 * 1024**3 * verifier.VERIFICATION_LIMITS['memory_max_percent'] // 100}",
+            properties,
+        )
+
     def test_parent_timeout_does_not_record_an_active_unit_as_successful(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "metrics.jsonl"

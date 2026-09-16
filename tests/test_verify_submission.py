@@ -25,7 +25,6 @@ from scripts.verification_errors import FormalizationValidationError, Verificati
 from scripts.verification_profile import effective_memory_bytes
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
-    PERMISSIVE_RESOURCE_PROPERTIES,
     LicenseDetectorError,
     LicenseValidationError,
     ResourceExhausted,
@@ -818,14 +817,15 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_default_capacity_supports_ten_hour_verification(self):
         self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)
         profile = json.loads((REPOSITORY_ROOT / "verification-profile.json").read_text())
+        properties = verifier.permissive_resource_properties()
         self.assertIn(
             f"MemoryMax={effective_memory_bytes() * profile['limits']['memory_max_percent'] // 100}",
-            PERMISSIVE_RESOURCE_PROPERTIES,
+            properties,
         )
         self.assertFalse(
             any(
                 property_value.startswith("CPUQuota=")
-                for property_value in PERMISSIVE_RESOURCE_PROPERTIES
+                for property_value in properties
             )
         )
 

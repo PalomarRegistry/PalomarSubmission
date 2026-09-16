@@ -424,13 +424,6 @@ MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
 VERIFICATION_PROFILE = load_profile()
 VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
-PERMISSIVE_RESOURCE_PROPERTIES = (
-    f"MemoryHigh={effective_memory_bytes() * VERIFICATION_LIMITS['memory_high_percent'] // 100}",
-    f"MemoryMax={effective_memory_bytes() * VERIFICATION_LIMITS['memory_max_percent'] // 100}",
-    f"TasksMax={VERIFICATION_LIMITS['tasks_max']}",
-    f"LimitNOFILE={VERIFICATION_LIMITS['open_files_max']}",
-    f"LimitFSIZE={VERIFICATION_LIMITS['file_size_max_bytes']}",
-)
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
@@ -438,6 +431,19 @@ _SYSTEMD_MANAGER: str | None = None
 _RESOURCE_PHASE: str | None = None
 _RESOURCE_METRICS_PATH: Path | None = None
 _RESOURCE_DISK_PATH: Path | None = None
+
+
+def permissive_resource_properties() -> tuple[str, ...]:
+    # Imported helpers also run inside the renderer's confined sanitizer, where
+    # /proc is deliberately hidden. Only the outer supervisor needs host capacity.
+    memory = effective_memory_bytes()
+    return (
+        f"MemoryHigh={memory * VERIFICATION_LIMITS['memory_high_percent'] // 100}",
+        f"MemoryMax={memory * VERIFICATION_LIMITS['memory_max_percent'] // 100}",
+        f"TasksMax={VERIFICATION_LIMITS['tasks_max']}",
+        f"LimitNOFILE={VERIFICATION_LIMITS['open_files_max']}",
+        f"LimitFSIZE={VERIFICATION_LIMITS['file_size_max_bytes']}",
+    )
 
 
 def install_execution_deadline(
@@ -2744,7 +2750,7 @@ def sandboxed_run(
         timeout=timeout,
         unrestricted_network=unrestricted_network,
         resource_properties=tuple(
-            dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
+            dict.fromkeys((*permissive_resource_properties(), *resource_properties))
         ),
         unit_name=unit_name,
     )
