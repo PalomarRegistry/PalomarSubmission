@@ -1,8 +1,7 @@
 # Mathlib cache trust note
 
 **Investigated:** 1 August 2026. Palomar's two current cache implementations,
-reached from three workflow routes, were reconciled on 9 August 2026 against
-Submission commit `02d4746ba8322af3ff3e2d173b45a9c553072393`.
+reached from three workflow routes, were reconciled again on 14 September 2026.
 
 **Implementation inspected:** `leanprover-community/mathlib4` at
 [`0be66d77ba290828a5260d883ace636f56bce89a`](https://github.com/leanprover-community/mathlib4/tree/0be66d77ba290828a5260d883ace636f56bce89a),
@@ -135,17 +134,50 @@ described in [`launch-security-review.md`](launch-security-review.md).
 
 The dispatched
 [`render-challenge.yml`](../.github/workflows/render-challenge.yml) workflow
-uses the narrower three-stage path in
+uses the following staged path in
 [`render_challenge.py`](../scripts/render_challenge.py):
 
-1. Under Landrun/systemd with network disabled, the cache client selected by
+1. Historical ProofWidgets revisions that have the canonical Lake release
+   policy but no tracked `widget/js` tree are prepared before cache discovery.
+   The renderer verifies that the materialized Mathlib and ProofWidgets Git
+   checkouts have the exact manifest revisions and canonical origins and are
+   clean, then requires Mathlib's own pinned manifest to name that same
+   ProofWidgets repository and revision. It resets the canonical ProofWidgets
+   `.lake` state and hard-links only that verified source into a disposable
+   one-package workspace. Under Landrun/systemd with network enabled, only the
+   disposable `.lake` root is writable and only the canonical
+   `proofwidgets:release` target runs; certificate and name-service paths are
+   the only host configuration added to the read set. The merged render
+   workspace and submitted Lake configuration are not readable there. After
+   execution, source inode snapshots and package mappings are rechecked. The
+   generated build tree must contain the widget output and satisfy the generic
+   confined-symlink, regular-file, and hard-link checks; the only promotable
+   metadata is `ProofWidgets4.tar.gz` and its adjacent `.trace`. Build and that
+   pair are moved into the fresh canonical `.lake` root, while staged `config`
+   is discarded. Revisions with tracked widget assets skip this step.
+2. Before discovery, the renderer inspects the authenticated Mathlib
+   `Cache/IO.lean`. Legacy clients that pin a separately released `leantar`
+   supply both its semantic version and the canonical `digama0/leangz` release
+   URL policy there; an incomplete or different legacy policy fails closed.
+   Trusted credential-free `curl` downloads the corresponding x86-64 Linux
+   archive under a 16 MiB file limit. Only the legacy versions required by the
+   supported renderer floor are allowlisted, and each archive must match its
+   fixed SHA-256 pin. Palomar accepts exactly one bounded regular `leantar`
+   member beneath the expected archive directory, writes it into the fresh
+   cache directory, and checks its exact reported version in a network-disabled
+   Landrun/systemd process. The binary's digest is checked again after discovery
+   and the same file is moved across the cache-directory reset for unpacking.
+   Modern Mathlib obtains `leantar` from the selected Lean toolchain and skips
+   this bootstrap.
+3. Under Landrun/systemd with network disabled, the cache client selected by
    the accepted dependency checkout is forced to a local empty `file://`
    backend. Palomar treats its output only as a request-key declaration: it
    parses the attempted 16-hex archive names and requires the reported count to
    equal the unique key set, with a hard limit of 10,000 archives.
-2. A verifier-selected `curl`, outside candidate execution but still inside a
+4. A verifier-selected `curl`, outside candidate execution but still inside a
    resource-limited systemd unit, fetches exactly those names from
-   `https://lakecache.blob.core.windows.net/mathlib4/f/`. It runs under
+   the fixed official `mathlib4-master` container, with the legacy `mathlib4`
+   container as a fallback. It runs under
    `env -i`, invokes `curl --disable` so the preserved `HOME` cannot supply a
    `.curlrc`, sends no cache credential, and permits only HTTPS. A systemd
    `LimitFSIZE` makes the 256 MiB per-file limit fail closed even when the
@@ -155,13 +187,17 @@ uses the narrower three-stage path in
    result but does not prevent those bytes from first crossing the network or
    consuming the phase's wall-time budget. These resource controls do not
    authenticate archive meaning.
-3. With network disabled again, the selected cache client unpacks the
+5. With network disabled again, the selected cache client unpacks the
    downloaded files and the renderer performs its Lean/Verso build. On a
    successful unpack, the download directory is removed immediately afterward.
 
-This split prevents Lake, Lean, submitted code, and cache-client code from
-holding network access during rendering. It does not make the fixed Azure bytes
-cryptographically equivalent to the pinned Mathlib source.
+This split prevents submitted Lake configuration, submitted Lean code, and the
+Mathlib cache client from holding network access. The one Lake process with
+network access is restricted to the disposable legacy ProofWidgets source and
+release target whose exact revision is bound to the already accepted Mathlib
+manifest. The `leantar` release archive is pinned by digest, but none of these
+controls makes the downloaded ProofWidgets release, extracted `leantar` binary,
+or fixed Azure bytes semantically equivalent to its pinned source.
 
 The mechanical-verification artifact records the source/dependency revisions
 and workflow URL. The render artifact additionally records cache archive counts

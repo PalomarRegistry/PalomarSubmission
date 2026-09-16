@@ -13,6 +13,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -48,22 +50,35 @@ from scripts.verify_submission import (  # noqa: E402
     module_source_suffix,
     normalized_repository_path,
     now,
+    package_checkout,
     parse_lean_header,
+    promote_staged_lake_state,
     require_protected_paths,
+    reset_trusted_lake_state,
     resolve_release_commit,
     resolve_repository_path,
     run,
     sandboxed_run,
     sha256,
+    stage_trusted_closure,
     supported_toolchain,
+    system_readable_paths,
     systemd_command,
     tool_snapshot,
     tree_size,
+    validate_staged_lake_promotions,
+    validate_trusted_source_snapshots,
     verify_sandbox_confinement,
     write_json,
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
+PROOFWIDGETS_REPOSITORY = "leanprover-community/proofwidgets4"
+PROOFWIDGETS_RELEASE_ARCHIVE = "ProofWidgets4.tar.gz"
+LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256 = {
+    "0.1.16": "2cbc40ca214227a0e536721c021bad719a802dd86b1f2d8989571efafbfbd3d1",
+    "0.1.17": "46564c5a15b0a5919dee06b246ac1297399968c828269f675212104d7d1ac445",
+}
 MISSING_DECLARATION_CODE = "challenge.declaration_not_rendered"
 MISSING_DECLARATION_EXIT = 3
 MAX_REPORTED_DECLARATIONS = 50
@@ -79,6 +94,8 @@ MAX_BUILD_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CACHE_ARCHIVES = 10_000
 MAX_CACHE_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_CACHE_TOOL_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_CACHE_TOOL_BYTES = 32 * 1024 * 1024
 # GitHub-hosted Actions jobs may run for at most six hours. Keep the confined
 # build's own deadline at that ceiling too; the workflow job remains the final
 # authority if setup time means it reaches GitHub's limit first.
@@ -102,6 +119,12 @@ CACHE_DOWNLOAD_PROPERTIES = (
     "LimitNOFILE=16384",
     f"LimitFSIZE={MAX_CACHE_ARCHIVE_BYTES}",
     "RuntimeMaxSec=1800",
+)
+CACHE_TOOL_DOWNLOAD_PROPERTIES = (
+    "MemoryMax=1G",
+    "TasksMax=64",
+    "LimitNOFILE=1024",
+    f"LimitFSIZE={MAX_CACHE_TOOL_ARCHIVE_BYTES}",
 )
 
 # Mathlib's canonical cache moved new master-built artifacts to the
@@ -1889,17 +1912,21 @@ def discover_mathlib_cache_hashes(
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
+    cache_dir: Path | None = None,
+    empty_cache: Path | None = None,
 ) -> tuple[set[str], Path]:
     """Compute cache keys without giving Lake, Lean, or cache code network access."""
-    cache_dir = workspace / ".lake" / "config" / "mathlib-cache"
-    empty_cache = workspace / ".lake" / "config" / "empty-mathlib-cache"
-    for directory in (cache_dir, empty_cache):
-        if directory.is_symlink():
-            directory.unlink()
-        elif directory.exists():
-            shutil.rmtree(directory)
-    cache_dir.mkdir()
-    (empty_cache / "f").mkdir(parents=True)
+    default_cache = workspace / ".lake" / "config" / "mathlib-cache"
+    default_empty = workspace / ".lake" / "config" / "empty-mathlib-cache"
+    if (cache_dir is None) != (empty_cache is None):
+        raise VerificationError("Mathlib cache discovery directories are incomplete")
+    if cache_dir is None:
+        cache_dir, empty_cache = default_cache, default_empty
+        prepare_mathlib_cache_discovery_directories(cache_dir, empty_cache)
+    elif cache_dir != default_cache or empty_cache != default_empty:
+        raise VerificationError("Mathlib cache discovery directories are unexpected")
+    assert empty_cache is not None
+
     cache_env = environment.copy()
     cache_env["MATHLIB_CACHE_DIR"] = str(cache_dir.resolve())
     cache_env["MATHLIB_CACHE_GET_URL"] = f"file://{empty_cache.resolve()}"
@@ -1935,6 +1962,25 @@ def discover_mathlib_cache_hashes(
     return hashes, cache_dir
 
 
+def prepare_mathlib_cache_discovery_directories(
+    cache_dir: Path, empty_cache: Path
+) -> None:
+    """Create the two fresh renderer-owned cache directories."""
+    for directory in (cache_dir, empty_cache):
+        if directory.is_symlink():
+            directory.unlink()
+        elif directory.exists():
+            shutil.rmtree(directory)
+    cache_dir.mkdir()
+    (empty_cache / "f").mkdir(parents=True)
+
+
+@dataclass(frozen=True)
+class PreparedMathlibCacheTool:
+    path: Path
+    sha256: str
+
+
 def download_mathlib_cache(
     hashes: set[str],
     cache_dir: Path,
@@ -1943,6 +1989,7 @@ def download_mathlib_cache(
     environment: dict[str, str],
     curl: Path,
     env_tool: Path,
+    preserved_tool: PreparedMathlibCacheTool | None = None,
 ) -> tuple[int, int]:
     """Fetch any available fixed-host cache bytes without requiring a cache hit.
 
@@ -1950,11 +1997,31 @@ def download_mathlib_cache(
     revision may legitimately have no published archives yet; the confined
     build below can compile the required target from source in that case.
     """
-    if cache_dir.is_symlink():
-        cache_dir.unlink()
-    elif cache_dir.exists():
-        shutil.rmtree(cache_dir)
-    cache_dir.mkdir()
+    held_tool = trusted_work / "mathlib-cache-preserved-tool"
+    if held_tool.exists() or held_tool.is_symlink():
+        raise VerificationError("Mathlib cache preserved-tool path is not fresh")
+    try:
+        if preserved_tool is not None:
+            tool = preserved_tool.path
+            if (
+                tool.parent != cache_dir.resolve()
+                or tool.is_symlink()
+                or not tool.is_file()
+                or tool.stat().st_size > MAX_CACHE_TOOL_BYTES
+                or sha256(tool) != preserved_tool.sha256
+            ):
+                raise VerificationError("prepared Mathlib cache tool changed during discovery")
+            os.replace(tool, held_tool)
+        if cache_dir.is_symlink():
+            cache_dir.unlink()
+        elif cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        cache_dir.mkdir()
+        if preserved_tool is not None:
+            os.replace(held_tool, cache_dir / preserved_tool.path.name)
+    except Exception:
+        held_tool.unlink(missing_ok=True)
+        raise
     config = trusted_work / "mathlib-cache-download.conf"
     if config.is_symlink() or (config.exists() and not config.is_file()):
         raise VerificationError("invalid Mathlib cache download configuration path")
@@ -2025,6 +2092,15 @@ def download_mathlib_cache(
             downloaded = set()
             total = 0
             for path in cache_dir.iterdir():
+                if preserved_tool is not None and path == cache_dir / preserved_tool.path.name:
+                    if (
+                        path.is_symlink()
+                        or not path.is_file()
+                        or path.stat().st_size > MAX_CACHE_TOOL_BYTES
+                        or sha256(path) != preserved_tool.sha256
+                    ):
+                        raise VerificationError("prepared Mathlib cache tool changed during download")
+                    continue
                 if (
                     path.is_symlink()
                     or not path.is_file()
@@ -2042,18 +2118,446 @@ def download_mathlib_cache(
                     raise VerificationError("Mathlib cache downloads exceed the byte cap")
     finally:
         config.unlink(missing_ok=True)
+        held_tool.unlink(missing_ok=True)
     return len(downloaded), total
+
+
+def validate_materialized_git_package(
+    package_dir: Path,
+    package: dict[str, str],
+    *,
+    git: Path,
+    environment: dict[str, str],
+) -> None:
+    """Bind a network-enabled package action to its materialized Git identity."""
+    git_env = environment.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    command = [
+        str(git),
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.file.allow=never",
+        "-C",
+        str(package_dir),
+    ]
+    head = run([*command, "rev-parse", "HEAD"], env=git_env).stdout.strip()
+    if head != package["revision"]:
+        raise VerificationError(
+            f"materialized {package['name']} checkout does not match lake-manifest.json"
+        )
+    origin = run([*command, "remote", "get-url", "origin"], env=git_env).stdout.strip()
+    if (github_repository(origin) or "").lower() != package["repository"].lower():
+        raise VerificationError(f"materialized {package['name']} checkout has an unexpected origin")
+    changes = run(
+        [*command, "status", "--porcelain=v1", "--untracked-files=all"],
+        env=git_env,
+    ).stdout.strip()
+    if changes:
+        raise VerificationError(
+            f"materialized {package['name']} source changed before trusted release staging"
+        )
+
+
+def proofwidgets_source_layout(
+    package_dir: Path,
+    *,
+    git: Path,
+    environment: dict[str, str],
+) -> str:
+    """Classify canonical ProofWidgets source, failing closed on mixed layouts."""
+    lakefiles = [
+        path
+        for path in (package_dir / "lakefile.lean", package_dir / "lakefile.toml")
+        if path.exists() or path.is_symlink()
+    ]
+    if (
+        len(lakefiles) != 1
+        or lakefiles[0].is_symlink()
+        or not lakefiles[0].is_file()
+        or lakefiles[0].stat().st_size > 1024 * 1024
+    ):
+        raise VerificationError("ProofWidgets has an ambiguous or invalid Lake configuration")
+    lakefile = lakefiles[0].read_text(encoding="utf-8")
+    legacy_markers = (
+        re.search(r"\bpreferReleaseBuild\s*:=\s*true\b", lakefile) is not None,
+        re.search(
+            rf'\bbuildArchive\?\s*:=\s*"{re.escape(PROOFWIDGETS_RELEASE_ARCHIVE)}"',
+            lakefile,
+        )
+        is not None,
+        re.search(
+            r'\breleaseRepo\s*:=\s*"https://github\.com/'
+            r'leanprover-community/ProofWidgets4"',
+            lakefile,
+        )
+        is not None,
+    )
+    if any(legacy_markers) and not all(legacy_markers):
+        raise VerificationError("ProofWidgets has an incomplete legacy release configuration")
+
+    git_env = environment.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    tracked = run(
+        [
+            str(git),
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.file.allow=never",
+            "-C",
+            str(package_dir),
+            "ls-files",
+            "-z",
+            "--",
+            "widget/js",
+        ],
+        env=git_env,
+    ).stdout
+    tracked_js = bool(tracked.rstrip("\0"))
+    widget_js = package_dir / "widget" / "js"
+    real_widget_js = widget_js.is_dir() and not widget_js.is_symlink()
+    if tracked_js != real_widget_js:
+        raise VerificationError("ProofWidgets tracked widget layout does not match its checkout")
+    if tracked_js:
+        if any(legacy_markers):
+            raise VerificationError("ProofWidgets mixes tracked widgets with legacy release policy")
+        return "modern"
+    if widget_js.exists() or widget_js.is_symlink() or not all(legacy_markers):
+        raise VerificationError("ProofWidgets has an unsupported widget release layout")
+    return "legacy"
+
+
+def legacy_mathlib_leantar_version(mathlib_dir: Path) -> str | None:
+    """Read the legacy cache tool pin from authenticated Mathlib source."""
+    source = mathlib_dir / "Cache" / "IO.lean"
+    if source.is_symlink() or not source.is_file() or source.stat().st_size > 1024 * 1024:
+        raise VerificationError("Mathlib cache tool source is missing or invalid")
+    text = source.read_text(encoding="utf-8")
+    match = re.search(
+        r'\bdef\s+LEANTARVERSION\s*:=\s*\n\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+        text,
+    )
+    if match is None:
+        if "LEANTARVERSION" in text or "leangz/releases/download" in text:
+            raise VerificationError("Mathlib has an unsupported legacy cache tool policy")
+        return None
+    required = (
+        'IO.CACHEDIR / s!"leantar-{LEANTARVERSION}{EXE}"',
+        's!"https://github.com/digama0/leangz/releases/download/'
+        'v{LEANTARVERSION}/leantar-v{LEANTARVERSION}-{target}.{ext}"',
+    )
+    if not all(marker in text for marker in required):
+        raise VerificationError("Mathlib has an unsupported legacy cache tool policy")
+    return match.group(1)
+
+
+def prepare_legacy_mathlib_cache_tool(
+    workspace: Path,
+    cache_dir: Path,
+    *,
+    checkout: Path,
+    trusted_work: Path,
+    environment: dict[str, str],
+    landrun: Path,
+    curl: Path,
+    env_tool: Path,
+    git: Path,
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> PreparedMathlibCacheTool | None:
+    """Install a bounded, source-pinned legacy leantar before offline discovery."""
+    packages = manifest_packages(workspace)
+    mathlib = next(
+        (
+            package
+            for package in packages
+            if package["repository"].lower() == "leanprover-community/mathlib4"
+        ),
+        None,
+    )
+    if mathlib is None:
+        return None
+    mathlib_dir = package_checkout(workspace, mathlib, checkout=checkout)
+    validate_materialized_git_package(
+        mathlib_dir,
+        mathlib,
+        git=git,
+        environment=environment,
+    )
+    version = legacy_mathlib_leantar_version(mathlib_dir)
+    if version is None:
+        return None
+    expected_archive_digest = LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256.get(version)
+    if expected_archive_digest is None:
+        raise VerificationError("legacy Mathlib cache tool version is not allowlisted")
+
+    target = f"leantar-v{version}-x86_64-unknown-linux-musl"
+    archive = trusted_work / f"{target}.tar.gz"
+    binary = cache_dir / f"leantar-{version}"
+    if archive.exists() or archive.is_symlink() or binary.exists() or binary.is_symlink():
+        raise VerificationError("legacy Mathlib cache tool path is not fresh")
+    clean_env = {
+        "HOME": environment["HOME"],
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": environment["TMPDIR"],
+        "LANG": "C.UTF-8",
+    }
+    command = [
+        str(env_tool),
+        "-i",
+        *(f"{name}={value}" for name, value in clean_env.items()),
+        str(curl),
+        "--disable",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--remove-on-error",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--location",
+        "--max-filesize",
+        str(MAX_CACHE_TOOL_ARCHIVE_BYTES),
+        "--output",
+        str(archive),
+        f"https://github.com/digama0/leangz/releases/download/v{version}/{target}.tar.gz",
+    ]
+    try:
+        run(
+            systemd_command(
+                command,
+                cwd=trusted_work,
+                environment=environment,
+                timeout=300,
+                unrestricted_network=True,
+                resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
+            ),
+            cwd=trusted_work,
+            env=environment,
+            timeout=300,
+        )
+        if (
+            archive.is_symlink()
+            or not archive.is_file()
+            or archive.stat().st_size == 0
+            or archive.stat().st_size > MAX_CACHE_TOOL_ARCHIVE_BYTES
+        ):
+            raise VerificationError("legacy Mathlib cache tool archive is invalid")
+        if sha256(archive) != expected_archive_digest:
+            raise VerificationError("legacy Mathlib cache tool archive digest does not match its pin")
+        with tarfile.open(archive, mode="r|gz") as bundle:
+            directory_member = bundle.next()
+            binary_member = bundle.next()
+            expected_directory = f"{target}/"
+            expected_binary = f"{target}/leantar"
+            if (
+                directory_member is None
+                or binary_member is None
+                or directory_member.name.rstrip("/") + "/" != expected_directory
+                or not directory_member.isdir()
+                or binary_member.name != expected_binary
+                or not binary_member.isfile()
+                or binary_member.size <= 0
+                or binary_member.size > MAX_CACHE_TOOL_BYTES
+            ):
+                raise VerificationError("legacy Mathlib cache tool archive has unexpected contents")
+            extracted = bundle.extractfile(binary_member)
+            if extracted is None:
+                raise VerificationError("legacy Mathlib cache tool archive has no executable")
+            content = extracted.read(MAX_CACHE_TOOL_BYTES + 1)
+            if len(content) != binary_member.size:
+                raise VerificationError("legacy Mathlib cache tool archive has an invalid executable")
+            if bundle.next() is not None:
+                raise VerificationError("legacy Mathlib cache tool archive has unexpected contents")
+        replace_workspace_file(binary, content)
+        binary.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        digest = sha256(binary)
+        validation_tools = {**tools, binary.resolve(): digest}
+        validated = sandboxed_run(
+            [str(binary.resolve()), "--version"],
+            cwd=cache_dir,
+            environment=environment,
+            landrun=landrun,
+            writable_directories=[cache_dir.resolve()],
+            readable_paths=[],
+            executable_paths=sorted({*executable_paths, binary.resolve()}),
+            tools=validation_tools,
+            timeout=60,
+            resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
+        )
+        if validated.stdout.strip() != f"leantar {version}":
+            raise VerificationError("legacy Mathlib cache tool reports an unexpected version")
+        return PreparedMathlibCacheTool(binary.resolve(), digest)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def _validate_legacy_proofwidgets_promotion(promotions: tuple[Any, ...]) -> None:
+    """Narrow generic Lake promotion to ProofWidgets' one official archive pair."""
+    if len(promotions) != 1 or promotions[0].name != "proofwidgets":
+        raise VerificationError("legacy ProofWidgets staging produced an unexpected package set")
+    promotion = promotions[0]
+    expected = {
+        promotion.canonical_build.parent / PROOFWIDGETS_RELEASE_ARCHIVE,
+        promotion.canonical_build.parent / f"{PROOFWIDGETS_RELEASE_ARCHIVE}.trace",
+    }
+    if {destination for _source, destination in promotion.metadata} != expected:
+        raise VerificationError("legacy ProofWidgets staging produced unexpected release metadata")
+    staged_js = promotion.staged_build / "js"
+    if staged_js.is_symlink() or not staged_js.is_dir():
+        raise VerificationError("legacy ProofWidgets release contains no generated widget directory")
+
+
+def stage_legacy_proofwidgets_release(
+    workspace: Path,
+    *,
+    checkout: Path,
+    environment: dict[str, str],
+    lake: Path,
+    landrun: Path,
+    git: Path,
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> str | None:
+    """Fetch one accepted-manifest-bound ProofWidgets release in disposable state."""
+    packages = manifest_packages(workspace)
+    proofwidgets = next(
+        (package for package in packages if package["name"] == "proofwidgets"),
+        None,
+    )
+    if proofwidgets is None:
+        return None
+    if proofwidgets["repository"].lower() != PROOFWIDGETS_REPOSITORY:
+        raise VerificationError("renderer requires the canonical pinned ProofWidgets package")
+    package_dir = package_checkout(workspace, proofwidgets, checkout=checkout)
+    validate_materialized_git_package(
+        package_dir,
+        proofwidgets,
+        git=git,
+        environment=environment,
+    )
+    layout = proofwidgets_source_layout(package_dir, git=git, environment=environment)
+    if layout == "modern":
+        return layout
+
+    mathlib = next(
+        (
+            package
+            for package in packages
+            if package["repository"].lower() == "leanprover-community/mathlib4"
+        ),
+        None,
+    )
+    if mathlib is None:
+        raise VerificationError(
+            "legacy ProofWidgets release is not authenticated by a pinned Mathlib manifest"
+        )
+    mathlib_dir = package_checkout(workspace, mathlib, checkout=checkout)
+    validate_materialized_git_package(
+        mathlib_dir,
+        mathlib,
+        git=git,
+        environment=environment,
+    )
+    authoritative = [
+        package
+        for package in manifest_packages(mathlib_dir)
+        if package["name"] == "proofwidgets"
+    ]
+    if (
+        len(authoritative) != 1
+        or authoritative[0]["repository"].lower() != PROOFWIDGETS_REPOSITORY
+        or authoritative[0]["revision"] != proofwidgets["revision"]
+    ):
+        raise VerificationError(
+            "ProofWidgets revision does not match the authenticated Mathlib manifest"
+        )
+
+    reset_trusted_lake_state(
+        workspace,
+        {"proofwidgets"},
+        packages=packages,
+        checkout=checkout,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".palomar-proofwidgets-release-", dir=checkout.parent
+    ) as staging_directory:
+        staged = stage_trusted_closure(
+            workspace,
+            checkout=checkout,
+            packages=packages,
+            closure={"proofwidgets"},
+            root_name="proofwidgets",
+            destination=Path(staging_directory),
+        )
+        staged_home = staged.root_package / ".lake" / "config" / "home"
+        staged_temporary = staged.root_package / ".lake" / "config" / "tmp"
+        staged_home.mkdir()
+        staged_temporary.mkdir()
+        staged_env = environment.copy()
+        staged_env.update(
+            {
+                "HOME": str(staged_home.resolve()),
+                "TMPDIR": str(staged_temporary.resolve()),
+                "LEAN_ABORT_ON_PANIC": "1",
+            }
+        )
+        sandboxed_run(
+            [str(lake), "build", "proofwidgets:release"],
+            cwd=staged.root_package,
+            environment=staged_env,
+            landrun=landrun,
+            writable_directories=list(staged.lake_roots),
+            readable_paths=sorted({staged.source, *system_readable_paths()}),
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=1800,
+            unrestricted_network=True,
+            resource_properties=CACHE_DOWNLOAD_PROPERTIES,
+        )
+        validate_trusted_source_snapshots(staged.source_snapshots)
+        promotions = validate_staged_lake_promotions(
+            workspace,
+            staged.source,
+            checkout=checkout,
+            packages=packages,
+            closure={"proofwidgets"},
+            root_name="proofwidgets",
+        )
+        _validate_legacy_proofwidgets_promotion(promotions)
+        promote_staged_lake_state(promotions)
+    return layout
 
 
 def hydrate_mathlib_cache(
     workspace: Path,
     *,
+    checkout: Path,
     trusted_work: Path,
     environment: dict[str, str],
     lake: Path,
     landrun: Path,
     curl: Path,
     env_tool: Path,
+    git: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -2065,6 +2569,22 @@ def hydrate_mathlib_cache(
     # that there is no Mathlib cache to hydrate.
     if not any(package["name"] == "mathlib" for package in manifest_packages(workspace)):
         return {"requested": 0, "downloaded": 0, "bytes": 0}
+    cache_dir = workspace / ".lake" / "config" / "mathlib-cache"
+    empty_cache = workspace / ".lake" / "config" / "empty-mathlib-cache"
+    prepare_mathlib_cache_discovery_directories(cache_dir, empty_cache)
+    prepared_tool = prepare_legacy_mathlib_cache_tool(
+        workspace,
+        cache_dir,
+        checkout=checkout,
+        trusted_work=trusted_work,
+        environment=environment,
+        landrun=landrun,
+        curl=curl,
+        env_tool=env_tool,
+        git=git,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
     hashes, cache_dir = discover_mathlib_cache_hashes(
         workspace,
         environment=environment,
@@ -2074,6 +2594,8 @@ def hydrate_mathlib_cache(
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
+        cache_dir=cache_dir,
+        empty_cache=empty_cache,
     )
     downloaded, total = download_mathlib_cache(
         hashes,
@@ -2082,6 +2604,7 @@ def hydrate_mathlib_cache(
         environment=environment,
         curl=curl,
         env_tool=env_tool,
+        preserved_tool=prepared_tool,
     )
     cache_env = environment.copy()
     cache_env["MATHLIB_CACHE_DIR"] = str(cache_dir.resolve())
@@ -2102,7 +2625,9 @@ def hydrate_mathlib_cache(
     return {"requested": len(hashes), "downloaded": downloaded, "bytes": total}
 
 
-def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
+def prepare_build_metadata_files(
+    workspace: Path, proofwidgets_layout: str | None = None
+) -> tuple[Path, ...]:
     """Create only the sidecars Lake must update beside tracked ProofWidgets assets."""
     proofwidgets = next(
         (
@@ -2116,13 +2641,19 @@ def prepare_build_metadata_files(workspace: Path) -> tuple[Path, ...]:
     # widget assets for Lake to rebuild, so it needs no sidecars granted.
     if proofwidgets is None:
         return ()
-    if proofwidgets["repository"].lower() != "leanprover-community/proofwidgets4":
+    if proofwidgets["repository"].lower() != PROOFWIDGETS_REPOSITORY:
         raise VerificationError("renderer requires the canonical pinned ProofWidgets package")
     package_dir = workspace / ".lake" / "packages" / "proofwidgets"
-    relative_paths = (
-        Path("widget/package-lock.json.hash"),
-        Path("widget/js/lake.trace.hash"),
-    )
+    if proofwidgets_layout is None:
+        widget_js = package_dir / "widget" / "js"
+        proofwidgets_layout = (
+            "modern" if widget_js.is_dir() and not widget_js.is_symlink() else "legacy"
+        )
+    if proofwidgets_layout not in {"legacy", "modern"}:
+        raise VerificationError("renderer received an invalid ProofWidgets source layout")
+    relative_paths = [Path("widget/package-lock.json.hash")]
+    if proofwidgets_layout == "modern":
+        relative_paths.append(Path("widget/js/lake.trace.hash"))
     result: list[Path] = []
     for relative in relative_paths:
         path = package_dir / relative
@@ -2394,14 +2925,12 @@ def execute(args: argparse.Namespace) -> int:
         )
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
-        # Every phase Landrun confines from here on is network-disabled. The
-        # only outbound step that follows is trusted `curl` fetching Mathlib
-        # cache archives, outside Landrun and without loading submitted Lake
-        # configuration. The trusted Verso clone and the pinned package
-        # fetches above were also outbound and also outside Landrun; neither
-        # executes submitted Lean or Lake code, and no submitted code has run
-        # at this point. Egress denial therefore holds for exactly the
-        # confined phases this probe stands for.
+        # Candidate phases represented by this probe are network-disabled.
+        # The only confined exception below is a legacy ProofWidgets checkout
+        # bound to the already accepted Mathlib manifest in a disposable
+        # one-package workspace;
+        # it has a separate, narrower filesystem policy. Trusted `curl` also
+        # fetches fixed-host Mathlib cache archives outside candidate execution.
         verify_sandbox_confinement(
             work / "render-landrun-write-denial-probe",
             work / "render-landrun-read-denial-probe",
@@ -2413,6 +2942,16 @@ def execute(args: argparse.Namespace) -> int:
             landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
+            executable_paths=allowed_exec,
+            tools=tools,
+        )
+        proofwidgets_layout = stage_legacy_proofwidgets_release(
+            workspace,
+            checkout=workspace_checkout,
+            environment=env,
+            lake=lake,
+            landrun=landrun,
+            git=git,
             executable_paths=allowed_exec,
             tools=tools,
         )
@@ -2430,18 +2969,20 @@ def execute(args: argparse.Namespace) -> int:
         tools[audit_executable] = sha256(audit_executable)
         report["mathlib_cache"] = hydrate_mathlib_cache(
             workspace,
+            checkout=workspace_checkout,
             trusted_work=work,
             environment=env,
             lake=lake,
             landrun=landrun,
             curl=curl,
             env_tool=env_tool,
+            git=git,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
         )
-        writable_files = prepare_build_metadata_files(workspace)
+        writable_files = prepare_build_metadata_files(workspace, proofwidgets_layout)
 
         report["stage"] = "literate"
         write_json(output, report)

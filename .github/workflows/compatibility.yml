@@ -128,6 +128,7 @@ jobs:
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.28.0
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.31.0-rc2
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.2
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.33.1
@@ -189,6 +190,15 @@ jobs:
             --source pipeline/tests/fixtures/cold-tauceti \
             --landrun "$(go env GOPATH)/bin/landrun" \
             --work-dir "$RUNNER_TEMP/palomar-render-module" \
+            --renderer-commit "${{ github.sha }}" \
+            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Exercise the legacy ProofWidgets renderer
+        run: |
+          python pipeline/scripts/smoke_render_module_identity.py \
+            --source pipeline/tests/fixtures/legacy-proofwidgets-render \
+            --landrun "$(go env GOPATH)/bin/landrun" \
+            --work-dir "$RUNNER_TEMP/palomar-render-legacy-proofwidgets" \
             --renderer-commit "${{ github.sha }}" \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

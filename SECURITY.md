@@ -244,17 +244,36 @@ The post-acceptance renderer runs the same probe contract as the verifier,
 under its own narrower policy, and fails closed on the same conditions. That
 matters more there than anywhere else, because compile-time Lean in the
 submitted Challenge, its macros and elaborators, execute during the render
-build. The renderer has no network-enabled confined phase to except. Every
-outbound step it takes is a trusted one outside Landrun: before the probe it
-clones the pinned Verso revision and fetches each revision the submitted Lake
-manifest pins, using Git directly rather than `lake update` so that no package
-post-update hook runs; after the probe, trusted `curl` fetches Mathlib cache
-archives. None of them load submitted Lake configuration, and every phase
-Landrun confines, on both sides of that download, is network-disabled, so
-outbound-network denial is proved for each of them. The renderer has no frozen
-trusted build directories, so the verifier's frozen-write probe has nothing to
-assert there and is not run. Both callers use a probe contract that removes
-its owned probe files even when the sandbox runner fails.
+build. Before the probe it clones the pinned Verso revision and fetches each
+revision the submitted Lake manifest pins, using Git directly rather than
+`lake update` so that no package post-update hook runs. After the probe there
+is one narrowly scoped network-enabled confined exception for historical
+ProofWidgets releases. The renderer first binds both the Mathlib and
+ProofWidgets checkouts to their manifest revisions, origins, and clean Git
+state, requires Mathlib's own pinned manifest to authenticate the exact
+ProofWidgets revision, and recognizes only the canonical legacy release
+configuration with no tracked `widget/js` tree. It then hard-links that one
+read-only source into a disposable sibling workspace and runs only
+`proofwidgets:release`; the disposable package's fresh `.lake` root is its sole
+writable directory. Certificate and name-service files are readable, but the
+merged render workspace and submitted configuration are not exposed. Afterward
+the renderer rechecks every source inode, accepts exactly the expected release
+archive/trace pair and a confined generated build tree, and atomically promotes
+those outputs without promoting Lake configuration. Modern ProofWidgets skips
+this phase. The legacy Mathlib cache client also predates the toolchain-bundled
+`leantar`: the renderer reads its version and canonical release URL policy from
+the same authenticated Mathlib checkout, downloads the corresponding fixed
+x86-64 Linux archive with trusted credential-free `curl`, requires its fixed
+SHA-256 pin, accepts only its one bounded regular executable, and checks the
+reported version in a network-disabled sandbox. Its digest is rechecked after
+cache discovery and the same file is preserved into cache unpacking. Trusted
+`curl` separately fetches fixed-host Mathlib cache archives outside candidate
+execution. All cache
+discovery, unpack, render, audit, and sanitization phases remain
+network-disabled. The renderer has no frozen trusted build directories, so the
+verifier's frozen-write probe has nothing to assert there and is not run. Both
+callers use a probe contract that removes its owned probe files even when the
+sandbox runner fails.
 
 Render metadata schema 3 adds one `audit_declarations` row for every compared
 declaration. The audit executable is built from trusted source in a separate

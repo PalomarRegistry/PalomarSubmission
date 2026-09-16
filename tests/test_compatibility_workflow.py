@@ -464,6 +464,52 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         )
         self.assertIn("--source fixture", exercise_step["run"])
 
+    def test_legacy_proofwidgets_fixture_runs_the_real_v428_renderer(self):
+        fixture = REPOSITORY_ROOT / "tests/fixtures/legacy-proofwidgets-render"
+        toolchain = (fixture / "lean-toolchain").read_text().strip()
+        self.assertEqual(toolchain, "leanprover/lean4:v4.28.0")
+        manifest = json.loads((fixture / "lake-manifest.json").read_text())
+        revisions = {
+            package["name"]: package["rev"] for package in manifest["packages"]
+        }
+        self.assertEqual(
+            revisions["mathlib"], "8f9d9cff6bd728b17a24e163c9402775d9e6a365"
+        )
+        self.assertEqual(
+            revisions["proofwidgets"], "be3b2e63b1bbf496c478cef98b86972a37c1417d"
+        )
+        self.assertFalse(
+            next(
+                package
+                for package in manifest["packages"]
+                if package["name"] == "mathlib"
+            )["inherited"]
+        )
+        self.assertTrue(
+            next(
+                package
+                for package in manifest["packages"]
+                if package["name"] == "proofwidgets"
+            )["inherited"]
+        )
+
+        cold_steps = self.workflow["jobs"]["cold_build"]["steps"]
+        install_step = next(
+            step for step in cold_steps if step.get("name") == "Install pinned Landrun and Lean"
+        )
+        renderer_step = next(
+            step
+            for step in cold_steps
+            if step.get("name") == "Exercise the legacy ProofWidgets renderer"
+        )
+        self.assertIn(f"toolchain install {toolchain}", install_step["run"])
+        self.assertIn("scripts/smoke_render_module_identity.py", renderer_step["run"])
+        self.assertIn(
+            "--source pipeline/tests/fixtures/legacy-proofwidgets-render",
+            renderer_step["run"],
+        )
+        self.assertIn('--renderer-commit "${{ github.sha }}"', renderer_step["run"])
+
     def test_required_gate_passes_only_the_two_valid_outcomes(self):
         prose = self.run_gate("success", "false", "skipped")
         built = self.run_gate("success", "true", "success")
