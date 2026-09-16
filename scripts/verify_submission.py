@@ -39,6 +39,12 @@ from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
     VerificationError,
 )
+from scripts.verification_profile import (  # noqa: E402
+    PROFILE_PATH,
+    VerificationProfileError,
+    check_host,
+    load_profile,
+)
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 MAX_LICENSE_BYTES = 1024 * 1024
@@ -53,7 +59,10 @@ COMPARATOR_REQUIRED_KEYS = {
     "theorem_names",
     "permitted_axioms",
 }
-COMPARATOR_ALLOWED_KEYS = COMPARATOR_REQUIRED_KEYS | {"definition_names", "enable_nanoda"}
+COMPARATOR_ALLOWED_KEYS = COMPARATOR_REQUIRED_KEYS | {
+    "definition_names",
+    "enable_nanoda",
+}
 COMPILED_ARTIFACT_SUFFIXES = {
     ".a",
     ".bc",
@@ -329,7 +338,12 @@ class ResourceExhausted(VerificationError):
             message,
             code="provider.resource_exhausted",
             owner="provider",
-            next_action="Do not change the repository. Retry the same commit later.",
+            next_action=(
+                "Inspect the reported resource limit and build usage. If the workload repeatedly "
+                "exceeds the worker's capacity, reduce its resource use or arrange sufficient "
+                "capacity before retrying. Retry an unchanged commit only after addressing "
+                "the reported condition. Normal submission cooldowns still apply."
+            ),
             retryable=True,
         )
 
@@ -406,12 +420,14 @@ def report_diagnostic(
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
+VERIFICATION_PROFILE = load_profile()
+VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
 PERMISSIVE_RESOURCE_PROPERTIES = (
-    "MemoryHigh=95%",
-    "MemoryMax=98%",
-    "TasksMax=32768",
-    "LimitNOFILE=1048576",
-    f"LimitFSIZE={1024**4}",
+    f"MemoryHigh={VERIFICATION_LIMITS['memory_high_percent']}%",
+    f"MemoryMax={VERIFICATION_LIMITS['memory_max_percent']}%",
+    f"TasksMax={VERIFICATION_LIMITS['tasks_max']}",
+    f"LimitNOFILE={VERIFICATION_LIMITS['open_files_max']}",
+    f"LimitFSIZE={VERIFICATION_LIMITS['file_size_max_bytes']}",
 )
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
@@ -529,9 +545,11 @@ def run(
         proc.kill()
         proc.wait()
         for reader in readers:
-            reader.join()
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+            # Descendants (including a service owned by systemd) may still
+            # hold these pipes. Return control so the caller can stop them.
+            reader.join(timeout=1)
+        stdout = bytes(stdout_bytes).decode("utf-8", errors="replace")
+        stderr = bytes(stderr_bytes).decode("utf-8", errors="replace")
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
     for reader in readers:
         reader.join()
@@ -628,6 +646,17 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verification_profile_evidence() -> dict[str, Any]:
+    """Record the published policy; the capacity check adds observed host limits."""
+    return {
+        "id": VERIFICATION_PROFILE["id"],
+        "sha256": sha256(PROFILE_PATH),
+        "runner": dict(VERIFICATION_PROFILE["runner"]),
+        "limits": dict(VERIFICATION_LIMITS),
+        "trusted_tools": dict(VERIFICATION_PROFILE["trusted_tools"]),
+    }
 
 
 def correction_source_evidence(
@@ -1091,6 +1120,7 @@ def prepare(args: argparse.Namespace) -> int:
         "status": "error",
         "stage": "intake",
         "phase": "preparation",
+        "verification_profile": verification_profile_evidence(),
         "checked_at": now(),
         "errors": [],
         "warnings": [],
@@ -2425,6 +2455,7 @@ def systemd_command(
     timeout: int = 600,
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
+    unit_name: str | None = None,
 ) -> list[str]:
     global _SYSTEMD_MANAGER
 
@@ -2433,7 +2464,6 @@ def systemd_command(
         raise VerificationError("systemd-run is required for fail-closed confinement")
     common = [
         "--quiet",
-        "--collect",
         "--pipe",
         "--wait",
         "--property=RestrictAddressFamilies=~AF_UNIX",
@@ -2448,6 +2478,12 @@ def systemd_command(
         f"--property=RuntimeMaxSec={max(1, timeout)}s",
         f"--working-directory={cwd}",
     ]
+    if unit_name is None:
+        common.append("--collect")
+    else:
+        if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
+            raise VerificationError("invalid verifier-owned systemd unit name")
+        common.append(f"--unit={unit_name}")
     if not unrestricted_network:
         common.append("--property=PrivateNetwork=yes")
     for property_value in resource_properties:
@@ -2477,7 +2513,9 @@ def systemd_command(
         # Probe the properties that hosted user managers commonly reject, not
         # merely access to sudo or the bus. The successful choice is stable for
         # this verifier process and avoids repeating transient probe units.
-        probe_common = list(common)
+        probe_common = [p for p in common if not p.startswith("--unit=")]
+        if "--collect" not in probe_common:
+            probe_common.append("--collect")
         if "--property=PrivateNetwork=yes" not in probe_common:
             probe_common.append("--property=PrivateNetwork=yes")
         candidates = ["system", "user"] if sudo is not None else ["user"]
@@ -2506,6 +2544,117 @@ def systemd_command(
                 raise VerificationError(f"invalid control character in sandbox environment {name}")
             result.append(f"--setenv={name}={value}")
     return [*result, "--", *command]
+
+
+def systemd_unit_outcome(
+    unit_name: str,
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    """Read cgroup termination evidence before systemd is allowed to collect it."""
+    def unavailable(message: str) -> VerificationError:
+        return VerificationError(
+            message,
+            code="provider.resource_telemetry_missing",
+            owner="provider",
+            next_action=(
+                "Palomar could not determine how the worker stopped. Report the workflow URL "
+                "if this persists; retry only after the reported condition is addressed. "
+                "Normal submission cooldowns still apply."
+            ),
+            retryable=True,
+        )
+
+    if _SYSTEMD_MANAGER not in {"system", "user"}:
+        raise unavailable("systemd confinement manager is unavailable")
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        raise unavailable("systemctl is required to inspect confined phases")
+    manager = [systemctl] if _SYSTEMD_MANAGER == "system" else [systemctl, "--user"]
+    unit = f"{unit_name}.service"
+    properties = [
+        "Result",
+        "ActiveState",
+        "ExecMainCode",
+        "ExecMainStatus",
+        "ControlGroup",
+        "MemoryPeak",
+        "CPUUsageNSec",
+    ]
+    try:
+        proc = subprocess.run(
+            [*manager, "show", unit, *[f"--property={name}" for name in properties]],
+            cwd=cwd, env=environment, timeout=10, check=False, capture_output=True, text=True,
+        )
+        if proc.returncode:
+            raise unavailable("could not inspect the completed confined phase")
+        outcome = {}
+        for line in proc.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in properties:
+                outcome[key] = value
+        if not outcome.get("Result") or "ControlGroup" not in outcome:
+            raise unavailable("completed confined phase has incomplete systemd evidence")
+        events = {"oom": 0, "oom_kill": 0}
+        control_group = outcome.get("ControlGroup", "")
+        if control_group.startswith("/") and ".." not in Path(control_group).parts:
+            event_path = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "memory.events"
+            try:
+                for line in event_path.read_text(encoding="utf-8").splitlines():
+                    name, _, raw = line.partition(" ")
+                    if name in events and raw.isdigit():
+                        events[name] = int(raw)
+            except OSError:
+                # Result remains authoritative when this kernel does not expose
+                # cgroup-v2 memory events to the runner.
+                pass
+        return {**outcome, "memory_events": events}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise unavailable(f"could not inspect the completed confined phase: {error}") from error
+    finally:
+        cleanup_manager = manager
+        if _SYSTEMD_MANAGER == "system":
+            sudo = shutil.which("sudo")
+            cleanup_manager = [sudo, "-n", *manager] if sudo else manager
+        # A timed-out worker may ignore SIGTERM. Kill the remaining cgroup
+        # before stop so cleanup does not depend on the manager's stop timeout.
+        for action in (["kill", "--signal=KILL", "--kill-whom=all"],
+                       ["stop"], ["reset-failed"]):
+            try:
+                subprocess.run(
+                    [*cleanup_manager, *action, unit], cwd=cwd, env=environment,
+                    timeout=10, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass  # Cleanup must not replace the phase's diagnostic.
+
+
+def append_resource_outcome(
+    path: Path, phase: str, outcome: dict[str, Any], *, supervisor_timeout: bool = False,
+) -> None:
+    def numeric(name: str) -> int:
+        value = str(outcome.get(name) or "")
+        return int(value) if value.isdigit() else 0
+
+    record = {
+        "phase": f"{phase}:cgroup",
+        # A still-running unit starts with Result=success. That snapshot is
+        # not a successful termination when the parent has reached its deadline.
+        "systemd_result": None if supervisor_timeout else outcome.get("Result"),
+        "supervisor_timeout": supervisor_timeout,
+        "systemd_active_state": outcome.get("ActiveState"),
+        "exec_main_code": outcome.get("ExecMainCode"),
+        "exec_main_status": outcome.get("ExecMainStatus"),
+        "memory_peak_bytes": numeric("MemoryPeak"),
+        "cpu_usage_nanoseconds": numeric("CPUUsageNSec"),
+        "memory_events": outcome.get("memory_events", {"oom": 0, "oom_kill": 0}),
+    }
+    if supervisor_timeout:
+        record["systemd_result_before_cleanup"] = outcome.get("Result")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def sandboxed_run(
@@ -2537,14 +2686,16 @@ def sandboxed_run(
         readable_directories=[cwd],
         unrestricted_network=unrestricted_network,
     )
-    systemd_payload = confined
+    phase = Path(command[0]).name[:80] or "phase"
+    unit_name = f"palomar-{secrets.token_hex(12)}"
     if _RESOURCE_METRICS_PATH is not None:
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         python = Path(sys.executable).resolve()
         if not metrics_wrapper.is_file():
             raise VerificationError("trusted resource measurement wrapper is missing")
-        phase = Path(command[0]).name[:80] or "phase"
-        systemd_payload = [
+        # Successful rusage must measure the worker, not the systemd-run client.
+        # If this observer dies, the parent still inspects the unit result.
+        confined = [
             str(python),
             str(metrics_wrapper),
             "--output",
@@ -2556,35 +2707,61 @@ def sandboxed_run(
             "--",
             *confined,
         ]
-    proc = run(
-        systemd_command(
-            systemd_payload,
-            cwd=cwd,
-            environment=environment,
-            timeout=timeout,
-            unrestricted_network=unrestricted_network,
-            resource_properties=tuple(
-                dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
-            ),
-        ),
+    confined_command = systemd_command(
+        confined,
         cwd=cwd,
-        env=environment,
+        environment=environment,
         timeout=timeout,
-        check=False,
+        unrestricted_network=unrestricted_network,
+        resource_properties=tuple(
+            dict.fromkeys((*PERMISSIVE_RESOURCE_PROPERTIES, *resource_properties))
+        ),
+        unit_name=unit_name,
     )
+    try:
+        proc = run(
+            confined_command, cwd=cwd, env=environment, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Killing the launcher alone need not stop its service. Inspection also
+        # stops/resets the unit using a bounded budget outside the work deadline.
+        try:
+            outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
+            if _RESOURCE_METRICS_PATH is not None:
+                append_resource_outcome(
+                    _RESOURCE_METRICS_PATH, phase, outcome, supervisor_timeout=True,
+                )
+        except VerificationError:
+            pass  # The parent's observed wall-clock expiry is already sufficient.
+        raise
+    outcome: dict[str, Any] = {}
+    # Failed transient services remain inspectable until reset. Successful
+    # services may be collected immediately, and need no termination diagnosis.
+    if proc.returncode:
+        outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
+        if _RESOURCE_METRICS_PATH is not None:
+            append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
     verify_tool_snapshot(tools)
     # Payload output is attacker-controlled and must never manufacture an
     # infrastructure outcome merely by printing an OOM or timeout phrase.
-    # Signal-style wrapper exits are the bounded evidence available here;
-    # Python-enforced wall-clock expiry is reported by TimeoutExpired.
-    resource_signals = {124, 137, 143, 152, 153}
-    if proc.returncode in resource_signals:
+    # Numeric exit statuses are payload-controlled too. Only trusted unit
+    # telemetry (or the parent's TimeoutExpired) establishes resource exhaustion.
+    memory_events = outcome.get("memory_events", {})
+    resource_results = {"oom-kill", "resources", "timeout", "watchdog"}
+    if (
+        outcome.get("Result") in resource_results
+        or int(memory_events.get("oom_kill", 0)) > 0
+    ):
         raise ResourceExhausted(
             f"worker resource ceiling reached while running {Path(command[0]).name} "
-            f"(exit {proc.returncode})"
+            f"(exit {proc.returncode}, result {outcome.get('Result')})"
         )
     if check and proc.returncode:
-        detail = (proc.stderr or proc.stdout).strip()[-8000:]
+        detail = "\n".join(
+            f"{name}:\n{value.strip()[-3500:]}"
+            for name, value in (("stdout", proc.stdout), ("stderr", proc.stderr))
+            if value.strip()
+        )
         raise VerificationError(
             f"{' '.join(command[:3])} failed ({proc.returncode}): {detail}"
         )
@@ -4972,9 +5149,40 @@ def execute(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_capacity(args: argparse.Namespace) -> int:
+    """Record host evidence or a terminal provider error in the prepared report."""
+    output = Path(args.output)
+    report = json.loads(output.read_text(encoding="utf-8"))
+    if report.get("status") != "pending":
+        return 1
+    try:
+        observed = check_host(VERIFICATION_PROFILE, Path(args.disk_path))
+    except (VerificationProfileError, OSError) as error:
+        diagnostic = VerificationError(
+            str(error), code="provider.host_below_profile", owner="provider", retryable=True,
+            next_action=(
+                "Run the preflight on a host meeting the published profile, or wait for "
+                "Palomar to restore worker capacity before retrying. "
+                "Normal submission cooldowns still apply."
+            ),
+        )
+        report.update(status="error", stage="resource-exhausted", checked_at=now())
+        report.setdefault("errors", []).append(str(diagnostic))
+        report_diagnostic(report, diagnostic, stage="resource-exhausted")
+        write_json(output, report)
+        return 1
+    report["verification_profile"]["observed_host"] = observed
+    write_json(output, report)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
+    capacity_parser = commands.add_parser("check-capacity")
+    capacity_parser.add_argument("--disk-path", required=True)
+    capacity_parser.add_argument("--output", required=True)
+    capacity_parser.set_defaults(func=check_capacity)
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--event", required=True)
     prepare_parser.add_argument("--work-dir", required=True)

@@ -31,7 +31,45 @@ repository. The run carries the submission identifier in its name, and the
 report leaves as an artifact rather than as a comment, so nothing here needs a
 credential that can write anywhere.
 
-The workflow has `preflight` and `full` modes. Both check out `main` and invoke
+The complete job is also a reusable workflow. A public repository may call it
+at an exact PalomarSubmission commit as a predictive mechanical preflight. It
+runs the same verifier under the checked-in `palomar-standard-v1` profile, but
+has no Palomar state or credentials and is not itself a registry submission.
+Every mechanical report records the profile id and digest.
+
+The profile is workflow/report metadata, not a field in `comparator.json`.
+It records the existing 95%/98% memory pressure/ceiling policy and the
+19,800-second production budget, without adding a CPU quota or changing swap
+policy. The capacity check records host memory, effective memory thresholds,
+and free workspace. A preflight can help detect an expensive failure before
+submission; it does not run Challenge rendering, editorial review, or registration.
+A later run can still differ because of host performance, cache availability,
+or a transient service failure. Normal submission cooldowns apply to all outcomes.
+
+Pin the reusable workflow to a full commit, just as Palomar pins submitted
+source:
+
+```yaml
+jobs:
+  palomar-preflight:
+    uses: PalomarRegistry/PalomarSubmission/.github/workflows/submission.yml@<full-commit>
+    with:
+      repository: ${{ github.repository }}
+      commit: ${{ github.sha }}
+      pipeline_commit: <same-full-commit-as-the-uses-reference>
+      request_id: preflight001
+      mode: full
+      options: '{"comparator_config_path":"comparator.json","authorization_relationship":"I am a responsible author or maintainer"}'
+```
+
+Keep `pipeline_commit` equal to the workflow's `uses` SHA. This explicit input
+is for reusable callers only; server dispatches check out their workflow revision.
+The caller asserts this pairing: the workflow validates the SHA format but
+cannot check that it matches `uses`. Third-party preflight reports are advisory.
+The `inputs` context is materialized as the verifier's request for either trigger,
+so a caller's push or pull-request event cannot replace the supplied inputs.
+
+The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says
 the submission is ready. Their run names and artifact names are distinct so a

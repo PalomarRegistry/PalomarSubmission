@@ -36,12 +36,16 @@ environment.
 ## Defensive boundary
 
 The shape of the pipeline is short enough to check against the file.
-[`.github/workflows/submission.yml`](.github/workflows/submission.yml) has a
-single trigger, `workflow_dispatch`, so a run happens because something
-dispatched it, ordinarily the submission server; no push, comment, or pull
-request starts one. There is one job, `verify`, and its `permissions` block is
-`contents: read`. Its inputs are a repository, a commit, an opaque submission
-id, a closed `preflight`/`full` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
+[`.github/workflows/submission.yml`](.github/workflows/submission.yml) has two
+explicit triggers, `workflow_dispatch` and `workflow_call`. The server dispatches
+authoritative registry runs. This file has no direct push, comment, or pull-request
+trigger; reusable callers can invoke a mechanical preflight from their own CI.
+A public repository may call the same job as a predictive mechanical preflight,
+but that caller has no Palomar state or credential and cannot register its
+result. There is one job, `verify`, and its `permissions` block is
+`contents: read`. Its inputs are a repository, a commit, a pinned pipeline
+commit for reusable calls, an opaque submission id, a closed
+`preflight`/`full`/`correction` mode, and a JSON object whose keys are checked against the fixed `OPTIONAL_FIELDS`
 allowlist in [`scripts/submission_contract.py`](scripts/submission_contract.py):
 three optional paths, an existing Palomar id, and the declared authorization
 relationship with its optional evidence. That evidence is submitter-written
@@ -354,21 +358,37 @@ required. The
 verifier enforces the wall-clock allowance its caller passes, which
 [`.github/workflows/submission.yml`](.github/workflows/submission.yml) sets to
 19,800 seconds, five and a half hours, and applies no CPU
-quota. Each phase may use 98% of worker memory, 32,768 tasks, 1,048,576 file
-descriptors, and files up to 1 TiB. These are emergency host-containment
-ceilings, not acceptance criteria; deployments may raise them on larger
-workers.
+quota. [`verification-profile.json`](verification-profile.json) records the
+`palomar-standard-v1` runner and containment policy. Each phase retains the
+existing 95% memory pressure threshold and 98% ceiling, 32,768 tasks,
+1,048,576 file descriptors, and 1 TiB file limit. Swap policy is unchanged;
+there is no claimed Lake job-count limit. The workflow checks architecture,
+minimum host memory, and free workspace before tool installation. The report
+records that host snapshot and the effective percentage-based memory thresholds;
+it is not a reservation or a promise about later free capacity.
 
-The automatic GitHub-hosted tier currently supplies 330 minutes of verifier
-capacity inside its 350-minute job. Reaching that capacity, an OOM ceiling, a
-task/file ceiling, or disk exhaustion produces the explicit retryable outcome
-`infrastructure/resource-exhausted` and never a mathematical rejection or
-changes-requested result. The report includes bounded per-phase elapsed time,
-CPU time, maximum resident memory, observed task peak, and approximate peak
-workspace disk consumption. A ten-hour submission can be retried by running the
-same trusted workflow on a worker with the required lifetime; lack of such a
-worker leaves verification inconclusive rather than changing what Palomar
-accepts.
+The automatic GitHub-hosted tier supplies 330 minutes of verifier capacity
+inside its 350-minute job. Trusted systemd termination results identify OOM,
+timeout, and resource failures; the parent's wall-clock timeout is also trusted.
+An arbitrary payload exit status or printed OOM message is not such evidence.
+Missing termination telemetry is an inconclusive provider error. Resource
+exhaustion retains the existing `infrastructure/resource-exhausted` outcome,
+not a mathematical rejection. Inspect the reported limit and workload before
+retrying: repeated exhaustion may require reducing resource use or arranging
+more capacity. A transient failure may permit an unchanged retry after its
+cause clears. Normal submission cooldowns apply; resource failures grant no refund.
+
+Successful per-phase CPU, maximum RSS, observed task peak, elapsed time, and
+approximate workspace usage are measured inside the systemd unit, outside
+Landrun. If that observer dies with the workload, the parent reads the unit's
+trusted termination result and available cgroup evidence, then stops/resets it
+with a bounded cleanup budget. Absent post-mortem cgroup files are not proof
+that no OOM occurred. When the parent reaches its deadline, the record marks
+`supervisor_timeout` and keeps the observed unit result in
+`systemd_result_before_cleanup`. It leaves `systemd_result` unset because a
+still-running unit's initial `Result=success` is not a termination verdict.
+The report binds the profile id and digest; the profile
+is not a submitter-selectable Comparator configuration field.
 
 The registry database is inside that boundary too, and two of its controls are
 weaker than the phrase "CI checks it" suggests. `PalomarDatabase` validates

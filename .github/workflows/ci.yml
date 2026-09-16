@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  reusable_preflight:
+    # Fork-only commits cannot be checked out from the upstream pipeline repo.
+    if: github.repository == 'PalomarRegistry/PalomarSubmission'
+    # A real call with a pull_request/push payload: the called job must read
+    # its inputs context rather than expecting dispatch inputs in that payload.
+    uses: ./.github/workflows/submission.yml
+    with:
+      repository: ${{ github.repository }}
+      commit: ${{ github.sha }}
+      pipeline_commit: ${{ github.sha }}
+      request_id: preflight001
+      mode: full
+      options: '{"project_path":"tests/fixtures/reusable-preflight","comparator_config_path":"tests/fixtures/reusable-preflight/comparator.json","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -87,7 +100,7 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.0
           PALOMAR_TEST_LANDRUN="$(go env GOPATH)/bin/landrun" \
           PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.32.0 "$HOME/.elan/bin/elan" which lean)" \
-            python -m unittest tests.test_sandbox_integration -v
+            python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
       - name: Validate configuration JSON
         run: |
           python -m json.tool toolchains.json >/dev/null
