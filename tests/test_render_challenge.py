@@ -361,8 +361,10 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
             workspace = checkout / "project"
             mathlib = workspace / ".lake/packages/mathlib"
             cache = workspace / ".lake/config/mathlib-cache"
+            trusted_work = root / "trusted"
             (mathlib / "Cache").mkdir(parents=True)
             cache.mkdir(parents=True)
+            trusted_work.mkdir()
             self.write_manifest(
                 workspace,
                 [
@@ -384,22 +386,31 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                 encoding="utf-8",
             )
 
+            fixture = root / "leantar-fixture.tar.gz"
+            target = "leantar-v0.1.16-x86_64-unknown-linux-musl"
+            content = b"trusted leantar fixture"
+            with tarfile.open(fixture, mode="w:gz") as bundle:
+                directory_info = tarfile.TarInfo(target)
+                directory_info.type = tarfile.DIRTYPE
+                bundle.addfile(directory_info)
+                binary_info = tarfile.TarInfo(f"{target}/leantar")
+                binary_info.size = len(content)
+                binary_info.mode = 0o755
+                bundle.addfile(binary_info, io.BytesIO(content))
+            fixture_digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+
             def download(command, **_kwargs):
                 archive = Path(command[command.index("--output") + 1])
-                target = "leantar-v0.1.16-x86_64-unknown-linux-musl"
-                with tarfile.open(archive, mode="w:gz") as bundle:
-                    directory_info = tarfile.TarInfo(target)
-                    directory_info.type = tarfile.DIRTYPE
-                    bundle.addfile(directory_info)
-                    content = b"trusted leantar fixture"
-                    binary_info = tarfile.TarInfo(f"{target}/leantar")
-                    binary_info.size = len(content)
-                    binary_info.mode = 0o755
-                    bundle.addfile(binary_info, io.BytesIO(content))
+                shutil.copyfile(fixture, archive)
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             with (
                 mock.patch("scripts.render_challenge.validate_materialized_git_package"),
+                mock.patch.dict(
+                    "scripts.render_challenge.LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256",
+                    {"0.1.16": fixture_digest},
+                    clear=True,
+                ),
                 mock.patch("scripts.render_challenge.systemd_command", side_effect=lambda c, **k: c),
                 mock.patch("scripts.render_challenge.run", side_effect=download),
                 mock.patch(
@@ -411,7 +422,7 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                     workspace,
                     cache,
                     checkout=checkout,
-                    trusted_work=root,
+                    trusted_work=trusted_work,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
@@ -429,6 +440,8 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                 sandbox.call_args.args[0],
                 [str(prepared.path), "--version"],
             )
+            self.assertEqual(sandbox.call_args.kwargs["cwd"], cache)
+            self.assertEqual(sandbox.call_args.kwargs["readable_paths"], [])
             self.assertFalse(sandbox.call_args.kwargs.get("unrestricted_network", False))
 
     def test_mathlib_cache_download_preserves_the_validated_legacy_tool(self):

@@ -160,13 +160,15 @@ uses the following staged path in
    supply both its semantic version and the canonical `digama0/leangz` release
    URL policy there; an incomplete or different legacy policy fails closed.
    Trusted credential-free `curl` downloads the corresponding x86-64 Linux
-   archive under a 16 MiB file limit. Palomar accepts exactly one bounded
-   regular `leantar` member beneath the expected archive directory, writes it
-   into the fresh cache directory, and checks its exact reported version in a
-   network-disabled Landrun/systemd process. The binary's digest is checked
-   again after discovery and the same file is moved across the cache-directory
-   reset for unpacking. Modern Mathlib obtains `leantar` from the selected Lean
-   toolchain and skips this bootstrap.
+   archive under a 16 MiB file limit. Only the legacy versions required by the
+   supported renderer floor are allowlisted, and each archive must match its
+   fixed SHA-256 pin. Palomar accepts exactly one bounded regular `leantar`
+   member beneath the expected archive directory, writes it into the fresh
+   cache directory, and checks its exact reported version in a network-disabled
+   Landrun/systemd process. The binary's digest is checked again after discovery
+   and the same file is moved across the cache-directory reset for unpacking.
+   Modern Mathlib obtains `leantar` from the selected Lean toolchain and skips
+   this bootstrap.
 3. Under Landrun/systemd with network disabled, the cache client selected by
    the accepted dependency checkout is forced to a local empty `file://`
    backend. Palomar treats its output only as a request-key declaration: it
@@ -191,10 +193,11 @@ uses the following staged path in
 
 This split prevents submitted Lake configuration, submitted Lean code, and the
 Mathlib cache client from holding network access. The one Lake process with
-network access is restricted to the independently authenticated, disposable
-legacy ProofWidgets source and release target. None of these controls makes the
-downloaded ProofWidgets release, `leantar` release, or fixed Azure bytes
-cryptographically equivalent to its pinned source.
+network access is restricted to the disposable legacy ProofWidgets source and
+release target whose exact revision is bound to the already accepted Mathlib
+manifest. The `leantar` release archive is pinned by digest, but none of these
+controls makes the downloaded ProofWidgets release, extracted `leantar` binary,
+or fixed Azure bytes semantically equivalent to its pinned source.
 
 The mechanical-verification artifact records the source/dependency revisions
 and workflow URL. The render artifact additionally records cache archive counts

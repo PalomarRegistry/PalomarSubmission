@@ -75,6 +75,10 @@ from scripts.verify_submission import (  # noqa: E402
 VERSO_REPOSITORY = "leanprover/verso"
 PROOFWIDGETS_REPOSITORY = "leanprover-community/proofwidgets4"
 PROOFWIDGETS_RELEASE_ARCHIVE = "ProofWidgets4.tar.gz"
+LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256 = {
+    "0.1.16": "2cbc40ca214227a0e536721c021bad719a802dd86b1f2d8989571efafbfbd3d1",
+    "0.1.17": "46564c5a15b0a5919dee06b246ac1297399968c828269f675212104d7d1ac445",
+}
 MISSING_DECLARATION_CODE = "challenge.declaration_not_rendered"
 MISSING_DECLARATION_EXIT = 3
 MAX_REPORTED_DECLARATIONS = 50
@@ -121,7 +125,6 @@ CACHE_TOOL_DOWNLOAD_PROPERTIES = (
     "TasksMax=64",
     "LimitNOFILE=1024",
     f"LimitFSIZE={MAX_CACHE_TOOL_ARCHIVE_BYTES}",
-    "RuntimeMaxSec=300",
 )
 
 # Mathlib's canonical cache moved new master-built artifacts to the
@@ -2301,6 +2304,9 @@ def prepare_legacy_mathlib_cache_tool(
     version = legacy_mathlib_leantar_version(mathlib_dir)
     if version is None:
         return None
+    expected_archive_digest = LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256.get(version)
+    if expected_archive_digest is None:
+        raise VerificationError("legacy Mathlib cache tool version is not allowlisted")
 
     target = f"leantar-v{version}-x86_64-unknown-linux-musl"
     archive = trusted_work / f"{target}.tar.gz"
@@ -2340,6 +2346,7 @@ def prepare_legacy_mathlib_cache_tool(
                 command,
                 cwd=trusted_work,
                 environment=environment,
+                timeout=300,
                 unrestricted_network=True,
                 resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
             ),
@@ -2354,37 +2361,43 @@ def prepare_legacy_mathlib_cache_tool(
             or archive.stat().st_size > MAX_CACHE_TOOL_ARCHIVE_BYTES
         ):
             raise VerificationError("legacy Mathlib cache tool archive is invalid")
-        with tarfile.open(archive, mode="r:gz") as bundle:
-            members = bundle.getmembers()
+        if sha256(archive) != expected_archive_digest:
+            raise VerificationError("legacy Mathlib cache tool archive digest does not match its pin")
+        with tarfile.open(archive, mode="r|gz") as bundle:
+            directory_member = bundle.next()
+            binary_member = bundle.next()
             expected_directory = f"{target}/"
             expected_binary = f"{target}/leantar"
             if (
-                len(members) != 2
-                or members[0].name.rstrip("/") + "/" != expected_directory
-                or not members[0].isdir()
-                or members[1].name != expected_binary
-                or not members[1].isfile()
-                or members[1].size <= 0
-                or members[1].size > MAX_CACHE_TOOL_BYTES
+                directory_member is None
+                or binary_member is None
+                or directory_member.name.rstrip("/") + "/" != expected_directory
+                or not directory_member.isdir()
+                or binary_member.name != expected_binary
+                or not binary_member.isfile()
+                or binary_member.size <= 0
+                or binary_member.size > MAX_CACHE_TOOL_BYTES
             ):
                 raise VerificationError("legacy Mathlib cache tool archive has unexpected contents")
-            extracted = bundle.extractfile(members[1])
+            extracted = bundle.extractfile(binary_member)
             if extracted is None:
                 raise VerificationError("legacy Mathlib cache tool archive has no executable")
             content = extracted.read(MAX_CACHE_TOOL_BYTES + 1)
-            if len(content) != members[1].size:
+            if len(content) != binary_member.size:
                 raise VerificationError("legacy Mathlib cache tool archive has an invalid executable")
+            if bundle.next() is not None:
+                raise VerificationError("legacy Mathlib cache tool archive has unexpected contents")
         replace_workspace_file(binary, content)
         binary.chmod(stat.S_IRUSR | stat.S_IXUSR)
         digest = sha256(binary)
         validation_tools = {**tools, binary.resolve(): digest}
         validated = sandboxed_run(
             [str(binary.resolve()), "--version"],
-            cwd=workspace,
+            cwd=cache_dir,
             environment=environment,
             landrun=landrun,
             writable_directories=[cache_dir.resolve()],
-            readable_paths=[workspace.resolve()],
+            readable_paths=[],
             executable_paths=sorted({*executable_paths, binary.resolve()}),
             tools=validation_tools,
             timeout=60,
@@ -2424,7 +2437,7 @@ def stage_legacy_proofwidgets_release(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> str | None:
-    """Fetch one authenticated legacy ProofWidgets release in disposable state."""
+    """Fetch one accepted-manifest-bound ProofWidgets release in disposable state."""
     packages = manifest_packages(workspace)
     proofwidgets = next(
         (package for package in packages if package["name"] == "proofwidgets"),
@@ -2913,8 +2926,9 @@ def execute(args: argparse.Namespace) -> int:
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
         # Candidate phases represented by this probe are network-disabled.
-        # The only confined exception below is an independently authenticated
-        # legacy ProofWidgets checkout in a disposable one-package workspace;
+        # The only confined exception below is a legacy ProofWidgets checkout
+        # bound to the already accepted Mathlib manifest in a disposable
+        # one-package workspace;
         # it has a separate, narrower filesystem policy. Trusted `curl` also
         # fetches fixed-host Mathlib cache archives outside candidate execution.
         verify_sandbox_confinement(
