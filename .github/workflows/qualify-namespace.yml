@@ -1,6 +1,8 @@
 name: Qualify Namespace confinement
 on:
   workflow_dispatch:
+  push:
+    branches: [namespace-qualification-20260917]
 permissions:
   contents: read
 jobs:
