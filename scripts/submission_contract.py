@@ -335,9 +335,9 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
         "repository_url": f"https://github.com/{repository}",
         "commit_sha": str(inputs.get("commit", "")).strip(),
     }
-    # The optional fields arrive as one JSON object: workflow_dispatch allows
-    # only ten inputs, and there are more optional fields than that leaves room
-    # for. A field missing from the allowlist would be dropped rather than
+    # The optional source fields retain one closed JSON-object contract.
+    # Execution-profile and attempt inputs are separate trusted workflow fields.
+    # A field missing from the allowlist would be dropped rather than
     # refused, so unknown keys are an error.
     raw_options = str(inputs.get("options", "")).strip()
     if raw_options:

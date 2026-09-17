@@ -22,9 +22,9 @@ from scripts.submission_contract import (
     submission_request,
 )
 from scripts.verification_errors import FormalizationValidationError, VerificationError
+from scripts.verification_profile import effective_memory_bytes
 from scripts.verify_submission import (
     EXECUTION_BUDGET_SECONDS,
-    PERMISSIVE_RESOURCE_PROPERTIES,
     LicenseDetectorError,
     LicenseValidationError,
     ResourceExhausted,
@@ -817,14 +817,15 @@ class VerifySubmissionTests(unittest.TestCase):
     def test_default_capacity_supports_ten_hour_verification(self):
         self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)
         profile = json.loads((REPOSITORY_ROOT / "verification-profile.json").read_text())
+        properties = verifier.permissive_resource_properties()
         self.assertIn(
-            f"MemoryMax={profile['limits']['memory_max_percent']}%",
-            PERMISSIVE_RESOURCE_PROPERTIES,
+            f"MemoryMax={effective_memory_bytes() * profile['limits']['memory_max_percent'] // 100}",
+            properties,
         )
         self.assertFalse(
             any(
                 property_value.startswith("CPUQuota=")
-                for property_value in PERMISSIVE_RESOURCE_PROPERTIES
+                for property_value in properties
             )
         )
 
@@ -988,7 +989,8 @@ class VerifySubmissionTests(unittest.TestCase):
                     self.assertRegex(line, expected, path.name)
         self.assertEqual(
             sorted(installers),
-            ["ci.yml", "compatibility.yml", "render-challenge.yml", "submission.yml"],
+            ["ci.yml", "compatibility.yml", "qualify-namespace.yml",
+             "render-challenge.yml", "submission.yml"],
         )
 
     def test_every_verifier_workflow_installs_hash_pinned_dependencies(self):
@@ -4790,11 +4792,14 @@ class DispatchWorkflowTests(unittest.TestCase):
         self.assertEqual(
             set(self.workflow()["on"]), {"workflow_call", "workflow_dispatch"}
         )
-        self.assertEqual(list(self.workflow()["jobs"]), ["verify"])
+        self.assertEqual(list(self.workflow()["jobs"]), ["profile", "verify"])
 
     def test_reusable_preflight_uses_the_same_fixed_job(self):
         workflow = self.workflow()
-        self.assertEqual(workflow["jobs"]["verify"]["runs-on"], "ubuntu-24.04")
+        self.assertEqual(
+            workflow["jobs"]["verify"]["runs-on"], "${{ fromJSON(needs.profile.outputs.labels) }}"
+        )
+        self.assertEqual(workflow["jobs"]["profile"]["runs-on"], "ubuntu-24.04")
         self.assertEqual(
             set(workflow["on"]["workflow_call"]["inputs"]),
             set(workflow["on"]["workflow_dispatch"]["inputs"]) | {"pipeline_commit"},
@@ -4860,7 +4865,7 @@ class DispatchWorkflowTests(unittest.TestCase):
         self.assertEqual(inputs["project_path"]["required"], "false")
         self.assertEqual(inputs["project_path"]["default"], "")
         for name, contract in inputs.items():
-            if name != "project_path":
+            if name not in {"project_path", "execution_profile"}:
                 self.assertEqual(contract["required"], "true", name)
 
     def test_the_run_and_artifact_carry_the_submission_id(self):

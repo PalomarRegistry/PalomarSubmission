@@ -20,6 +20,11 @@ on:
         description: Unique lowercase hexadecimal publication request ID
         required: true
         type: string
+      execution_profile:
+        description: Approved execution profile inherited from verification
+        required: false
+        default: palomar-standard-v1
+        type: string
       project_path:
         description: Accepted repository-relative project directory (blank means root)
         # GitHub rejects an explicitly empty value for a required dispatch
@@ -57,8 +62,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      labels: ${{ steps.resolve.outputs.labels }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: PalomarRegistry/PalomarSubmission
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - id: resolve
+        env:
+          PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
+          PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
+        run: python3 scripts/verification_profile.py --resolve
   render:
-    runs-on: ubuntu-latest
+    needs: profile
+    runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
+    env:
+      PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
+      PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
     timeout-minutes: 360
     steps:
       - name: Validate request identifier
@@ -84,6 +110,7 @@ jobs:
       - name: Checkout trusted renderer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.workflow_sha }}
           path: pipeline
           persist-credentials: false
 
@@ -124,11 +151,10 @@ jobs:
       - name: Install pinned elan
         if: steps.prepare.outputs.ready == 'true'
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 \
+          python3 pipeline/scripts/trusted_download.py \
+            --url https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz \
             --output "$RUNNER_TEMP/elan.tar.gz" \
-            https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
-          echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_TEMP/elan.tar.gz" \
-            | sha256sum --check
+            --sha256 df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none

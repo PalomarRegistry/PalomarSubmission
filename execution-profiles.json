@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "default": "palomar-standard-v1",
+  "profiles": {
+    "palomar-namespace-16x32-v1": {
+      "runner": {
+        "provider": "namespace",
+        "label": "nscloud-ubuntu-24.04-amd64-16x32-with-features",
+        "labels": [
+          "nscloud-ubuntu-24.04-amd64-16x32-with-features",
+          "namespace-features:container.privileged=true"
+        ],
+        "architecture": "x86_64"
+      },
+      "limits": {
+        "minimum_host_memory_bytes": 30064771072
+      }
+    }
+  }
+}

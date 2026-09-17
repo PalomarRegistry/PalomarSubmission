@@ -13,6 +13,7 @@ from scripts.verify_submission import (
     compile_canonical_challenge,
     protected_lean_path,
     remove_untrusted_lake_state,
+    sandboxed_run,
     system_readable_paths,
     tool_snapshot,
     verify_sandbox_confinement,
@@ -304,6 +305,21 @@ supportInterpreter = true
                 executable_paths=executable_paths,
                 tools=tool_snapshot([python, landrun, touch]),
             )
+
+            # The trusted sanitizer starts inside this boundary too. Its shared
+            # verifier imports must work without access to host /proc or /sys.
+            renderer = Path(__file__).resolve().parents[1] / "scripts" / "render_challenge.py"
+            result = sandboxed_run(
+                [str(python), str(renderer), "sanitize", "--help"],
+                cwd=workspace_checkout,
+                environment=environment,
+                landrun=landrun,
+                writable_directories=[build, config],
+                readable_paths=[workspace_checkout.resolve(), renderer.parent.parent],
+                executable_paths=executable_paths,
+                tools=tool_snapshot([python, landrun]),
+            )
+            self.assertIn("--input-dir", result.stdout)
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
