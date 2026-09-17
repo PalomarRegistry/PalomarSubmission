@@ -39,10 +39,9 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
-          import subprocess
           from scripts import verify_submission as verifier
 
-          original_run = subprocess.run
+          original_run = verifier.run
 
           def diagnostic_run(command, *args, **kwargs):
               result = original_run(command, *args, **kwargs)
@@ -52,7 +51,7 @@ jobs:
                   print("stderr:", (result.stderr or "")[-4000:])
               return result
 
-          subprocess.run = diagnostic_run
+          verifier.run = diagnostic_run
           try:
               verifier.systemd_command(
                   ["/usr/bin/true"], cwd=Path.cwd(), environment=dict(os.environ),
