@@ -29,6 +29,39 @@ jobs:
           echo "PALOMAR_TEST_LANDRUN=$(go env GOPATH)/bin/landrun" >> "$GITHUB_ENV"
       - name: Record effective capacity
         run: python scripts/verification_profile.py --profile palomar-namespace-16x32-v1 --allow-disabled --disk-path "$RUNNER_TEMP"
+      - name: Diagnose the runner systemd environment
+        run: |
+          ps -p 1 -o comm=
+          cat /proc/self/cgroup
+          findmnt --noheadings --output TARGET,FSTYPE,OPTIONS /sys/fs/cgroup || true
+          systemctl is-system-running || true
+          systemctl --user is-system-running || true
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          from scripts import verify_submission as verifier
+
+          original_run = subprocess.run
+
+          def diagnostic_run(command, *args, **kwargs):
+              result = original_run(command, *args, **kwargs)
+              if any(Path(str(part)).name == "systemd-run" for part in command):
+                  print("systemd probe return code:", result.returncode)
+                  print("stdout:", (result.stdout or "")[-4000:])
+                  print("stderr:", (result.stderr or "")[-4000:])
+              return result
+
+          subprocess.run = diagnostic_run
+          try:
+              verifier.systemd_command(
+                  ["/usr/bin/true"], cwd=Path.cwd(), environment=dict(os.environ),
+                  timeout=30, unrestricted_network=False,
+                  resource_properties=verifier.permissive_resource_properties(),
+              )
+          except verifier.VerificationError as error:
+              print("Required confinement unavailable:", error)
+          PY
       - name: Require the existing resource and confinement boundaries
         run: |
           python -m unittest -v \
