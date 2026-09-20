@@ -1833,6 +1833,32 @@ end Audit.Task
         self.assertIn('srcDir = "src"', lakefile)
         self.assertIn('roots = ["Audit.Task"]', lakefile)
 
+    def test_lake_escaped_package_names_are_accepted(self):
+        escaped = "\u00abmy-package\u00bb"
+        source = {
+            "packages": [
+                {
+                    "name": escaped,
+                    "type": "git",
+                    "url": "https://github.com/example/my-package",
+                    "rev": "1" * 40,
+                    "inherited": False,
+                }
+            ]
+        }
+        lakefile = trusted_lakefile(
+            source,
+            "3" * 40,
+            challenge_module="Audit.Task",
+            challenge_source_root=PurePosixPath("src"),
+        )
+        self.assertIn('name = "my-package"', lakefile)
+
+        merged = merge_renderer_manifest(source, {"packages": []}, "3" * 40)
+        names = [package["name"] for package in merged["packages"]]
+        # Lake rejects the unescaped spelling, so the merged manifest keeps it.
+        self.assertIn(escaped, names)
+
     def test_static_html_gets_csp_and_runtime_sanitizer(self):
         html = """<!doctype html><html><head><base href="../">
 <meta http-equiv="refresh" content="0;url=https://attacker.example/refresh">

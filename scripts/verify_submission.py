@@ -1710,7 +1710,8 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
             revision = str(package.get("rev") or package.get("inputRev") or "unknown")
         packages.append(
             {
-                "name": str(package.get("name") or ""),
+                "name": submission_contract.lake_package_name(package.get("name"))
+                or str(package.get("name") or ""),
                 "repository": repository,
                 "url": url,
                 "revision": revision,
@@ -1794,9 +1795,9 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
     packages_directories: set[Path] = set()
 
     def add(package: dict[str, Any], *, inherited: bool) -> None:
-        name = package.get("name")
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-            raise VerificationError(f"invalid Lake package name: {name!r}")
+        name = submission_contract.lake_package_name(package.get("name"))
+        if name is None:
+            raise VerificationError(f"invalid Lake package name: {package.get('name')!r}")
         if name in seen_names:
             raise VerificationError(f"duplicate Lake package name: {name!r}")
         seen_names.add(name)
@@ -1842,7 +1843,7 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
             {
                 "type": "path",
                 "scope": "",
-                "name": name,
+                "name": submission_contract.lake_manifest_name(name),
                 "manifestFile": "lake-manifest.json",
                 "dir": raw_path,
                 "configFile": target_lakefiles[0].name,

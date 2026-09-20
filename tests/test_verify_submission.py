@@ -3110,6 +3110,80 @@ review:
 
             self.assertEqual(protected.read_text(), "protected")
 
+    def test_manifest_packages_reads_lake_escaped_package_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "\u00abmy-package\u00bb",
+                                "type": "git",
+                                "url": "https://github.com/example/my-package",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            packages = verifier.manifest_packages(source)
+
+        self.assertEqual([package["name"] for package in packages], ["my-package"])
+
+    def test_escaped_unsafe_package_names_fail_before_materialization(self):
+        for name in ("\u00ab..\u00bb", "\u00aba/b\u00bb", "\u00abx\u00bby"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                (source / "lake-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "packages": [
+                                {
+                                    "name": name,
+                                    "type": "git",
+                                    "url": "https://github.com/example/package",
+                                    "rev": "1" * 40,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(VerificationError, "unsafe package name"):
+                    materialize_packages(
+                        source,
+                        checkout=source,
+                        base_env={"PATH": "/usr/bin"},
+                    )
+
+    def test_synthesized_manifest_spells_hyphenated_path_package_as_lake_does(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "lakefile.toml").write_text(
+                'name = "root"\n\n[[require]]\nname = "my-package"\npath = "dep"\n'
+            )
+            dependency = project / "dep"
+            dependency.mkdir()
+            (dependency / "lakefile.toml").write_text('name = "my-package"\n')
+            (dependency / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.1.0", "packagesDir": ".lake/packages", "packages": []})
+            )
+
+            self.assertTrue(ensure_lake_manifest(project, project))
+
+            generated = json.loads((project / "lake-manifest.json").read_text(encoding="utf-8"))
+            # Lake refuses a bare hyphenated name here: "expected a `Name`".
+            self.assertEqual(
+                [package["name"] for package in generated["packages"]],
+                ["\u00abmy-package\u00bb"],
+            )
+            self.assertEqual(
+                [package["name"] for package in verifier.manifest_packages(project)],
+                ["my-package"],
+            )
+
     def test_dot_package_names_fail_before_materialization(self):
         for name in (".", ".."):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
