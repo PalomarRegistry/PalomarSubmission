@@ -3348,6 +3348,35 @@ review:
                 ["my-package"],
             )
 
+    def test_escaped_and_bare_spellings_of_one_name_fail_before_materialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": name,
+                                "type": "git",
+                                "url": f"https://github.com/example/{repository}",
+                                "rev": "1" * 40,
+                            }
+                            for name, repository in (
+                                ("mathlib", "official"),
+                                ("\u00abmathlib\u00bb", "substitute"),
+                            )
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch("scripts.verify_submission.run") as run,
+                self.assertRaisesRegex(VerificationError, "duplicate package name"),
+            ):
+                materialize_packages(source, checkout=source, base_env={"PATH": "/usr/bin"})
+            run.assert_not_called()
+
     def test_dot_package_names_fail_before_materialization(self):
         for name in (".", ".."):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:

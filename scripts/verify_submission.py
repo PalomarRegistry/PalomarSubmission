@@ -3203,6 +3203,11 @@ def materialize_packages(
     """
     boundary = checkout.resolve()
     packages = manifest_packages(source)
+    # An escaped and a bare spelling of one name would share a checkout directory.
+    names = [package["name"] for package in packages]
+    for name in names:
+        if names.count(name) > 1:
+            raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
     path_directories: dict[str, Path] = {}
     for package in packages:
         if not package["url"].startswith("path:"):
