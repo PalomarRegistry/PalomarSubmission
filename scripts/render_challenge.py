@@ -32,7 +32,7 @@ from scripts.render_report import (  # noqa: E402
     intake_report,
     parse_prepared_report,
 )
-from scripts.submission_contract import GITHUB_RE, SHA_RE  # noqa: E402
+from scripts.submission_contract import GITHUB_RE, SHA_RE, lake_package_name  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
     DIAGNOSTICS_SCHEMA_VERSION,
@@ -912,9 +912,9 @@ def merge_renderer_manifest(
     def add(package: dict[str, Any], *, inherited: bool) -> None:
         if not isinstance(package, dict):
             raise VerificationError("Lake manifest package entries must be objects")
-        name = package.get("name")
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-            raise VerificationError(f"invalid Lake package name: {name!r}")
+        name = lake_package_name(package.get("name"))
+        if name is None:
+            raise VerificationError(f"invalid Lake package name: {package.get('name')!r}")
         candidate = dict(package)
         candidate["inherited"] = inherited
         identity = manifest_package_key(candidate)
@@ -982,9 +982,11 @@ def trusted_lakefile(
     }]:
         if not isinstance(package, dict):
             raise VerificationError("submitted Lake manifest package entries must be objects")
-        name = str(package.get("name") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in seen:
-            raise VerificationError(f"invalid or duplicate direct Lake package: {name!r}")
+        name = lake_package_name(package.get("name"))
+        if name is None or name in seen:
+            raise VerificationError(
+                f"invalid or duplicate direct Lake package: {package.get('name')!r}"
+            )
         seen.add(name)
         lines.extend(["[[require]]", f"name = {toml_string(name)}"])
         if package.get("type") == "git":
