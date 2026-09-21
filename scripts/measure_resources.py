@@ -30,11 +30,54 @@ def process_tree_size(root: int) -> int:
     return len(seen)
 
 
+def own_cgroup() -> Path | None:
+    """The cgroup v2 directory this observer (and so its workload) lives in."""
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                relative = line[3:].strip().lstrip("/")
+                if ".." not in Path(relative).parts:
+                    return Path("/sys/fs/cgroup") / relative
+    except OSError:
+        pass
+    return None
+
+
+def cgroup_usage(cgroup: Path | None) -> dict[str, int]:
+    """Peak memory and CPU time of the whole phase cgroup, when the kernel exposes them.
+
+    rusage only sees what was waited for; bubblewrap's PID 1 stub does not pass
+    its children's figures up, so under the bwrap policy the rusage numbers are
+    the launcher's. The cgroup accounts for every process of the phase.
+    """
+    usage: dict[str, int] = {}
+    if cgroup is None:
+        return usage
+    try:
+        peak = (cgroup / "memory.peak").read_text().strip()
+        if peak.isdigit():
+            usage["memory_peak_bytes"] = int(peak)
+    except OSError:
+        pass
+    try:
+        for line in (cgroup / "cpu.stat").read_text().splitlines():
+            key, _, raw = line.partition(" ")
+            if key in {"user_usec", "system_usec"} and raw.strip().isdigit():
+                usage[key] = int(raw)
+    except OSError:
+        pass
+    return usage
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--phase", required=True)
     parser.add_argument("--disk-path", type=Path, required=True)
+    parser.add_argument(
+        "--cgroup-accounting", action="store_true",
+        help="this observer runs in a cgroup dedicated to the phase; prefer its accounting",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command
@@ -66,12 +109,14 @@ def main() -> int:
     sampler.join()
     peak_tasks = max(peak_tasks, process_tree_size(child.pid))
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    accounted = cgroup_usage(own_cgroup()) if args.cgroup_accounting else {}
     record = {
         "phase": args.phase,
         "elapsed_seconds": round(time.monotonic() - started, 3),
-        "user_cpu_seconds": round(usage.ru_utime, 3),
-        "system_cpu_seconds": round(usage.ru_stime, 3),
-        "max_rss_kib": usage.ru_maxrss,
+        "user_cpu_seconds": round(max(usage.ru_utime, accounted.get("user_usec", 0) / 1e6), 3),
+        "system_cpu_seconds": round(max(usage.ru_stime, accounted.get("system_usec", 0) / 1e6), 3),
+        "max_rss_kib": max(usage.ru_maxrss, accounted.get("memory_peak_bytes", 0) // 1024),
+        "memory_source": "cgroup" if "memory_peak_bytes" in accounted else "rusage",
         "peak_tasks_observed": peak_tasks,
         "workspace_disk_peak_bytes": max(0, initial_free - minimum_free),
         "returncode": returncode,

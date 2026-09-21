@@ -2410,6 +2410,9 @@ def system_readable_paths() -> list[Path]:
         Path("/etc/gai.conf"),
         Path("/etc/host.conf"),
         Path("/etc/ld.so.cache"),
+        Path("/etc/ld.so.conf"),
+        Path("/etc/ld.so.conf.d"),
+        Path("/etc/alternatives"),
     )
     result: set[Path] = set()
     for path in candidates:
@@ -2666,6 +2669,385 @@ def systemd_unit_outcome(
                 pass  # Cleanup must not replace the phase's diagnostic.
 
 
+# --- cgroup supervisor (Phase 1a: inactive unless PALOMAR_SUPERVISOR=cgroup) ---------------
+#
+# The systemd transient unit above supplied three things at once: isolation
+# properties, cgroup resource limits with a deadline, and trustworthy evidence of
+# how the phase ended. On a runner without systemd (the Namespace job container,
+# where PID 1 is a shell) the same three are supplied by bubblewrap
+# (`bwrap_command`), a small babysitter that owns a delegated cgroup
+# (`scripts/supervise_cgroup.py`, driven by `supervisor_command`) and its
+# status file (`supervisor_outcome`). The classification vocabulary and the
+# telemetry field names are kept so the mechanical report does not change shape.
+
+SUPERVISOR_KIND = os.environ.get("PALOMAR_SUPERVISOR", "systemd")
+_SUPERVISOR_BOOTSTRAP: list[str] | None = None
+_BWRAP: Path | None = (
+    Path(os.environ["PALOMAR_BWRAP"]).resolve() if os.environ.get("PALOMAR_BWRAP") else None
+)
+SUPERVISOR_PARENT_MARGIN_SECONDS = 15
+SUPERVISOR_DEFAULT_GRACE_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class SupervisorLimits:
+    """systemd resource properties translated into what the babysitter writes."""
+
+    cgroup: dict[str, str]
+    rlimits: dict[str, int]
+    deadline: int | None
+    grace: int | None
+
+
+def _systemd_size(value: str, name: str) -> str:
+    if value == "infinity":
+        return "max"
+    match = re.fullmatch(r"(\d+)([KMGT]?)", value)
+    if not match:
+        raise VerificationError(f"unsupported {name} value: {value!r}")
+    return str(int(match.group(1)) * 1024 ** "_KMGT".index(match.group(2) or "_"))
+
+
+def _systemd_seconds(value: str, name: str) -> int:
+    match = re.fullmatch(r"(\d+)(s|min|h)?", value)
+    if not match:
+        raise VerificationError(f"unsupported {name} value: {value!r}")
+    return int(match.group(1)) * {None: 1, "s": 1, "min": 60, "h": 3600}[match.group(2)]
+
+
+def translate_resource_properties(properties: tuple[str, ...] | list[str]) -> SupervisorLimits:
+    """Map the `Key=Value` vocabulary the phases already speak onto cgroup files.
+
+    Only the properties Palomar actually uses are accepted. `LimitAS` in
+    particular is refused: an address-space rlimit would turn con-ron's
+    per-worker reservations into candidate failures; `memory.max` is the ceiling.
+    """
+    cgroup: dict[str, str] = {"memory.oom.group": "1"}
+    rlimits: dict[str, int] = {}
+    deadline = grace = None
+    for item in properties:
+        key, separator, value = item.partition("=")
+        value = value.strip()
+        if not separator or not value or any(c in value for c in "\0\n\r"):
+            raise VerificationError(f"invalid resource property: {item!r}")
+        if key == "MemoryMax":
+            cgroup["memory.max"] = _systemd_size(value, key)
+        elif key == "MemoryHigh":
+            cgroup["memory.high"] = _systemd_size(value, key)
+        elif key == "MemorySwapMax":
+            cgroup["memory.swap.max"] = _systemd_size(value, key)
+        elif key == "TasksMax":
+            cgroup["pids.max"] = _systemd_size(value, key) if value == "infinity" else str(int(value))
+        elif key in {"LimitNOFILE", "LimitFSIZE"}:
+            if not value.isdigit():
+                raise VerificationError(f"unsupported {key} value: {value!r}")
+            rlimits[key.removeprefix("Limit")] = int(value)
+        elif key == "RuntimeMaxSec":
+            deadline = _systemd_seconds(value, key)
+        elif key == "TimeoutStopSec":
+            grace = _systemd_seconds(value, key)
+        elif key == "CPUQuota":
+            if not re.fullmatch(r"\d+%", value):
+                raise VerificationError(f"unsupported CPUQuota value: {value!r}")
+            cgroup["cpu.max"] = f"{int(value[:-1]) * 1000} 100000"
+        else:
+            raise VerificationError(f"unsupported resource property for the cgroup supervisor: {key}")
+    return SupervisorLimits(cgroup=cgroup, rlimits=rlimits, deadline=deadline, grace=grace)
+
+
+def _supervisor_unavailable(message: str) -> VerificationError:
+    return VerificationError(
+        message,
+        code="provider.resource_telemetry_missing",
+        owner="provider",
+        next_action=(
+            "Palomar could not determine how the worker stopped. Report the workflow URL "
+            "if this persists; retry only after the reported condition is addressed. "
+            "Normal submission cooldowns still apply."
+        ),
+        retryable=True,
+    )
+
+
+def supervisor_bootstrap(cwd: Path, environment: dict[str, str]) -> list[str]:
+    """Choose, once per verifier process, how a delegated cgroup is obtained.
+
+    On a systemd host the user manager hands out a `Delegate=yes` scope; on a
+    runner without systemd a root helper drains the container root, enables the
+    controllers and enters a fresh run cgroup before dropping privileges. Either
+    way the babysitter then starts inside a cgroup this user owns (`--parent
+    self`). The choice is proven by running the whole chain once on `true` and
+    reading the status it leaves behind, so a runner that cannot delegate fails
+    closed before any candidate code runs.
+    """
+    global _SUPERVISOR_BOOTSTRAP
+    if _SUPERVISOR_BOOTSTRAP is not None:
+        return list(_SUPERVISOR_BOOTSTRAP)
+    python = str(Path(sys.executable).resolve())
+    babysitter = str((ROOT / "scripts" / "supervise_cgroup.py").resolve())
+    delegate = str((ROOT / "scripts" / "cgroup_delegate.py").resolve())
+    try:
+        pid1 = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        pid1 = ""
+    candidates: list[list[str]] = []
+    runner = shutil.which("systemd-run")
+    sudo = shutil.which("sudo")
+    if pid1 == "systemd" and runner:
+        candidates.append([runner, "--user", "--scope", "--quiet", "--property=Delegate=yes", "--"])
+    elif pid1 != "systemd" and sudo:
+        candidates.append(
+            [sudo, "-n", python, delegate, f"--uid={os.getuid()}", f"--gid={os.getgid()}", "--"]
+        )
+    true = shutil.which("true")
+    if not true:
+        raise VerificationError("true is required to probe the cgroup supervisor")
+    failures: list[str] = []
+    for candidate in candidates:
+        with tempfile.TemporaryDirectory(prefix="palomar-supervisor-probe-") as directory:
+            status = Path(directory) / "status.json"
+            probe = run(
+                [*candidate, python, babysitter, "--parent", "self", "--collect", "--deadline", "20",
+                 "--grace", "1", "--cwd", str(cwd), "--status", str(status), "--", true],
+                cwd=cwd, env=environment, timeout=60, check=False,
+            )
+            try:
+                report = json.loads(status.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                report = {}
+            if probe.returncode == 0 and report.get("state") == "finished" and report.get("placement_ok"):
+                _SUPERVISOR_BOOTSTRAP = candidate
+                return list(candidate)
+            failures.append(f"{candidate[0]}: exit {probe.returncode}: {probe.stderr.strip()[-300:]}")
+    raise VerificationError(
+        "no cgroup delegation bootstrap works on this runner: "
+        + ("; ".join(failures) if failures else f"PID 1 is {pid1 or 'unknown'} and no bootstrap applies")
+    )
+
+
+def supervisor_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout: int = 600,
+    resource_properties: tuple[str, ...] = (),
+    unit_name: str,
+    status_path: Path,
+    liveness_path: Path,
+) -> list[str]:
+    """Wrap one phase in the babysitter, itself started inside a delegated cgroup."""
+    if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
+        raise VerificationError("invalid verifier-owned phase cgroup name")
+    limits = translate_resource_properties(resource_properties)
+    python = str(Path(sys.executable).resolve())
+    babysitter = str((ROOT / "scripts" / "supervise_cgroup.py").resolve())
+    result = [
+        *supervisor_bootstrap(cwd, environment),
+        python, babysitter,
+        "--parent", "self",
+        "--name", unit_name,
+        "--deadline", str(max(1, limits.deadline if limits.deadline is not None else timeout)),
+        "--grace", str(max(
+            1, limits.grace if limits.grace is not None else SUPERVISOR_DEFAULT_GRACE_SECONDS,
+        )),
+        "--cwd", str(cwd),
+        "--status", str(status_path),
+        "--liveness", str(liveness_path),
+    ]
+    for key, value in limits.cgroup.items():
+        result.extend(["--limit", f"{key}={value}"])
+    for key, value in limits.rlimits.items():
+        result.extend(["--rlimit", f"{key}={value}"])
+    for name in SANDBOX_ENVIRONMENT:
+        value = environment.get(name)
+        if value is not None:
+            if any(character in value for character in ("\0", "\n", "\r")):
+                raise VerificationError(f"invalid control character in sandbox environment {name}")
+            result.extend(["--setenv", f"{name}={value}"])
+    return [*result, "--", *command]
+
+
+def _cgroup_from_status(report: dict[str, Any]) -> Path | None:
+    raw = str(report.get("cgroup") or "")
+    path = Path(raw)
+    if not raw.startswith("/sys/fs/cgroup/") or ".." in path.parts:
+        return None
+    return path
+
+
+def _cleanup_phase_cgroup(cgroup: Path) -> None:
+    """KillMode=control-group for the verifier's own cleanup: kill, then remove what is ours."""
+    try:
+        (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
+    except OSError:
+        pass
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if "populated 0" in (cgroup / "cgroup.events").read_text(encoding="utf-8"):
+                break
+        except OSError:
+            break
+        time.sleep(0.05)
+    for path in (cgroup, cgroup.parent / "supervisor"):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+    if cgroup.parent.name.startswith("run-") and cgroup.parent.parent.name == "palomar":
+        try:
+            cgroup.parent.rmdir()
+        except OSError:
+            pass  # the root helper's sweep removes it once empty
+
+
+def supervisor_outcome(
+    status_path: Path,
+    *,
+    supervisor_timeout: bool = False,
+) -> dict[str, Any]:
+    """Read the babysitter's evidence, then tear down whatever it left behind.
+
+    A missing or unfinished status is an infrastructure diagnostic, never an
+    inferred success, except when the verifier's own deadline fired first: then
+    the phase is reported with `Result` unset and the caller's `TimeoutExpired`
+    stands, exactly as `append_resource_outcome(supervisor_timeout=True)` records.
+    """
+    try:
+        report = json.loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise ValueError("status is not an object")
+    except (OSError, ValueError) as error:
+        if supervisor_timeout:
+            report = {}
+        else:
+            raise _supervisor_unavailable(f"cgroup supervisor left no status: {error}") from error
+    cgroup = _cgroup_from_status(report)
+    try:
+        events = {"oom": 0, "oom_kill": 0}
+        for name in events:
+            raw = report.get("memory_events", {}).get(name)
+            if isinstance(raw, int):
+                events[name] = raw
+        if cgroup is not None and cgroup.is_dir():
+            # The babysitter may have been killed before its final read.
+            try:
+                for line in (cgroup / "memory.events").read_text(encoding="utf-8").splitlines():
+                    name, _, raw = line.partition(" ")
+                    if name in events and raw.strip().isdigit():
+                        events[name] = max(events[name], int(raw))
+            except OSError:
+                pass
+        finished = report.get("state") == "finished"
+        if not finished and not supervisor_timeout:
+            raise _supervisor_unavailable("cgroup supervisor did not finish the confined phase")
+        if finished and not report.get("placement_ok"):
+            raise _supervisor_unavailable(
+                f"confined phase never joined its cgroup: {report.get('placement_error')}"
+            )
+        exit_status = report.get("exit_status")
+        term_signal = report.get("term_signal")
+        oom_group = report.get("memory_events", {}).get("oom_group_kill")
+        if not finished:
+            result = None
+        elif events["oom_kill"] > 0 or (isinstance(oom_group, int) and oom_group > 0):
+            result = "oom-kill"
+        elif report.get("deadline_fired"):
+            result = "timeout"
+        elif exit_status == 0:
+            result = "success"
+        elif exit_status is not None:
+            result = "exit-code"
+        else:
+            result = "signal"
+        cpu_stat = report.get("cpu_stat", {})
+        usage_usec = cpu_stat.get("usage_usec") if isinstance(cpu_stat, dict) else None
+        outcome: dict[str, Any] = {
+            "Result": result,
+            "ActiveState": "inactive" if finished else "active",
+            "ExecMainCode": ("exited" if exit_status is not None else "killed") if finished else "",
+            "ExecMainStatus": str(exit_status if exit_status is not None else term_signal or ""),
+            "ControlGroup": "/" + str(cgroup.relative_to("/sys/fs/cgroup")) if cgroup else "",
+            "MemoryPeak": str(report.get("memory_peak") or ""),
+            "CPUUsageNSec": str(usage_usec * 1000) if isinstance(usage_usec, int) else "",
+            "memory_events": events,
+            "supervisor": "cgroup",
+            "deadline_fired": bool(report.get("deadline_fired")),
+            "liveness_lost": bool(report.get("liveness_lost")),
+            "cpu_max_applied": bool(report.get("limits_applied", {}).get("cpu.max", False)),
+            "pids_events": report.get("pids_events", {}),
+        }
+        return outcome
+    finally:
+        if cgroup is not None:
+            _cleanup_phase_cgroup(cgroup)
+
+
+def bwrap_command(
+    command: list[str],
+    *,
+    bwrap: Path,
+    writable_directories: list[Path],
+    writable_files: tuple[Path, ...] | list[Path] = (),
+    readable_paths: list[Path] | None = None,
+    executable_paths: list[Path],
+    environment: dict[str, str],
+    readable_directories: tuple[Path, ...] | list[Path] = (),
+    unrestricted_network: bool = False,
+    nested_sandbox: bool = False,
+) -> list[str]:
+    """Build the outer, submission-wide bubblewrap policy.
+
+    Allowlist form: the root is an empty tmpfs and only what a phase names is
+    bound into it, read-only unless it is one of the phase's writable trees. The
+    root is then remounted read-only so nothing can add to it, every namespace is
+    unshared, and the environment is reset to the sandbox variables alone (the
+    `env -i` keeps the launcher's environment out of `/proc/1/environ`).
+    `nested_sandbox` is for the one phase that runs `lake comparator`, whose own
+    bwrap needs user namespaces and the mount points it overlays.
+    """
+    env = shutil.which("env")
+    if not env:
+        raise VerificationError("env is required to launch the confined phase")
+    result = [env, "-i", str(bwrap), "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    if nested_sandbox:
+        # Check.lean `buildSandboxArgs` overlays tmpfs on these (and on /run and
+        # /var in the kernel phases); the mount points must exist in our root.
+        for point in ("/home", "/root", "/run/user", "/var"):
+            result.extend(["--dir", point])
+    bound: set[Path] = set()
+    for path in sorted({*(readable_paths or []), *readable_directories, *executable_paths}):
+        bound.add(path)
+        result.extend(["--ro-bind", str(path), str(path)])
+    # Merged-usr hosts keep /bin, /sbin, /lib and /lib64 as symlinks into /usr;
+    # the allowlisted root needs the same symlinks for #! lines and the loader.
+    for name in ("/bin", "/sbin", "/lib", "/lib64"):
+        top = Path(name)
+        if top.is_symlink() and top not in bound and not any(top == p or top in p.parents for p in bound):
+            result.extend(["--symlink", os.readlink(top), name])
+    for directory in sorted(set(writable_directories)):
+        result.extend(["--bind", str(directory), str(directory)])
+    for path in sorted(set(writable_files)):
+        result.extend(["--bind", str(path), str(path)])
+    result.extend(["--remount-ro", "/"])
+    for name in SANDBOX_ENVIRONMENT:
+        value = environment.get(name)
+        if value is not None:
+            if any(character in value for character in ("\0", "\n", "\r")):
+                raise VerificationError(f"invalid control character in sandbox environment {name}")
+            result.extend(["--setenv", name, value])
+    result.extend([
+        "--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-uts", "--unshare-cgroup",
+    ])
+    if not unrestricted_network:
+        result.append("--unshare-net")
+    if not nested_sandbox:
+        result.append("--disable-userns")
+    result.extend(["--die-with-parent", "--new-session", "--cap-drop", "ALL"])
+    return [*result, "--", *command]
+
+
 def append_resource_outcome(
     path: Path, phase: str, outcome: dict[str, Any], *, supervisor_timeout: bool = False,
 ) -> None:
@@ -2708,20 +3090,38 @@ def sandboxed_run(
     check: bool = True,
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
+    nested_sandbox: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     timeout = _deadline_timeout(timeout, command)
     verify_tool_snapshot(tools)
-    confined = landrun_command(
-        command,
-        landrun=landrun,
-        writable_directories=writable_directories,
-        writable_files=writable_files,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
-        environment=environment,
-        readable_directories=[cwd],
-        unrestricted_network=unrestricted_network,
-    )
+    cgroup_supervisor = SUPERVISOR_KIND == "cgroup"
+    if cgroup_supervisor:
+        if _BWRAP is None:
+            raise VerificationError("bubblewrap is required for fail-closed confinement")
+        confined = bwrap_command(
+            command,
+            bwrap=_BWRAP,
+            writable_directories=writable_directories,
+            writable_files=writable_files,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            environment=environment,
+            readable_directories=[cwd],
+            unrestricted_network=unrestricted_network,
+            nested_sandbox=nested_sandbox,
+        )
+    else:
+        confined = landrun_command(
+            command,
+            landrun=landrun,
+            writable_directories=writable_directories,
+            writable_files=writable_files,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            environment=environment,
+            readable_directories=[cwd],
+            unrestricted_network=unrestricted_network,
+        )
     phase = _RESOURCE_PHASE or Path(command[0]).name[:80] or "phase"
     unit_name = f"palomar-{secrets.token_hex(12)}"
     if _RESOURCE_METRICS_PATH is not None:
@@ -2740,18 +3140,23 @@ def sandboxed_run(
             phase,
             "--disk-path",
             str(_RESOURCE_DISK_PATH or cwd),
+            "--cgroup-accounting",
             "--",
             *confined,
         ]
+    properties = tuple(dict.fromkeys((*permissive_resource_properties(), *resource_properties)))
+    if cgroup_supervisor:
+        return _cgroup_supervised_run(
+            command, confined, cwd=cwd, environment=environment, timeout=timeout, check=check,
+            resource_properties=properties, unit_name=unit_name, phase=phase, tools=tools,
+        )
     confined_command = systemd_command(
         confined,
         cwd=cwd,
         environment=environment,
         timeout=timeout,
         unrestricted_network=unrestricted_network,
-        resource_properties=tuple(
-            dict.fromkeys((*permissive_resource_properties(), *resource_properties))
-        ),
+        resource_properties=properties,
         unit_name=unit_name,
     )
     try:
@@ -2778,6 +3183,16 @@ def sandboxed_run(
         if _RESOURCE_METRICS_PATH is not None:
             append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
     verify_tool_snapshot(tools)
+    return _classify_confined_result(command, proc, outcome, check=check)
+
+
+def _classify_confined_result(
+    command: list[str],
+    proc: subprocess.CompletedProcess[str],
+    outcome: dict[str, Any],
+    *,
+    check: bool,
+) -> subprocess.CompletedProcess[str]:
     # Payload output is attacker-controlled and must never manufacture an
     # infrastructure outcome merely by printing an OOM or timeout phrase.
     # Numeric exit statuses are payload-controlled too. Only trusted unit
@@ -2802,6 +3217,68 @@ def sandboxed_run(
             f"{' '.join(command[:3])} failed ({proc.returncode}): {detail}"
         )
     return proc
+
+
+def _cgroup_supervised_run(
+    command: list[str],
+    confined: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout: int,
+    check: bool,
+    resource_properties: tuple[str, ...],
+    unit_name: str,
+    phase: str,
+    tools: dict[Path, str],
+) -> subprocess.CompletedProcess[str]:
+    # The status file and liveness FIFO live in a verifier-owned directory the
+    # payload cannot see: bwrap gives it a private /tmp and binds nothing here.
+    with tempfile.TemporaryDirectory(prefix="palomar-supervisor-") as directory:
+        status_path = Path(directory) / "status.json"
+        liveness_path = Path(directory) / "liveness"
+        os.mkfifo(liveness_path, 0o600)
+        confined_command = supervisor_command(
+            confined,
+            cwd=cwd,
+            environment=environment,
+            timeout=timeout,
+            resource_properties=resource_properties,
+            unit_name=unit_name,
+            status_path=status_path,
+            liveness_path=liveness_path,
+        )
+        # O_RDWR never blocks on a FIFO; holding it keeps a writer present until
+        # this process exits, which is precisely what the babysitter watches for.
+        liveness = os.open(liveness_path, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            try:
+                proc = run(
+                    confined_command, cwd=cwd, env=environment,
+                    timeout=timeout + SUPERVISOR_PARENT_MARGIN_SECONDS, check=False,
+                )
+            except subprocess.TimeoutExpired:
+                # The babysitter itself overran its deadline plus grace; the
+                # verifier tears the cgroup down from the started-record and
+                # records that its own deadline fired first.
+                try:
+                    outcome = supervisor_outcome(status_path, supervisor_timeout=True)
+                    if _RESOURCE_METRICS_PATH is not None:
+                        append_resource_outcome(
+                            _RESOURCE_METRICS_PATH, phase, outcome, supervisor_timeout=True,
+                        )
+                except VerificationError:
+                    pass  # The parent's observed wall-clock expiry is already sufficient.
+                raise
+        finally:
+            os.close(liveness)
+        # Every phase is classified from the status file, success included: a
+        # zero exit with an OOM event or a fired deadline is not a success.
+        outcome = supervisor_outcome(status_path)
+        if _RESOURCE_METRICS_PATH is not None:
+            append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
+    verify_tool_snapshot(tools)
+    return _classify_confined_result(command, proc, outcome, check=check)
 
 
 @dataclass(frozen=True)
@@ -4741,8 +5218,11 @@ def execute(args: argparse.Namespace) -> int:
         nanoda = Path(args.nanoda).resolve()
         adapter = (ROOT / "scripts" / "landrun_passthrough.py").resolve()
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
+        babysitter = (ROOT / "scripts" / "supervise_cgroup.py").resolve()
+        delegate = (ROOT / "scripts" / "cgroup_delegate.py").resolve()
         verifier = Path(__file__).resolve()
-        for tool in (comparator, lean4export, landrun, nanoda, adapter, metrics_wrapper, verifier):
+        for tool in (comparator, lean4export, landrun, nanoda, adapter, metrics_wrapper,
+                     babysitter, delegate, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
         env = os.environ.copy()
@@ -4882,6 +5362,8 @@ def execute(args: argparse.Namespace) -> int:
                 comparator_config,
                 adapter,
                 metrics_wrapper,
+                babysitter,
+                delegate,
                 verifier,
                 lake,
                 lean,
