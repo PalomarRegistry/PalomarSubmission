@@ -92,9 +92,9 @@ hard-linked, read-only copy of exactly those verified package sources and fresh
 Lake state.
 
 The verifier then makes the staged Mathlib package, not the submitted project,
-the Lake workspace root and runs `lake exe cache get` inside the combined
-Landrun/systemd boundary. The submitted project's Lakefile is not elaborated in
-that network-enabled phase. Landrun and the transient systemd unit forward only
+the Lake workspace root and runs `lake exe cache get` inside the bubblewrap and
+cgroup boundary. The submitted project's Lakefile is not elaborated in
+that network-enabled phase. The supervisor and bubblewrap forward only
 the named sandbox variables to the payload; those names do not include GitHub,
 Azure, AWS, or Cloudflare credentials, and the workflow supplies no cache
 credential. The network-enabled command can write complete `.lake` roots only
@@ -144,7 +144,7 @@ uses the following staged path in
    clean, then requires Mathlib's own pinned manifest to name that same
    ProofWidgets repository and revision. It resets the canonical ProofWidgets
    `.lake` state and hard-links only that verified source into a disposable
-   one-package workspace. Under Landrun/systemd with network enabled, only the
+   one-package workspace. Under bubblewrap with network enabled, only the
    disposable `.lake` root is writable and only the canonical
    `proofwidgets:release` target runs; certificate and name-service paths are
    the only host configuration added to the read set. The merged render
@@ -165,22 +165,24 @@ uses the following staged path in
    fixed SHA-256 pin. Palomar accepts exactly one bounded regular `leantar`
    member beneath the expected archive directory, writes it into the fresh
    cache directory, and checks its exact reported version in a network-disabled
-   Landrun/systemd process. The binary's digest is checked again after discovery
+   sandbox. The binary's digest is checked again after discovery
    and the same file is moved across the cache-directory reset for unpacking.
    Modern Mathlib obtains `leantar` from the selected Lean toolchain and skips
    this bootstrap.
-3. Under Landrun/systemd with network disabled, the cache client selected by
+3. Under bubblewrap with network disabled, the cache client selected by
    the accepted dependency checkout is forced to a local empty `file://`
    backend. Palomar treats its output only as a request-key declaration: it
    parses the attempted 16-hex archive names and requires the reported count to
    equal the unique key set, with a hard limit of 10,000 archives.
 4. A verifier-selected `curl`, outside candidate execution but still inside a
-   resource-limited systemd unit, fetches exactly those names from
+   resource-limited sandbox that can write only the cache directory, fetches
+   exactly those names from
    the fixed official `mathlib4-master` container, with the legacy `mathlib4`
    container as a fallback. It runs under
    `env -i`, invokes `curl --disable` so the preserved `HOME` cannot supply a
-   `.curlrc`, sends no cache credential, and permits only HTTPS. A systemd
-   `LimitFSIZE` makes the 256 MiB per-file limit fail closed even when the
+   `.curlrc`, sends no cache credential, and permits only HTTPS. An
+   `RLIMIT_FSIZE` applied by the supervisor makes the 256 MiB per-file limit
+   fail closed even when the
    server omits a usable length; `curl --max-filesize` also rejects a declared
    oversize response before transfer where possible. The 8 GiB aggregate is
    checked after the bounded individual downloads, so it rejects an oversized

@@ -1,14 +1,14 @@
 name: Qualify cgroup supervisor
 
-# Phase 1a of the Namespace + `lake comparator` migration. Throwaway: runs the real resource
-# boundary tests under the inactive cgroup supervisor (PALOMAR_SUPERVISOR=cgroup) on both
-# runner types, with bubblewrap 0.12.0 built from the pinned tag, while production still
-# uses the systemd unit. Folded into ci.yml when the supervisor is activated.
+# Phase 1 of the Namespace + `lake comparator` migration. Throwaway: runs the real resource
+# and confinement boundary tests under the cgroup supervisor and the bubblewrap policy on
+# both runner types, with bubblewrap 0.12.0 built from the pinned tag. Folded into ci.yml
+# once Namespace is the production runner.
 
 on:
   workflow_dispatch:
   push:
-    branches: [supervisor-cgroup]
+    branches: [supervisor-cgroup, supervisor-activate]
 
 permissions:
   contents: read
@@ -56,10 +56,12 @@ jobs:
           cat /sys/fs/cgroup/cgroup.controllers
       - name: Unit tests for the supervisor functions
         run: python -m unittest -v tests.test_resource_supervision
-      - name: Real resource boundary tests under the cgroup supervisor
-        env:
-          PALOMAR_SUPERVISOR: cgroup
-        run: python -m unittest -v tests.test_resource_supervision.RealResourceBoundaryTests
+      - name: Real resource and confinement boundary tests
+        run: |
+          python -m unittest -v \
+            tests.test_resource_supervision.RealResourceBoundaryTests \
+            tests.test_sandbox_integration.SandboxIntegrationTests.test_real_read_write_process_and_network_boundary \
+            tests.test_sandbox_integration.SandboxIntegrationTests.test_real_renderer_policy_proves_the_same_controls
       - name: Babysitter status and delegation report on failure
         if: failure()
         run: |

@@ -41,7 +41,6 @@ from scripts.verify_submission import (
     execute,
     github_repository,
     lake_environment_value,
-    landrun_command,
     lean_header,
     load_comparator_config,
     materialize_packages,
@@ -59,7 +58,6 @@ from scripts.verify_submission import (
     resolve_module_source,
     run,
     sandboxed_run,
-    systemd_command,
     trusted_package_url_map,
     validate_preservable_git_checkout,
     validate_writable_directories,
@@ -763,6 +761,7 @@ class VerifySubmissionTests(unittest.TestCase):
                     work_dir=work,
                     comparator_commit="a" * 40,
                     landrun_commit="b" * 40,
+                    bwrap=sys.executable,
                     nanoda_commit="c" * 40,
                     workflow_url="https://github.com/example/project/actions/runs/1",
                 )
@@ -795,6 +794,7 @@ class VerifySubmissionTests(unittest.TestCase):
                 nanoda=tools[3],
                 comparator_commit="a" * 40,
                 landrun_commit="b" * 40,
+                bwrap=sys.executable,
                 nanoda_commit="c" * 40,
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
@@ -830,14 +830,14 @@ class VerifySubmissionTests(unittest.TestCase):
         )
 
     def test_payload_exit_137_does_not_establish_resource_exhaustion(self):
-        completed = subprocess.CompletedProcess(["systemd-run"], 137, "", "killed")
+        completed = subprocess.CompletedProcess(["supervise"], 137, "", "killed")
         with (
             mock.patch("scripts.verify_submission.verify_tool_snapshot"),
-            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
-            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission._BWRAP", Path("/opt/bwrap")),
+            mock.patch("scripts.verify_submission.supervisor_command", return_value=["supervise"]),
             mock.patch("scripts.verify_submission.run", return_value=completed),
             mock.patch(
-                "scripts.verify_submission.systemd_unit_outcome",
+                "scripts.verify_submission.supervisor_outcome",
                 return_value={"Result": "exit-code", "memory_events": {}},
             ),
             mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
@@ -847,7 +847,6 @@ class VerifySubmissionTests(unittest.TestCase):
                 ["lean", "Challenge.lean"],
                 cwd=REPOSITORY_ROOT,
                 environment={},
-                landrun=Path("landrun"),
                 writable_directories=[],
                 executable_paths=[],
                 tools={},
@@ -857,15 +856,15 @@ class VerifySubmissionTests(unittest.TestCase):
 
     def test_candidate_output_cannot_forge_resource_exhaustion(self):
         completed = subprocess.CompletedProcess(
-            ["systemd-run"], 0, "out of memory; timed out; no space left on device", ""
+            ["supervise"], 0, "out of memory; timed out; no space left on device", ""
         )
         with (
             mock.patch("scripts.verify_submission.verify_tool_snapshot"),
-            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
-            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission._BWRAP", Path("/opt/bwrap")),
+            mock.patch("scripts.verify_submission.supervisor_command", return_value=["supervise"]),
             mock.patch("scripts.verify_submission.run", return_value=completed),
             mock.patch(
-                "scripts.verify_submission.systemd_unit_outcome",
+                "scripts.verify_submission.supervisor_outcome",
                 return_value={"Result": "success", "memory_events": {}},
             ),
             mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
@@ -874,7 +873,6 @@ class VerifySubmissionTests(unittest.TestCase):
                 ["lean", "Challenge.lean"],
                 cwd=REPOSITORY_ROOT,
                 environment={},
-                landrun=Path("landrun"),
                 writable_directories=[],
                 executable_paths=[],
                 tools={},
@@ -882,14 +880,14 @@ class VerifySubmissionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
 
     def test_cgroup_oom_is_retryable_even_when_comparator_returns_one(self):
-        completed = subprocess.CompletedProcess(["systemd-run"], 1, "", "")
+        completed = subprocess.CompletedProcess(["supervise"], 1, "", "")
         with (
             mock.patch("scripts.verify_submission.verify_tool_snapshot"),
-            mock.patch("scripts.verify_submission.landrun_command", return_value=["confined"]),
-            mock.patch("scripts.verify_submission.systemd_command", return_value=["systemd-run"]),
+            mock.patch("scripts.verify_submission._BWRAP", Path("/opt/bwrap")),
+            mock.patch("scripts.verify_submission.supervisor_command", return_value=["supervise"]),
             mock.patch("scripts.verify_submission.run", return_value=completed),
             mock.patch(
-                "scripts.verify_submission.systemd_unit_outcome",
+                "scripts.verify_submission.supervisor_outcome",
                 return_value={
                     "Result": "exit-code",
                     "memory_events": {"oom": 1, "oom_kill": 1},
@@ -902,7 +900,6 @@ class VerifySubmissionTests(unittest.TestCase):
                 ["comparator", "comparator.json"],
                 cwd=REPOSITORY_ROOT,
                 environment={},
-                landrun=Path("landrun"),
                 writable_directories=[],
                 executable_paths=[],
                 tools={},
@@ -910,14 +907,10 @@ class VerifySubmissionTests(unittest.TestCase):
 
     def test_missing_cgroup_outcome_is_a_retryable_provider_error(self):
         with (
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
+            tempfile.TemporaryDirectory() as directory,
             self.assertRaises(VerificationError) as raised,
         ):
-            verifier.systemd_unit_outcome(
-                "palomar-" + "a" * 24,
-                cwd=REPOSITORY_ROOT,
-                environment={},
-            )
+            verifier.supervisor_outcome(Path(directory) / "missing-status.json")
         self.assertEqual(raised.exception.owner, "provider")
         self.assertEqual(raised.exception.code, "provider.resource_telemetry_missing")
         self.assertTrue(raised.exception.retryable)
@@ -989,8 +982,7 @@ class VerifySubmissionTests(unittest.TestCase):
                     self.assertRegex(line, expected, path.name)
         self.assertEqual(
             sorted(installers),
-            ["ci.yml", "compatibility.yml", "qualify-namespace.yml",
-             "render-challenge.yml", "submission.yml"],
+            ["compatibility.yml", "qualify-namespace.yml", "render-challenge.yml", "submission.yml"],
         )
 
     def test_every_verifier_workflow_installs_hash_pinned_dependencies(self):
@@ -2760,76 +2752,6 @@ review:
             with self.assertRaisesRegex(VerificationError, "must not use YAML merge keys"):
                 load_formalization_metadata(path)
 
-    def test_outer_landrun_policy(self):
-        command = landrun_command(
-            ["/tools/comparator", "comparator.json"],
-            landrun=Path("/tools/landrun"),
-            writable_directories=[Path("/source/.lake/build")],
-            readable_paths=[Path("/source")],
-            executable_paths=[Path("/usr"), Path("/tools/comparator")],
-            environment={
-                "PATH": "/usr/bin",
-                "HOME": "/source/.lake/config/home",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_TERMINAL_PROMPT": "0",
-                "COMPARATOR_NANODA": "/tools/nanoda_bin",
-                "PALOMAR_PROTECTED_CHALLENGE_MODULE": "PalomarCanonical123.Challenge",
-                "SECRET": "no",
-            },
-            readable_directories=(Path("/source"),),
-        )
-        self.assertEqual(
-            command[:4],
-            [
-                "/tools/landrun",
-                "--best-effort",
-                "--ldd",
-                "--add-exec",
-            ],
-        )
-        self.assertNotIn("/", command)
-        self.assertIn("/source", command)
-        self.assertNotIn("/dev", command)
-        self.assertIn("/dev/null", command)
-        self.assertIn("/source/.lake/build", command)
-        self.assertNotIn("/source/replay.hash", command)
-        self.assertIn("/tools/comparator", command)
-        self.assertIn("GIT_CONFIG_GLOBAL", command)
-        self.assertIn("GIT_CONFIG_NOSYSTEM", command)
-        self.assertIn("GIT_TERMINAL_PROMPT", command)
-        self.assertIn("COMPARATOR_NANODA", command)
-        self.assertIn("PALOMAR_PROTECTED_CHALLENGE_MODULE", command)
-        self.assertNotIn("SECRET", command)
-        self.assertIn("GIT_CONFIG_GLOBAL", command)
-        self.assertIn("GIT_CONFIG_NOSYSTEM", command)
-        self.assertIn("GIT_TERMINAL_PROMPT", command)
-        self.assertNotIn("--unrestricted-network", command)
-        self.assertEqual(command[command.index("--") + 1 :], ["/tools/comparator", "comparator.json"])
-
-        replay = landrun_command(
-            ["lake", "build"],
-            landrun=Path("/tools/landrun"),
-            writable_directories=[],
-            writable_files=[Path("/source/replay.hash")],
-            readable_paths=[Path("/source")],
-            executable_paths=[Path("/tools/lake")],
-            environment={},
-        )
-        marker = replay.index("/source/replay.hash")
-        self.assertEqual(replay[marker - 1], "--rw")
-
-        networked = landrun_command(
-            ["lake", "exe", "cache", "get"],
-            landrun=Path("landrun"),
-            writable_directories=[],
-            readable_paths=[],
-            executable_paths=[],
-            environment={},
-            unrestricted_network=True,
-        )
-        self.assertIn("--unrestricted-network", networked)
-
     def test_protected_lean_path_precedes_candidate_shadow_modules(self):
         canonical = Path("/protected/Challenge.olean")
         value = protected_lean_path(
@@ -2875,7 +2797,6 @@ review:
                     lean_prefix=lean_prefix,
                     allowlist={},
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -2916,7 +2837,6 @@ review:
                     lean_prefix=lean_prefix,
                     allowlist={},
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -2962,7 +2882,6 @@ review:
                         lean_prefix=lean_prefix,
                         allowlist={},
                         environment={},
-                        landrun=Path("/tools/landrun"),
                         readable_paths=[source],
                         executable_paths=[],
                         tools={},
@@ -2998,7 +2917,6 @@ review:
                         lean_prefix=lean_prefix,
                         allowlist={},
                         environment={},
-                        landrun=Path("/tools/landrun"),
                         readable_paths=[source],
                         executable_paths=[],
                         tools={},
@@ -3018,7 +2936,6 @@ review:
                             lean_source=Path("/source/Challenge.lean"),
                             lean=Path("/tools/lean"),
                             environment={},
-                            landrun=Path("/tools/landrun"),
                             writable_directories=[],
                             readable_paths=[],
                             executable_paths=[],
@@ -3189,6 +3106,7 @@ review:
                 nanoda=tools[3],
                 comparator_commit="a" * 40,
                 landrun_commit="b" * 40,
+                bwrap=sys.executable,
                 nanoda_commit="c" * 40,
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
@@ -3473,7 +3391,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3516,7 +3433,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3549,7 +3465,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3581,7 +3496,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3610,7 +3524,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3635,7 +3548,6 @@ review:
                         "batteries": ("leanprover-community/mathlib4", "high"),
                     },
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3753,7 +3665,6 @@ review:
                     },
                     base_env={"PATH": "/usr/bin"},
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     readable_paths=[source],
                     executable_paths=[],
                     tools={},
@@ -3887,7 +3798,7 @@ review:
             writable = root / "writable"
             writable.mkdir()
             denied = root / "denied"
-            allowed = writable / ".palomar-landrun-write-probe"
+            allowed = writable / ".palomar-write-probe"
             events = []
 
             def run_probe(command, **_kwargs):
@@ -3908,7 +3819,6 @@ review:
                     touch=Path("/usr/bin/touch"),
                     cwd=root,
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     writable_directories=[writable],
                     readable_paths=[],
                     executable_paths=[],
@@ -3933,7 +3843,7 @@ review:
             after_allowed = mock.Mock()
 
             failed = subprocess.CompletedProcess(
-                ["touch", str(writable / ".palomar-landrun-write-probe")],
+                ["touch", str(writable / ".palomar-write-probe")],
                 1,
                 "",
                 "denied",
@@ -3947,7 +3857,6 @@ review:
                     touch=Path("/usr/bin/touch"),
                     cwd=root,
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     writable_directories=[writable],
                     readable_paths=[],
                     executable_paths=[],
@@ -3970,8 +3879,7 @@ review:
             read_denied = root / "read-denied"
             positive_read = root / "positive-read"
             positive_read.write_text("readable")
-            allowed = writable / ".palomar-landrun-write-probe"
-            nested = writable / ".palomar-nested-landrun-probe"
+            allowed = writable / ".palomar-write-probe"
 
             def fail_after_creation(command, **_kwargs):
                 path = Path(command[-1])
@@ -3995,7 +3903,6 @@ review:
                     touch=Path("/usr/bin/touch"),
                     cwd=root,
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     writable_directories=[writable],
                     readable_paths=[positive_read],
                     executable_paths=[],
@@ -4003,7 +3910,6 @@ review:
                 )
 
             self.assertFalse(allowed.exists())
-            self.assertFalse(nested.exists())
             self.assertFalse(denied.exists())
             self.assertFalse(read_denied.exists())
 
@@ -4016,15 +3922,14 @@ review:
             read_denied = root / "read-denied"
             positive_read = root / "positive-read"
             positive_read.write_text("readable")
-            allowed = writable / ".palomar-landrun-write-probe"
-            nested = writable / ".palomar-nested-landrun-probe"
+            allowed = writable / ".palomar-write-probe"
 
             def escape_write(command, **_kwargs):
                 path = Path(command[-1])
                 path.touch()
                 return subprocess.CompletedProcess(
                     command,
-                    0 if path in {allowed, nested} else 1,
+                    0 if path == allowed or "palomar-host-canary" in path.name else 1,
                     "",
                     "",
                 )
@@ -4046,7 +3951,6 @@ review:
                     touch=Path("/usr/bin/touch"),
                     cwd=root,
                     environment={},
-                    landrun=Path("/tools/landrun"),
                     writable_directories=[writable],
                     readable_paths=[positive_read],
                     executable_paths=[],
@@ -4054,7 +3958,6 @@ review:
                 )
 
             self.assertFalse(allowed.exists())
-            self.assertFalse(nested.exists())
             self.assertFalse(denied.exists())
             self.assertFalse(read_denied.exists())
 
@@ -4314,134 +4217,6 @@ review:
         with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
             trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])
 
-    def test_systemd_network_namespace_defaults_closed(self):
-        def which(command):
-            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-        ):
-            confined = systemd_command(["true"], cwd=Path("/source"), environment={})
-            networked = systemd_command(
-                ["true"],
-                cwd=Path("/source"),
-                environment={},
-                unrestricted_network=True,
-            )
-        self.assertIn("--property=PrivateNetwork=yes", confined)
-        self.assertNotIn("--property=PrivateNetwork=yes", networked)
-        self.assertIn("--property=ProtectProc=invisible", confined)
-        self.assertIn("--property=ProcSubset=pid", confined)
-        self.assertIn("--property=NoNewPrivileges=yes", confined)
-        self.assertIn("--property=PrivateDevices=yes", confined)
-        self.assertIn("--property=RuntimeMaxSec=600s", confined)
-
-    def test_systemd_prefers_privileged_manager_and_drops_to_runner_identity(self):
-        def which(command):
-            if command in {"systemd-run", "sudo", "true"}:
-                return f"/usr/bin/{command}"
-            return None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-            mock.patch("scripts.verify_submission.os.getuid", return_value=1001),
-            mock.patch("scripts.verify_submission.os.getgid", return_value=1002),
-        ):
-            command = systemd_command(["true"], cwd=Path("/source"), environment={})
-
-        self.assertEqual(command[:3], ["/usr/bin/sudo", "-n", "/usr/bin/systemd-run"])
-        self.assertIn("--uid=1001", command)
-        self.assertIn("--gid=1002", command)
-        self.assertNotIn("--user", command)
-
-    def test_systemd_falls_back_to_capable_user_manager(self):
-        def which(command):
-            if command in {"systemd-run", "sudo", "true"}:
-                return f"/usr/bin/{command}"
-            return None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch(
-                "scripts.verify_submission.run",
-                side_effect=[mock.Mock(returncode=1), mock.Mock(returncode=0)],
-            ),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-        ):
-            command = systemd_command(["true"], cwd=Path("/source"), environment={})
-
-        self.assertEqual(command[:2], ["/usr/bin/systemd-run", "--user"])
-        self.assertNotIn("--uid=", " ".join(command))
-
-    def test_systemd_rejects_incapable_managers_and_environment_controls(self):
-        def which(command):
-            if command in {"systemd-run", "sudo", "true"}:
-                return f"/usr/bin/{command}"
-            return None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=1)),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-            self.assertRaisesRegex(VerificationError, "can apply the required confinement"),
-        ):
-            systemd_command(["true"], cwd=Path("/source"), environment={})
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-            self.assertRaisesRegex(VerificationError, "invalid control character"),
-        ):
-            systemd_command(
-                ["true"],
-                cwd=Path("/source"),
-                environment={"LAKE_PKG_URL_MAP": "bad\nvalue"},
-            )
-
-    def test_systemd_applies_trusted_resource_properties(self):
-        def which(command):
-            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)),
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-        ):
-            command = systemd_command(
-                ["true"],
-                cwd=Path("/source"),
-                environment={},
-                resource_properties=("MemoryMax=12G", "TasksMax=512"),
-            )
-        self.assertIn("--property=MemoryMax=12G", command)
-        self.assertIn("--property=TasksMax=512", command)
-
-    def test_named_systemd_unit_avoids_collection_and_blocking_mode(self):
-        def which(command):
-            return f"/usr/bin/{command}" if command in {"systemd-run", "true"} else None
-
-        with (
-            mock.patch("scripts.verify_submission.shutil.which", side_effect=which),
-            mock.patch("scripts.verify_submission.run", return_value=mock.Mock(returncode=0)) as probe,
-            mock.patch("scripts.verify_submission._SYSTEMD_MANAGER", None),
-        ):
-            command = systemd_command(
-                ["true"],
-                cwd=Path("/source"),
-                environment={},
-                unit_name="palomar-" + "a" * 24,
-            )
-        self.assertIn("--unit=palomar-" + "a" * 24, command)
-        self.assertNotIn("--collect", command)
-        self.assertNotIn("--property=RemainAfterExit=yes", command)
-        self.assertFalse(any(p.startswith("--unit=") for p in probe.call_args.args[0]))
-        self.assertIn("--collect", probe.call_args.args[0])
-
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")
         with mock.patch("scripts.verify_submission.sandboxed_run", return_value=proc):
@@ -4451,7 +4226,6 @@ review:
                 lake=Path("/tools/lake"),
                 printenv=Path("/usr/bin/printenv"),
                 environment={},
-                landrun=Path("/tools/landrun"),
                 writable_directories=[],
                 readable_paths=[Path("/source")],
                 executable_paths=[],

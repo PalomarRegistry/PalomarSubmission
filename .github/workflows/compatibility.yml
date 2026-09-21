@@ -117,6 +117,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24.0"
+      - name: Build pinned bubblewrap
+        run: |
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
+          echo "PALOMAR_BWRAP=$(pipeline/scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")" >> "$GITHUB_ENV"
+
       - name: Install pinned Landrun and Lean
         run: |
           CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
@@ -179,6 +185,7 @@ jobs:
           python pipeline/scripts/smoke_trusted_challenge.py \
             --source fixture \
             --landrun "$(go env GOPATH)/bin/landrun" \
+            --bwrap "$PALOMAR_BWRAP" \
             --comparator "$PWD/comparator/.lake/build/bin/comparator" \
             --lean4export "$PWD/lean4export/.lake/build/bin/lean4export" \
             --nanoda "$PWD/nanoda/target/release/nanoda_bin" \
@@ -189,6 +196,7 @@ jobs:
           python pipeline/scripts/smoke_render_module_identity.py \
             --source pipeline/tests/fixtures/cold-tauceti \
             --landrun "$(go env GOPATH)/bin/landrun" \
+            --bwrap "$PALOMAR_BWRAP" \
             --work-dir "$RUNNER_TEMP/palomar-render-module" \
             --renderer-commit "${{ github.sha }}" \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
@@ -198,6 +206,7 @@ jobs:
           python pipeline/scripts/smoke_render_module_identity.py \
             --source pipeline/tests/fixtures/legacy-proofwidgets-render \
             --landrun "$(go env GOPATH)/bin/landrun" \
+            --bwrap "$PALOMAR_BWRAP" \
             --work-dir "$RUNNER_TEMP/palomar-render-legacy-proofwidgets" \
             --renderer-commit "${{ github.sha }}" \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \

@@ -176,7 +176,14 @@ jobs:
         run: |
           CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
 
-      - name: Build, sanitize, and hash Challenge rendering under Landrun
+      - name: Build pinned bubblewrap
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
+          echo "PALOMAR_BWRAP=$(pipeline/scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")" >> "$GITHUB_ENV"
+
+      - name: Build, sanitize, and hash Challenge rendering under bubblewrap
         if: steps.prepare.outputs.ready == 'true'
         working-directory: pipeline
         run: |
@@ -184,6 +191,7 @@ jobs:
             --work-dir "$RUNNER_TEMP/palomar-render" \
             --output "$RUNNER_TEMP/palomar-render/report.json" \
             --landrun "$(go env GOPATH)/bin/landrun" \
+            --bwrap "$PALOMAR_BWRAP" \
             --renderer-commit "${{ github.sha }}" \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

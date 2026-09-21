@@ -154,11 +154,8 @@ class RenderChallengeTests(unittest.TestCase):
             cache = root / "cache"
             environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
             with mock.patch(
-                "scripts.render_challenge.run",
+                "scripts.render_challenge.sandboxed_run",
                 return_value=subprocess.CompletedProcess([], 22, "", "404"),
-            ), mock.patch(
-                "scripts.render_challenge.systemd_command",
-                side_effect=lambda command, **_kwargs: command,
             ):
                 downloaded, size = download_mathlib_cache(
                     {"0123456789abcdef"},
@@ -167,6 +164,8 @@ class RenderChallengeTests(unittest.TestCase):
                     environment=environment,
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    executable_paths=[],
+                    tools={},
                 )
         self.assertEqual((downloaded, size), (0, 0))
 
@@ -181,10 +180,7 @@ class RenderChallengeTests(unittest.TestCase):
                 return subprocess.CompletedProcess([], 22, "", "one archive was missing")
 
             with mock.patch(
-                "scripts.render_challenge.run", side_effect=download
-            ), mock.patch(
-                "scripts.render_challenge.systemd_command",
-                side_effect=lambda command, **_kwargs: command,
+                "scripts.render_challenge.sandboxed_run", side_effect=download
             ):
                 downloaded, size = download_mathlib_cache(
                     {"0123456789abcdef", "fedcba9876543210"},
@@ -193,6 +189,8 @@ class RenderChallengeTests(unittest.TestCase):
                     environment=environment,
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    executable_paths=[],
+                    tools={},
                 )
         self.assertEqual((downloaded, size), (1, len(b"archive")))
 
@@ -212,10 +210,7 @@ class RenderChallengeTests(unittest.TestCase):
                 return subprocess.CompletedProcess([], 22, "", "one archive was missing")
 
             with mock.patch(
-                "scripts.render_challenge.run", side_effect=download
-            ), mock.patch(
-                "scripts.render_challenge.systemd_command",
-                side_effect=lambda command, **_kwargs: command,
+                "scripts.render_challenge.sandboxed_run", side_effect=download
             ):
                 downloaded, size = download_mathlib_cache(
                     {first, second},
@@ -224,6 +219,8 @@ class RenderChallengeTests(unittest.TestCase):
                     environment=environment,
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    executable_paths=[],
+                    tools={},
                 )
 
         self.assertEqual(downloaded, 2)
@@ -276,7 +273,6 @@ class RenderChallengeTests(unittest.TestCase):
                     trusted_work=root,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
                     git=Path("/usr/bin/git"),
@@ -316,7 +312,6 @@ class RenderChallengeTests(unittest.TestCase):
                     trusted_work=root,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
                     git=Path("/usr/bin/git"),
@@ -411,11 +406,13 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                     {"0.1.16": fixture_digest},
                     clear=True,
                 ),
-                mock.patch("scripts.render_challenge.systemd_command", side_effect=lambda c, **k: c),
-                mock.patch("scripts.render_challenge.run", side_effect=download),
                 mock.patch(
                     "scripts.render_challenge.sandboxed_run",
-                    return_value=subprocess.CompletedProcess([], 0, "leantar 0.1.16\n", ""),
+                    side_effect=lambda command, **kwargs: (
+                        download(command)
+                        if "--output" in command
+                        else subprocess.CompletedProcess([], 0, "leantar 0.1.16\n", "")
+                    ),
                 ) as sandbox,
             ):
                 prepared = prepare_legacy_mathlib_cache_tool(
@@ -424,7 +421,6 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                     checkout=checkout,
                     trusted_work=trusted_work,
                     environment={"HOME": str(root), "TMPDIR": str(root)},
-                    landrun=Path("/tools/landrun"),
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
                     git=Path("/usr/bin/git"),
@@ -458,13 +454,7 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                 (cache / f"{digest}.ltar").write_bytes(b"archive")
                 return subprocess.CompletedProcess([], 0, "", "")
 
-            with (
-                mock.patch("scripts.render_challenge.run", side_effect=download),
-                mock.patch(
-                    "scripts.render_challenge.systemd_command",
-                    side_effect=lambda command, **_kwargs: command,
-                ),
-            ):
+            with mock.patch("scripts.render_challenge.sandboxed_run", side_effect=download):
                 downloaded, size = download_mathlib_cache(
                     {digest},
                     cache,
@@ -472,6 +462,8 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                     environment={"HOME": str(root), "TMPDIR": str(root)},
                     curl=Path("/usr/bin/curl"),
                     env_tool=Path("/usr/bin/env"),
+                    executable_paths=[],
+                    tools={},
                     preserved_tool=prepared,
                 )
 
@@ -664,7 +656,6 @@ package proofwidgets where
                     checkout=checkout,
                     environment={"HOME": str(workspace), "TMPDIR": str(workspace)},
                     lake=Path("/tools/lake"),
-                    landrun=Path("/tools/landrun"),
                     git=Path("/tools/git"),
                     executable_paths=[],
                     tools={},
@@ -737,7 +728,6 @@ package proofwidgets where
                         checkout=checkout,
                         environment={},
                         lake=Path("/tools/lake"),
-                        landrun=Path("/tools/landrun"),
                         git=Path("/tools/git"),
                         executable_paths=[],
                         tools={},
@@ -840,10 +830,9 @@ package proofwidgets where
             "writable": writable,
             "readable": workspace,
             "positive_read": challenge,
-            "write_denied": root / "render-landrun-write-denial-probe",
-            "read_denied": root / "render-landrun-read-denial-probe",
-            "allowed": writable / ".palomar-landrun-write-probe",
-            "nested": writable / ".palomar-nested-landrun-probe",
+            "write_denied": root / "render-write-denial-probe",
+            "read_denied": root / "render-read-denial-probe",
+            "allowed": writable / ".palomar-write-probe",
         }
 
     def run_renderer_confinement(self, paths: dict[str, Path]) -> None:
@@ -855,7 +844,6 @@ package proofwidgets where
             touch=Path("/usr/bin/touch"),
             cwd=paths["readable"],
             environment={},
-            landrun=Path("/tools/landrun"),
             writable_directories=[paths["writable"]],
             readable_paths=[paths["readable"]],
             executable_paths=[],
@@ -884,7 +872,7 @@ package proofwidgets where
             ):
                 self.run_renderer_confinement(paths)
 
-            for name in ("allowed", "nested", "write_denied", "read_denied"):
+            for name in ("allowed", "write_denied", "read_denied"):
                 self.assertFalse(paths[name].exists(), name)
 
     def test_renderer_confinement_rejects_a_created_denied_write(self):
@@ -896,7 +884,7 @@ package proofwidgets where
                 path.touch()
                 return subprocess.CompletedProcess(
                     command,
-                    0 if path in {paths["allowed"], paths["nested"]} else 1,
+                    0 if path == paths["allowed"] or "palomar-host-canary" in path.name else 1,
                     "",
                     "",
                 )
@@ -913,7 +901,7 @@ package proofwidgets where
             ):
                 self.run_renderer_confinement(paths)
 
-            for name in ("allowed", "nested", "write_denied", "read_denied"):
+            for name in ("allowed", "write_denied", "read_denied"):
                 self.assertFalse(paths[name].exists(), name)
 
     def test_renderer_confinement_rejects_a_readable_denial_probe(self):
@@ -924,7 +912,7 @@ package proofwidgets where
 
             def permit_every_read(command, **_kwargs):
                 path = Path(command[-1])
-                if path in {paths["allowed"], paths["nested"]}:
+                if path == paths["allowed"] or "palomar-host-canary" in path.name:
                     path.touch()
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if path == paths["write_denied"]:
@@ -942,7 +930,7 @@ package proofwidgets where
             ):
                 self.run_renderer_confinement(paths)
 
-            for name in ("allowed", "nested", "write_denied", "read_denied"):
+            for name in ("allowed", "write_denied", "read_denied"):
                 self.assertFalse(paths[name].exists(), name)
 
     def test_renderer_confinement_rejects_reachable_outbound_network(self):
@@ -953,7 +941,7 @@ package proofwidgets where
 
             def permit_network(command, **_kwargs):
                 path = Path(command[-1])
-                if path in {paths["allowed"], paths["nested"]}:
+                if path == paths["allowed"] or "palomar-host-canary" in path.name:
                     path.touch()
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if path in {paths["write_denied"], paths["read_denied"]} or str(
@@ -974,7 +962,7 @@ package proofwidgets where
             ):
                 self.run_renderer_confinement(paths)
 
-            for name in ("allowed", "nested", "write_denied", "read_denied"):
+            for name in ("allowed", "write_denied", "read_denied"):
                 self.assertFalse(paths[name].exists(), name)
 
     def test_renderer_confinement_rejects_a_sibling_process_environment(self):
@@ -983,7 +971,7 @@ package proofwidgets where
 
             def permit_proc(command, **_kwargs):
                 path = Path(command[-1])
-                if path in {paths["allowed"], paths["nested"]}:
+                if path == paths["allowed"] or "palomar-host-canary" in path.name:
                     path.touch()
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if path in {paths["write_denied"], paths["read_denied"]}:
@@ -1002,7 +990,7 @@ package proofwidgets where
             ):
                 self.run_renderer_confinement(paths)
 
-            for name in ("allowed", "nested", "write_denied", "read_denied"):
+            for name in ("allowed", "write_denied", "read_denied"):
                 self.assertFalse(paths[name].exists(), name)
 
     def test_workspace_uses_accepted_paths_without_touching_fixed_name_decoys(self):

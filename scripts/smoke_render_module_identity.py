@@ -40,6 +40,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--landrun", type=Path, required=True)
+    parser.add_argument("--bwrap", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--renderer-commit", required=True)
     parser.add_argument("--landrun-commit", required=True)
@@ -101,6 +102,7 @@ def main() -> int:
             work_dir=str(work),
             output=str(output),
             landrun=str(args.landrun),
+            bwrap=str(args.bwrap),
             renderer_commit=args.renderer_commit,
             landrun_commit=args.landrun_commit,
             workflow_url=args.workflow_url,
