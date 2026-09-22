@@ -212,6 +212,7 @@ class RealResourceBoundaryTests(unittest.TestCase):
         self.assertTrue(timeout_records, records)
         self.assertTrue(all(row["systemd_result"] is None for row in timeout_records))
 
+    @unittest.skipUnless(CGROUP_MODE, "the babysitter's deadline and grace; systemd has its own")
     def test_real_deadline_terminates_after_grace_and_is_a_timeout(self):
         started = time.monotonic()
         records, error = self.run_phase(
