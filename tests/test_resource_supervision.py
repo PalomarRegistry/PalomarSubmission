@@ -50,6 +50,9 @@ class CapacityReportTests(unittest.TestCase):
         self.assertIsNone(record["systemd_result"])
         self.assertEqual(record["systemd_result_before_cleanup"], "success")
         self.assertEqual(record["systemd_active_state"], "active")
+        self.assertEqual(record["supervisor"], "cgroup")
+        self.assertFalse(record["deadline_fired"])
+        self.assertEqual(record["rlimits_applied"], {})
 
     def test_undersized_host_emits_a_terminal_provider_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -135,7 +138,7 @@ class RealResourceBoundaryTests(unittest.TestCase):
             environment = {**os.environ, "TMPDIR": str(scratch)}
             spied = "supervisor_command" if CGROUP_MODE else "systemd_command"
             with mock.patch.object(verifier, "_SYSTEMD_MANAGER", None), \
-                 mock.patch.object(verifier, "_EXECUTION_DEADLINE", None), \
+                 mock.patch.object(verifier, "_EXECUTION_DEADLINE", verifier._EXECUTION_DEADLINE), \
                  mock.patch.object(verifier, "_RESOURCE_METRICS_PATH", metrics), \
                  mock.patch.object(verifier, "_RESOURCE_DISK_PATH", work), \
                  mock.patch.object(verifier, spied, wraps=getattr(verifier, spied)) as command_spy:
@@ -194,16 +197,34 @@ class RealResourceBoundaryTests(unittest.TestCase):
         self.assertTrue(any(row.get("systemd_result") == "oom-kill" for row in records), records)
 
     def test_real_timeout_is_inconclusive_and_stops_the_unit(self):
+        # The verifier's own budget expires while the babysitter still has a
+        # long deadline: the parent's TimeoutExpired stands, nothing is
+        # inferred about the workload, and the cgroup is torn down anyway.
         started = time.monotonic()
-        records, _ = self.run_phase(
-            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
-            timeout=2, extra_properties=("RuntimeMaxSec=60s", "TimeoutStopSec=60s"),
-            expected=subprocess.TimeoutExpired,
-        )
+        with mock.patch.object(verifier, "_EXECUTION_DEADLINE", time.monotonic() + 3):
+            records, _ = self.run_phase(
+                "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+                timeout=60, extra_properties=("RuntimeMaxSec=60s", "TimeoutStopSec=60s"),
+                expected=subprocess.TimeoutExpired,
+            )
         self.assertLess(time.monotonic() - started, 30)
         timeout_records = [row for row in records if row.get("supervisor_timeout")]
         self.assertTrue(timeout_records, records)
         self.assertTrue(all(row["systemd_result"] is None for row in timeout_records))
+
+    def test_real_deadline_terminates_after_grace_and_is_a_timeout(self):
+        started = time.monotonic()
+        records, error = self.run_phase(
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+            timeout=2, extra_properties=("TimeoutStopSec=2s",), expected=verifier.ResourceExhausted,
+        )
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertIn("timeout", str(error))
+        cgroup_records = [row for row in records if row["phase"].endswith(":cgroup")]
+        self.assertTrue(
+            any(row["systemd_result"] == "timeout" and row["deadline_fired"] for row in cgroup_records),
+            records,
+        )
 
     def test_deliberate_exit_137_is_not_oom(self):
         records, error = self.run_phase("raise SystemExit(137)", expected=verifier.VerificationError)
@@ -264,6 +285,16 @@ class CgroupSupervisorCommandTests(unittest.TestCase):
         self.assertNotIn("SECRET=x", argv)
         self.assertEqual(argv[-2:], ["--", "/bin/true"])
 
+    def test_sandbox_descriptors_are_handed_to_the_babysitter(self):
+        with mock.patch.object(verifier, "supervisor_bootstrap", return_value=["/b", "--"]):
+            argv = verifier.supervisor_command(
+                ["/bin/true"], cwd=Path("/work"), environment={}, unit_name="palomar-" + "c" * 24,
+                status_path=Path("/s/status.json"), liveness_path=Path("/s/liveness"),
+                sandbox_status_fd=3, pass_files={4: Path("/s/seccomp.bpf")},
+            )
+        self.assertEqual(argv[argv.index("--sandbox-status-fd") + 1], "3")
+        self.assertEqual(argv[argv.index("--pass-file") + 1], "4=/s/seccomp.bpf")
+
     def test_runtime_max_overrides_the_phase_deadline(self):
         with mock.patch.object(verifier, "supervisor_bootstrap", return_value=["/b", "--"]):
             argv = verifier.supervisor_command(
@@ -315,6 +346,20 @@ class BwrapCommandTests(unittest.TestCase):
         self.assertNotIn("SECRET", joined)
         self.assertEqual(argv[-3:], ["--", "/usr/bin/lake", "build"])
 
+    def test_merged_usr_symlinks_precede_every_bind(self):
+        with mock.patch.object(verifier, "_merged_usr_symlinks", return_value=[("/bin", "usr/bin")]):
+            argv = self.build(executable_paths=[Path("/usr"), Path("/bin/touch")])
+        self.assertLess(argv.index("--symlink"), argv.index("--ro-bind"))
+        first = argv.index("--symlink")
+        self.assertEqual(argv[first:first + 3], ["--symlink", "usr/bin", "/bin"])
+        self.assertIn("--ro-bind /bin/touch /bin/touch", " ".join(argv))
+
+    def test_sandbox_status_and_seccomp_descriptors(self):
+        argv = self.build(sandbox_status_fd=3, seccomp_fd=4)
+        self.assertEqual(argv[argv.index("--json-status-fd") + 1], "3")
+        self.assertEqual(argv[argv.index("--seccomp") + 1], "4")
+        self.assertLess(argv.index("--seccomp"), argv.index("--"))
+
     def test_network_and_nested_sandbox_switches(self):
         argv = self.build(unrestricted_network=True, nested_sandbox=True)
         self.assertNotIn("--unshare-net", argv)
@@ -352,7 +397,8 @@ class CgroupSupervisorOutcomeTests(unittest.TestCase):
     def test_success_is_read_from_the_status_and_cleans_up(self):
         outcome, cleanup = self.outcome(self.finished())
         self.assertEqual(outcome["Result"], "success")
-        self.assertEqual(outcome["ExecMainCode"], "exited")
+        self.assertEqual(outcome["ExecMainCode"], "1")
+        self.assertEqual(outcome["ActiveState"], "inactive")
         self.assertEqual(outcome["MemoryPeak"], "4096")
         self.assertEqual(outcome["CPUUsageNSec"], "1500000")
         self.assertEqual(outcome["ControlGroup"], "/palomar/run-1/palomar-" + "c" * 24)
@@ -365,6 +411,8 @@ class CgroupSupervisorOutcomeTests(unittest.TestCase):
         ))
         self.assertEqual(outcome["Result"], "oom-kill")
         self.assertEqual(outcome["memory_events"], {"oom": 1, "oom_kill": 2})
+        self.assertEqual(outcome["ExecMainCode"], "2")
+        self.assertEqual(outcome["ActiveState"], "failed")
 
     def test_deadline_is_a_timeout_and_plain_exits_are_exit_code(self):
         timed_out = self.finished(exit_status=None, term_signal=15, deadline_fired=True)
@@ -384,6 +432,19 @@ class CgroupSupervisorOutcomeTests(unittest.TestCase):
             self.outcome(self.finished(placement_ok=False, placement_error="fail:OSError:x"))
         self.assertEqual(raised.exception.code, "provider.resource_telemetry_missing")
 
+    def test_launcher_sandbox_and_teardown_failures_are_infrastructure(self):
+        for fields in (
+            {"exit_status": 127, "launch_error": "fail:FileNotFoundError:/usr/bin/env"},
+            {"exit_status": 1, "sandbox_started": False},
+            {"exit_status": 0, "populated_after_kill": True},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(verifier.VerificationError) as raised:
+                self.outcome(self.finished(**fields))
+            self.assertEqual(raised.exception.code, "provider.resource_telemetry_missing")
+        # A sandbox that reported its child, and an exit of the payload, is a candidate result.
+        outcome, _ = self.outcome(self.finished(exit_status=3, sandbox_started=True))
+        self.assertEqual(outcome["Result"], "exit-code")
+
     def test_parent_timeout_reports_no_result_and_still_cleans_up(self):
         started = {"state": "started", "cgroup": "/sys/fs/cgroup/palomar/run-1/palomar-" + "d" * 24}
         outcome, cleanup = self.outcome(started, supervisor_timeout=True)
@@ -401,3 +462,56 @@ class CgroupSupervisorOutcomeTests(unittest.TestCase):
         outcome, cleanup = self.outcome(self.finished(cgroup="/etc/../sys/fs/cgroup/x"))
         self.assertEqual(outcome["ControlGroup"], "")
         cleanup.assert_not_called()
+
+
+class SeccompFilterTests(unittest.TestCase):
+    """Run the hand-written BPF through a small interpreter and check its decisions."""
+
+    def run_filter(self, program, *, nr, arch=None, args=(0, 0, 0, 0, 0, 0)):
+        import struct
+
+        from scripts import seccomp_filter as f
+        arch = f.AUDIT_ARCH_X86_64 if arch is None else arch
+        data = struct.pack("<IIQ6Q", nr, arch, 0, *args)  # struct seccomp_data
+        instructions = [struct.unpack_from("<HBBI", program, i) for i in range(0, len(program), 8)]
+        pc, acc = 0, 0
+        for _ in range(1000):
+            code, jt, jf, k = instructions[pc]
+            cls = code & 0x07
+            if cls == f.BPF_LD:
+                acc = struct.unpack_from("<I", data, k)[0]
+                pc += 1
+            elif cls == f.BPF_JMP:
+                op = code & 0xF0
+                taken = (acc == k) if op == f.BPF_JEQ else bool(acc & k)
+                pc += 1 + (jt if taken else jf)
+            elif cls == f.BPF_RET:
+                return k
+            else:
+                raise AssertionError(f"unexpected instruction class {cls}")
+        raise AssertionError("filter did not terminate")
+
+    def test_denies_tracing_personality_and_setuid_creation(self):
+        from scripts import seccomp_filter as f
+        program = f.build(deny_unix_sockets=True)
+        deny = f.SECCOMP_RET_ERRNO | f.EPERM
+        for name in ("ptrace", "process_vm_readv", "process_vm_writev", "personality"):
+            self.assertEqual(self.run_filter(program, nr=f.NR[name]), deny, name)
+        self.assertEqual(self.run_filter(program, nr=f.NR["chmod"], args=(0, 0o4755, 0, 0, 0, 0)), deny)
+        self.assertEqual(self.run_filter(program, nr=f.NR["fchmodat"], args=(0, 0, 0o2755, 0, 0, 0)), deny)
+        allow = f.SECCOMP_RET_ALLOW
+        self.assertEqual(self.run_filter(program, nr=f.NR["chmod"], args=(0, 0o755, 0, 0, 0, 0)), allow)
+        self.assertEqual(self.run_filter(program, nr=f.NR["socket"], args=(f.AF_UNIX, 1, 0, 0, 0, 0)), deny)
+        self.assertEqual(self.run_filter(program, nr=f.NR["socket"], args=(2, 1, 0, 0, 0, 0)), allow)
+        # Anything else, including a syscall number nobody listed, is allowed.
+        self.assertEqual(self.run_filter(program, nr=0), f.SECCOMP_RET_ALLOW)
+        self.assertEqual(self.run_filter(program, nr=999), f.SECCOMP_RET_ALLOW)
+
+    def test_unix_sockets_can_be_permitted_and_foreign_abis_are_killed(self):
+        from scripts import seccomp_filter as f
+        program = f.build(deny_unix_sockets=False)
+        unix = self.run_filter(program, nr=f.NR["socket"], args=(f.AF_UNIX, 1, 0, 0, 0, 0))
+        self.assertEqual(unix, f.SECCOMP_RET_ALLOW)
+        self.assertEqual(self.run_filter(program, nr=f.NR["ptrace"]), f.SECCOMP_RET_ERRNO | f.EPERM)
+        self.assertEqual(self.run_filter(program, nr=0, arch=0x40000003), f.SECCOMP_RET_KILL_PROCESS)
+        self.assertEqual(self.run_filter(program, nr=f.X32_SYSCALL_BIT | 1), f.SECCOMP_RET_KILL_PROCESS)

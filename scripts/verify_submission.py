@@ -33,7 +33,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
-from scripts import submission_contract  # noqa: E402
+from scripts import (  # noqa: E402
+    seccomp_filter,
+    submission_contract,
+)
 from scripts.orcid_validation import validate_records as validate_orcid_records  # noqa: E402
 from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
@@ -2687,6 +2690,10 @@ _BWRAP: Path | None = (
 )
 SUPERVISOR_PARENT_MARGIN_SECONDS = 15
 SUPERVISOR_DEFAULT_GRACE_SECONDS = 30
+# Descriptors the babysitter hands the sandbox: bwrap reports on the first
+# (`--json-status-fd`) and reads its seccomp filter from the second.
+SANDBOX_STATUS_FD = 3
+SECCOMP_FD = 4
 
 
 @dataclass(frozen=True)
@@ -2838,6 +2845,8 @@ def supervisor_command(
     unit_name: str,
     status_path: Path,
     liveness_path: Path,
+    sandbox_status_fd: int | None = None,
+    pass_files: dict[int, Path] | None = None,
 ) -> list[str]:
     """Wrap one phase in the babysitter, itself started inside a delegated cgroup."""
     if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
@@ -2858,6 +2867,10 @@ def supervisor_command(
         "--status", str(status_path),
         "--liveness", str(liveness_path),
     ]
+    if sandbox_status_fd is not None:
+        result.extend(["--sandbox-status-fd", str(sandbox_status_fd)])
+    for descriptor, path in sorted((pass_files or {}).items()):
+        result.extend(["--pass-file", f"{descriptor}={path}"])
     for key, value in limits.cgroup.items():
         result.extend(["--limit", f"{key}={value}"])
     for key, value in limits.rlimits.items():
@@ -2893,7 +2906,7 @@ def _cleanup_phase_cgroup(cgroup: Path) -> None:
         except OSError:
             break
         time.sleep(0.05)
-    for path in (cgroup, cgroup.parent / "supervisor"):
+    for path in (cgroup / "leaf", cgroup, cgroup.parent / "supervisor"):
         try:
             path.rmdir()
         except OSError:
@@ -2949,6 +2962,18 @@ def supervisor_outcome(
             raise _supervisor_unavailable(
                 f"confined phase never joined its cgroup: {report.get('placement_error')}"
             )
+        if finished and report.get("launch_error"):
+            raise _supervisor_unavailable(
+                f"confined phase launcher failed to start: {report.get('launch_error')}"
+            )
+        if finished and report.get("sandbox_started") is False:
+            # bwrap never reported a child: its own setup failed. Whatever exit
+            # status resulted is the sandbox's, not the candidate's.
+            raise _supervisor_unavailable("sandbox failed to start for the confined phase")
+        if finished and report.get("populated_after_kill"):
+            raise _supervisor_unavailable(
+                "confined phase left processes the supervisor could not remove"
+            )
         exit_status = report.get("exit_status")
         term_signal = report.get("term_signal")
         oom_group = report.get("memory_events", {}).get("oom_group_kill")
@@ -2966,10 +2991,13 @@ def supervisor_outcome(
             result = "signal"
         cpu_stat = report.get("cpu_stat", {})
         usage_usec = cpu_stat.get("usage_usec") if isinstance(cpu_stat, dict) else None
+        # `ExecMainCode`/`ActiveState` keep systemd's encodings for existing
+        # readers: CLD_EXITED=1, CLD_KILLED=2; a finished unit that did not
+        # succeed reads `failed`.
         outcome: dict[str, Any] = {
             "Result": result,
-            "ActiveState": "inactive" if finished else "active",
-            "ExecMainCode": ("exited" if exit_status is not None else "killed") if finished else "",
+            "ActiveState": ("inactive" if result == "success" else "failed") if finished else "active",
+            "ExecMainCode": ("1" if exit_status is not None else "2") if finished else "",
             "ExecMainStatus": str(exit_status if exit_status is not None else term_signal or ""),
             "ControlGroup": "/" + str(cgroup.relative_to("/sys/fs/cgroup")) if cgroup else "",
             "MemoryPeak": str(report.get("memory_peak") or ""),
@@ -2980,6 +3008,8 @@ def supervisor_outcome(
             "liveness_lost": bool(report.get("liveness_lost")),
             "cpu_max_applied": bool(report.get("limits_applied", {}).get("cpu.max", False)),
             "pids_events": report.get("pids_events", {}),
+            "rlimits_applied": report.get("rlimits_applied", {}),
+            "sandbox_started": report.get("sandbox_started"),
         }
         return outcome
     finally:
@@ -2999,6 +3029,8 @@ def bwrap_command(
     readable_directories: tuple[Path, ...] | list[Path] = (),
     unrestricted_network: bool = False,
     nested_sandbox: bool = False,
+    sandbox_status_fd: int | None = None,
+    seccomp_fd: int | None = None,
 ) -> list[str]:
     """Build the outer, submission-wide bubblewrap policy.
 
@@ -3019,7 +3051,12 @@ def bwrap_command(
         # /var in the kernel phases); the mount points must exist in our root.
         for point in ("/home", "/root", "/run/user", "/var"):
             result.extend(["--dir", point])
-    bound: set[Path] = set()
+    # Merged-usr hosts keep /bin, /sbin, /lib and /lib64 as symlinks into /usr;
+    # the allowlisted root needs the same symlinks for #! lines and the loader.
+    # They come first so that a later bind of, say, /bin/touch lands under the
+    # symlink's target instead of turning /bin into a directory of its own.
+    for name, target in _merged_usr_symlinks():
+        result.extend(["--symlink", target, name])
     # Debian's alternatives farm is where /usr/bin/cc, awk, which and friends
     # point; without it those are dangling symlinks. Landlock never restricted
     # symlink traversal, so the old policy never had to name it. It holds only
@@ -3027,14 +3064,7 @@ def bwrap_command(
     alternatives = Path("/etc/alternatives")
     system = {alternatives} if alternatives.is_dir() else set()
     for path in sorted({*(readable_paths or []), *readable_directories, *executable_paths, *system}):
-        bound.add(path)
         result.extend(["--ro-bind", str(path), str(path)])
-    # Merged-usr hosts keep /bin, /sbin, /lib and /lib64 as symlinks into /usr;
-    # the allowlisted root needs the same symlinks for #! lines and the loader.
-    for name in ("/bin", "/sbin", "/lib", "/lib64"):
-        top = Path(name)
-        if top.is_symlink() and top not in bound and not any(top == p or top in p.parents for p in bound):
-            result.extend(["--symlink", os.readlink(top), name])
     for directory in sorted(set(writable_directories)):
         result.extend(["--bind", str(directory), str(directory)])
     for path in sorted(set(writable_files)):
@@ -3054,7 +3084,21 @@ def bwrap_command(
     if not nested_sandbox:
         result.append("--disable-userns")
     result.extend(["--die-with-parent", "--new-session", "--cap-drop", "ALL"])
+    if sandbox_status_fd is not None:
+        result.extend(["--json-status-fd", str(sandbox_status_fd)])
+    if seccomp_fd is not None:
+        result.extend(["--seccomp", str(seccomp_fd)])
     return [*result, "--", *command]
+
+
+def _merged_usr_symlinks() -> list[tuple[str, str]]:
+    """The host's top-level merged-usr symlinks, as (name, target) pairs."""
+    result = []
+    for name in ("/bin", "/sbin", "/lib", "/lib64"):
+        top = Path(name)
+        if top.is_symlink():
+            result.append((name, os.readlink(top)))
+    return result
 
 
 def append_resource_outcome(
@@ -3076,6 +3120,13 @@ def append_resource_outcome(
         "memory_peak_bytes": numeric("MemoryPeak"),
         "cpu_usage_nanoseconds": numeric("CPUUsageNSec"),
         "memory_events": outcome.get("memory_events", {"oom": 0, "oom_kill": 0}),
+        # The `systemd_*` names above are historical; the values come from the
+        # cgroup supervisor, whose own evidence is recorded alongside.
+        "supervisor": "cgroup",
+        "deadline_fired": bool(outcome.get("deadline_fired", False)),
+        "cpu_max_applied": bool(outcome.get("cpu_max_applied", False)),
+        "pids_events_max": int((outcome.get("pids_events") or {}).get("max", 0) or 0),
+        "rlimits_applied": dict(outcome.get("rlimits_applied") or {}),
     }
     if supervisor_timeout:
         record["systemd_result_before_cleanup"] = outcome.get("Result")
@@ -3118,6 +3169,8 @@ def sandboxed_run(
             readable_directories=[cwd],
             unrestricted_network=unrestricted_network,
             nested_sandbox=nested_sandbox,
+            sandbox_status_fd=SANDBOX_STATUS_FD,
+            seccomp_fd=SECCOMP_FD,
         )
     else:
         confined = landrun_command(
@@ -3150,6 +3203,10 @@ def sandboxed_run(
             "--disk-path",
             str(_RESOURCE_DISK_PATH or cwd),
             "--cgroup-accounting",
+            *(
+                ["--pass-fd", str(SANDBOX_STATUS_FD), "--pass-fd", str(SECCOMP_FD)]
+                if cgroup_supervisor else []
+            ),
             "--",
             *confined,
         ]
@@ -3158,6 +3215,7 @@ def sandboxed_run(
         return _cgroup_supervised_run(
             command, confined, cwd=cwd, environment=environment, timeout=timeout, check=check,
             resource_properties=properties, unit_name=unit_name, phase=phase, tools=tools,
+            unrestricted_network=unrestricted_network,
         )
     confined_command = systemd_command(
         confined,
@@ -3240,13 +3298,20 @@ def _cgroup_supervised_run(
     unit_name: str,
     phase: str,
     tools: dict[Path, str],
+    unrestricted_network: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    # The status file and liveness FIFO live in a verifier-owned directory the
-    # payload cannot see: bwrap gives it a private /tmp and binds nothing here.
+    # The status file, liveness FIFO and seccomp filter live in a verifier-owned
+    # directory the payload cannot see: bwrap gives it a private /tmp and binds
+    # nothing here.
     with tempfile.TemporaryDirectory(prefix="palomar-supervisor-") as directory:
         status_path = Path(directory) / "status.json"
         liveness_path = Path(directory) / "liveness"
         os.mkfifo(liveness_path, 0o600)
+        filter_path = Path(directory) / "seccomp.bpf"
+        filter_path.write_bytes(seccomp_filter.build(deny_unix_sockets=True))
+        limits = translate_resource_properties(resource_properties)
+        deadline = limits.deadline if limits.deadline is not None else timeout
+        grace = limits.grace if limits.grace is not None else SUPERVISOR_DEFAULT_GRACE_SECONDS
         confined_command = supervisor_command(
             confined,
             cwd=cwd,
@@ -3256,15 +3321,19 @@ def _cgroup_supervised_run(
             unit_name=unit_name,
             status_path=status_path,
             liveness_path=liveness_path,
+            sandbox_status_fd=SANDBOX_STATUS_FD,
+            pass_files={SECCOMP_FD: filter_path},
         )
         # O_RDWR never blocks on a FIFO; holding it keeps a writer present until
         # this process exits, which is precisely what the babysitter watches for.
         liveness = os.open(liveness_path, os.O_RDWR | os.O_CLOEXEC)
         try:
             try:
+                # The babysitter owns the deadline and the grace; the parent
+                # only steps in once both have been given their full time.
                 proc = run(
                     confined_command, cwd=cwd, env=os.environ.copy(),
-                    timeout=timeout + SUPERVISOR_PARENT_MARGIN_SECONDS, check=False,
+                    timeout=deadline + grace + SUPERVISOR_PARENT_MARGIN_SECONDS, check=False,
                 )
             except subprocess.TimeoutExpired:
                 # The babysitter itself overran its deadline plus grace; the

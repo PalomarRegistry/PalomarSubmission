@@ -8,6 +8,7 @@ import json
 import os
 import resource
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -78,6 +79,10 @@ def main() -> int:
         "--cgroup-accounting", action="store_true",
         help="this observer runs in a cgroup dedicated to the phase; prefer its accounting",
     )
+    parser.add_argument(
+        "--pass-fd", action="append", type=int, default=[],
+        help="inherited descriptor the workload must still see (sandbox status, seccomp filter)",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command
@@ -90,8 +95,21 @@ def main() -> int:
     initial_free = shutil.disk_usage(args.disk_path).free
     minimum_free = initial_free
     peak_tasks = 1
-    child = subprocess.Popen(command)
+    child = subprocess.Popen(command, pass_fds=args.pass_fd)
     finished = threading.Event()
+
+    # At the deadline the supervisor terminates the workload, not this
+    # observer: forward the signal and keep waiting so the usage record still
+    # gets written. A second one, or SIGKILL, ends the observer too.
+    def forward(signum, frame):  # noqa: ANN001
+        signal.signal(signum, signal.SIG_DFL)
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
 
     def sample() -> None:
         nonlocal minimum_free, peak_tasks

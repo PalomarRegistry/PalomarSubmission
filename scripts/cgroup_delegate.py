@@ -146,7 +146,7 @@ def is_populated(path: Path) -> bool:
         return True  # unknown: treat as in use
 
 
-def sweep_stale() -> int:
+def sweep_stale(*, locked: bool = False) -> int:
     """Remove run directories no process lives in any more.
 
     Only *empty* runs are removed. A populated run belongs to a verifier that is
@@ -158,7 +158,8 @@ def sweep_stale() -> int:
     removed = 0
     lock = os.open(SUBTREE, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not locked:
+            fcntl.flock(lock, fcntl.LOCK_EX)
         for run in SUBTREE.glob("run-*"):
             if is_populated(run):
                 continue
@@ -206,11 +207,19 @@ def main(argv: list[str]) -> int:
         raise DelegationError("no command to run in the delegated subtree")
 
     report = bootstrap()
-    report["stale_runs_removed"] = sweep_stale()
-    run_dir = SUBTREE / f"run-{secrets.token_hex(8)}"
-    run_dir.mkdir()
-    write(run_dir / "cgroup.procs", str(os.getpid()))
-    chown_tree(run_dir, args.uid, args.gid)
+    # One lock covers the sweep and this run's creation and placement, so a
+    # concurrent bootstrap cannot mistake a run that exists but is not yet
+    # populated for a stale one.
+    lock = os.open(SUBTREE, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        report["stale_runs_removed"] = sweep_stale(locked=True)
+        run_dir = SUBTREE / f"run-{secrets.token_hex(8)}"
+        run_dir.mkdir()
+        write(run_dir / "cgroup.procs", str(os.getpid()))
+        chown_tree(run_dir, args.uid, args.gid)
+    finally:
+        os.close(lock)
     report["run_cgroup"] = str(run_dir)
     if args.report:
         with open(args.report, "w", encoding="utf-8") as handle:

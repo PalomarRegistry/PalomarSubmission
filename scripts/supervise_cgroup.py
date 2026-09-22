@@ -20,8 +20,12 @@ on a systemd host, or a subtree a root helper created, entered and chowned
 before dropping privileges and exec'ing this script. That cgroup is
 ``--parent self``. The babysitter moves itself into ``<parent>/supervisor``
 (cgroup v2 forbids controllers on a cgroup that still has processes of its own),
-enables the controllers on the parent, and creates ``<parent>/<name>`` for the
-workload. Nothing here ever needs to write a cgroup it does not own.
+enables the controllers on the parent, and creates ``<parent>/<name>`` carrying
+the limits, with the workload one level further down in ``<name>/leaf``. The
+extra level matters: bubblewrap gives the payload its own cgroup namespace
+rooted at ``leaf``, so even where the kernel lets a namespace root rewrite its
+own controller files (no ``nsdelegate``), the limits live in a cgroup the
+payload cannot see. Nothing here ever needs to write a cgroup it does not own.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ CGROUP_ROOT = Path("/sys/fs/cgroup")
 # while max is still unset.
 LIMIT_ORDER = ("memory.oom.group", "memory.swap.max", "memory.high", "memory.max", "pids.max", "cpu.max")
 BEST_EFFORT_LIMITS = {"cpu.max"}
-POPULATED_WAIT_SECONDS = 10.0
+POPULATED_WAIT_SECONDS = 30.0
 POLL_SECONDS = 0.2
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_PDEATHSIG = 1
@@ -72,10 +76,14 @@ def write(path: Path, value: str) -> None:
 
 
 def read_procs(cgroup: Path) -> list[int]:
-    try:
-        return [int(p) for p in (cgroup / "cgroup.procs").read_text().split()]
-    except (OSError, ValueError):
-        return []
+    """Every process in the cgroup and its descendants."""
+    pids: list[int] = []
+    for directory in (cgroup, *[p for p in cgroup.rglob("*") if p.is_dir()]):
+        try:
+            pids.extend(int(p) for p in (directory / "cgroup.procs").read_text().split())
+        except (OSError, ValueError):
+            continue
+    return pids
 
 
 def populated(cgroup: Path) -> bool | None:
@@ -89,8 +97,11 @@ def populated(cgroup: Path) -> bool | None:
     return None
 
 
-def kill_tree(cgroup: Path) -> None:
-    """Terminate everything in the cgroup, whatever it did to signal handling."""
+def kill_tree(cgroup: Path) -> bool:
+    """Terminate everything in the cgroup, whatever it did to signal handling.
+
+    Returns whether the cgroup was observed empty afterwards.
+    """
     try:
         write(cgroup / "cgroup.kill", "1")
     except OSError:
@@ -116,6 +127,7 @@ def kill_tree(cgroup: Path) -> None:
     deadline = time.monotonic() + POPULATED_WAIT_SECONDS
     while populated(cgroup) and time.monotonic() < deadline:
         time.sleep(0.05)
+    return populated(cgroup) is False
 
 
 def write_status(path: Path | None, payload: dict) -> None:
@@ -139,6 +151,31 @@ def parse_pairs(values: list[str], what: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def open_liveness(path: str) -> int:
+    """Open the verifier's FIFO and prove a writer is present right now.
+
+    A FIFO reader that has never seen a writer gets no ``POLLHUP``, so a
+    verifier that died before this process opened the FIFO would otherwise go
+    unnoticed. A non-blocking read settles it: ``EAGAIN`` means a writer holds
+    the other end, end-of-file means nobody does.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if os.read(fd, 1) == b"":
+            raise SupervisorError("verifier is not holding the liveness FIFO")
+    except BlockingIOError:
+        pass
+    return fd
+
+
+def wait_status(status: int) -> tuple[int | None, int | None]:
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status), None
+    if os.WIFSIGNALED(status):
+        return None, os.WTERMSIG(status)
+    return None, None
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--parent", required=True, help="cgroup directory, or `self`")
@@ -153,6 +190,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--status")
     parser.add_argument("--liveness", help="FIFO whose writer is the verifier; EOF means it died")
     parser.add_argument("--stdout", help="file that receives the workload's stdout")
+    parser.add_argument(
+        "--sandbox-status-fd", type=int,
+        help="descriptor the sandbox reports on (bwrap --json-status-fd); a phase whose "
+             "sandbox never started is an infrastructure failure, not a candidate result",
+    )
+    parser.add_argument(
+        "--pass-file", action="append", default=[],
+        help="FD=PATH: open PATH read-only and hand it to the workload as descriptor FD",
+    )
     parser.add_argument("--setenv", action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -179,13 +225,25 @@ def main(argv: list[str]) -> int:
         rlimits.append((getattr(resource, attr), int(val)))
         _, hard = resource.getrlimit(getattr(resource, attr))
         rlimits_effective[key] = int(val) if hard == resource.RLIM_INFINITY else min(int(val), hard)
+    passed_files: list[tuple[int, int]] = []
+    for key, val in parse_pairs(args.pass_file, "pass-file"):
+        if not key.isdigit() or int(key) < 3:
+            raise SupervisorError(f"pass-file descriptor must be 3 or above: {key!r}")
+        passed_files.append((int(key), os.open(val, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)))
+    if args.sandbox_status_fd is not None and args.sandbox_status_fd < 3:
+        raise SupervisorError("sandbox status descriptor must be 3 or above")
     env = dict(parse_pairs(args.setenv, "setenv"))
     status_path = Path(args.status) if args.status else None
     cwd = Path(args.cwd)
 
+    # Liveness is checked before anything is created: a verifier that is
+    # already gone gets no workload at all.
+    liveness_fd = open_liveness(args.liveness) if args.liveness else None
+
     parent = own_cgroup() if args.parent == "self" else Path(args.parent)
     name = args.name or f"palomar-{secrets.token_hex(12)}"
     cgroup = parent / name
+    leaf = cgroup / "leaf"
     started = time.monotonic()
 
     # Leaf trick: a cgroup with processes cannot enable controllers for its
@@ -193,9 +251,8 @@ def main(argv: list[str]) -> int:
     supervisor_leaf = parent / "supervisor"
     supervisor_leaf.mkdir(exist_ok=True)
     write(supervisor_leaf / "cgroup.procs", str(os.getpid()))
-    wanted = "+memory +pids"
     try:
-        write(parent / "cgroup.subtree_control", wanted)
+        write(parent / "cgroup.subtree_control", "+memory +pids")
     except OSError as error:
         raise SupervisorError(f"cannot enable controllers on {parent}: {error}") from error
     try:
@@ -221,22 +278,51 @@ def main(argv: list[str]) -> int:
             else:
                 kill_tree(cgroup)
                 raise SupervisorError(f"cannot apply {key}={val} on {cgroup}: {error}") from error
+    # The limits stay on `cgroup`; the workload lives in `leaf` beneath it.
+    try:
+        write(cgroup / "cgroup.subtree_control", "+memory +pids")
+        if cpu_delegated:
+            write(cgroup / "cgroup.subtree_control", "+cpu")
+    except OSError as error:
+        raise SupervisorError(f"cannot enable controllers on {cgroup}: {error}") from error
+    leaf.mkdir()
 
-    # Placement acknowledgement travels over a pipe the child writes only after
-    # it has joined the cgroup and applied its rlimits; the parent refuses to
-    # count a run that never acknowledged.
+    # Placement acknowledgement travels over a close-on-exec pipe: the child
+    # writes `placed` after it has joined the cgroup and applied its rlimits,
+    # and the pipe closes by itself when execve succeeds. Anything after
+    # `placed` is therefore a launch failure, which the verifier must never
+    # attribute to the candidate.
     ack_r, ack_w = os.pipe()
     stdout_fd = None
     if args.stdout:
         stdout_fd = os.open(args.stdout, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    sandbox_r = sandbox_w = None
+    if args.sandbox_status_fd is not None:
+        sandbox_r, sandbox_w = os.pipe()
+    # Every descriptor the child must install at a fixed number is first lifted
+    # above that range, so installing one cannot clobber another still waiting.
+    installs: list[tuple[int, int]] = list(passed_files)
+    if sandbox_w is not None:
+        installs.append((args.sandbox_status_fd, sandbox_w))
+    if stdout_fd is not None:
+        installs.append((1, stdout_fd))
+    ceiling = max((target for target, _ in installs), default=2) + 1
     pid = os.fork()
     if pid == 0:  # child
         try:
             os.close(ack_r)
-            if stdout_fd is not None:
-                os.dup2(stdout_fd, 1)
-                os.close(stdout_fd)
-            write(cgroup / "cgroup.procs", str(os.getpid()))
+            if sandbox_r is not None:
+                os.close(sandbox_r)
+            lifted = []
+            for target, source in installs:
+                while source < ceiling:
+                    source = os.dup(source)
+                lifted.append((target, source))
+            for target, source in lifted:
+                os.dup2(source, target)  # dup2 clears close-on-exec on the target
+            for _, source in lifted:
+                os.close(source)
+            write(leaf / "cgroup.procs", str(os.getpid()))
             for rl, value in rlimits:
                 # An unprivileged process cannot raise a hard limit; the ceiling
                 # is then the inherited hard limit, which the status records.
@@ -248,8 +334,7 @@ def main(argv: list[str]) -> int:
             libc = ctypes.CDLL(None, use_errno=True)
             libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
             libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
-            os.write(ack_w, b"ok\n")
-            os.close(ack_w)
+            os.write(ack_w, b"placed\n")
             os.execve(command[0], command, env)
         except BaseException as error:  # noqa: BLE001 -- must not return into the parent's code
             try:
@@ -258,29 +343,47 @@ def main(argv: list[str]) -> int:
                 pass
             os._exit(127)
     os.close(ack_w)
+    if sandbox_w is not None:
+        os.close(sandbox_w)
     if stdout_fd is not None:
         os.close(stdout_fd)
+    for _, source in passed_files:
+        os.close(source)
     ack = b""
-    while not ack.endswith(b"\n"):
+    while True:
         chunk = os.read(ack_r, 256)
         if not chunk:
             break
         ack += chunk
     os.close(ack_r)
-    placement_ok = ack == b"ok\n"
+    placement_ok = ack.startswith(b"placed\n")
+    launch_error = ack[len(b"placed\n"):].decode(errors="replace").strip() if placement_ok else ""
     placement_error = None if placement_ok else ack.decode(errors="replace").strip()
 
     stop = threading.Event()
+    sandbox_started: bool | None = None if sandbox_r is None else False
 
-    def on_liveness_lost() -> None:
-        stop.set()
+    def watch_sandbox() -> None:
+        nonlocal sandbox_started
+        buffered = b""
+        while True:
+            try:
+                chunk = os.read(sandbox_r, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buffered += chunk
+            if b'"child-pid"' in buffered:
+                sandbox_started = True
+        os.close(sandbox_r)
 
-    if args.liveness:
+    if sandbox_r is not None:
+        threading.Thread(target=watch_sandbox, daemon=True).start()
+
+    if liveness_fd is not None:
         # The verifier holds the FIFO open O_RDWR for the run's lifetime and
-        # never writes; POLLHUP on the read side means every writer is gone,
-        # including the case where it died before this process started.
-        liveness_fd = os.open(args.liveness, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-
+        # never writes; POLLHUP on the read side means every writer is gone.
         def watch() -> None:
             poller = select.poll()
             poller.register(liveness_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
@@ -295,7 +398,7 @@ def main(argv: list[str]) -> int:
                     continue
                 except OSError:
                     break
-            on_liveness_lost()
+            stop.set()
         threading.Thread(target=watch, daemon=True).start()
 
     def on_signal(signum, frame):  # noqa: ANN001
@@ -304,36 +407,47 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
+    # The direct child is the trusted launcher (observer, then bwrap). At the
+    # deadline the workload gets SIGTERM and the grace period; the launcher is
+    # left alone so that it can still collect its evidence, and the whole tree
+    # is killed once the leader has exited and either the grace has elapsed or
+    # nothing is left.
     deadline_fired = False
     exit_status: int | None = None
     term_signal: int | None = None
     term_sent_at: float | None = None
+    leader_exited = False
+    killed = False
     while True:
-        wpid, status = os.waitpid(pid, os.WNOHANG)
-        if wpid == pid:
-            if os.WIFEXITED(status):
-                exit_status = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                term_signal = os.WTERMSIG(status)
-            break
+        if not leader_exited:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                leader_exited = True
+                exit_status, term_signal = wait_status(status)
         now = time.monotonic()
         if stop.is_set():
+            killed = True
             kill_tree(cgroup)
-            deadline_fired = deadline_fired or False
         elif not deadline_fired and now - started >= args.deadline:
             deadline_fired = True
             term_sent_at = now
             for p in read_procs(cgroup):
+                if p == pid:
+                    continue
                 try:
                     os.kill(p, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
         elif deadline_fired and term_sent_at is not None and now - term_sent_at >= args.grace:
+            killed = True
             kill_tree(cgroup)
+        if leader_exited:
+            grace_pending = deadline_fired and not killed and populated(cgroup)
+            if not grace_pending:
+                break
         time.sleep(POLL_SECONDS)
     # KillMode=control-group: nothing the workload left behind survives the phase.
-    kill_tree(cgroup)
-    still_populated = populated(cgroup)
+    emptied = kill_tree(cgroup)
 
     def read_int(path: Path) -> int | None:
         try:
@@ -359,21 +473,24 @@ def main(argv: list[str]) -> int:
         "deadline_fired": deadline_fired, "liveness_lost": stop.is_set(),
         "elapsed": round(time.monotonic() - started, 3),
         "placement_ok": placement_ok, "placement_error": placement_error,
+        "launch_error": launch_error or None,
+        "sandbox_started": sandbox_started,
         "cpu_delegated": cpu_delegated, "limits_applied": applied,
         "rlimits_applied": rlimits_effective,
         "memory_events": read_kv(cgroup / "memory.events"),
         "memory_peak": read_int(cgroup / "memory.peak"),
         "pids_events": read_kv(cgroup / "pids.events"),
         "cpu_stat": read_kv(cgroup / "cpu.stat"),
-        "populated_after_kill": still_populated,
+        "populated_after_kill": not emptied,
     })
     if args.collect:
-        for _ in range(20):
-            try:
-                cgroup.rmdir()
-                break
-            except OSError:
-                time.sleep(0.1)
+        for directory in (leaf, cgroup):
+            for _ in range(20):
+                try:
+                    directory.rmdir()
+                    break
+                except OSError:
+                    time.sleep(0.1)
     if stop.is_set() and exit_status is None and term_signal is None:
         return 143
     if exit_status is not None:
@@ -385,7 +502,12 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except SupervisorError as error:
-        # The one thing that may reach stderr: a babysitter that could not even
-        # start is an infrastructure fault, and the verifier classifies it so.
-        sys.stderr.write(f"supervise_cgroup: {error}\n")
+        # The status file is the only diagnostic channel that is not the
+        # payload's; stderr is left to the workload.
+        if "--status" in sys.argv:
+            try:
+                write_status(Path(sys.argv[sys.argv.index("--status") + 1]),
+                             {"state": "failed", "error": str(error)})
+            except (OSError, ValueError, IndexError):
+                pass
         sys.exit(125)
