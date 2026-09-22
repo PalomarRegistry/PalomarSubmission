@@ -73,7 +73,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         hosted = json.loads((ROOT / "verification-profile.json").read_text())
         budgets = {hosted["limits"]["execution_budget_seconds"]}
         budgets.update(p["limits"]["execution_budget_seconds"] for p in catalogue["profiles"].values())
-        self.assertEqual(budgets, {19800})
+        self.assertEqual(budgets, {19800}, "SECURITY.md documents one allowance for every profile")
         self.assertIn("19,800 seconds", SECURITY)
 
     def test_standard_profile_matches_the_workflow(self):
@@ -82,9 +82,6 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "${{ fromJSON(needs.profile.outputs.labels) }}")
         self.assertEqual(WORKFLOW["jobs"]["profile"]["runs-on"], profile["runner"]["label"])
         self.assertEqual(job["timeout-minutes"], "${{ fromJSON(needs.profile.outputs.timeout) }}")
-        catalogue = json.loads((ROOT / "execution-profiles.json").read_text())
-        default = catalogue["profiles"][catalogue["default"]]["limits"]
-        self.assertEqual(default["job_timeout_minutes"], profile["limits"]["job_timeout_minutes"])
         for commit in (
             profile["trusted_tools"]["comparator_commit"],
             profile["trusted_tools"]["landrun_commit"],

@@ -32,9 +32,16 @@ class VerificationProfileTests(unittest.TestCase):
         ), self.assertRaisesRegex(VerificationProfileError, "profile requires"):
             check_host(profile, Path(temporary))
 
-    def test_namespace_is_the_default_and_the_hosted_profile_stays_selectable(self):
+    def test_an_omitted_selection_follows_the_catalogue_default(self):
+        from scripts.verification_profile import default_profile_id
         with mock.patch.dict("os.environ", {}, clear=True):
-            profile = load_profile()
+            self.assertEqual(load_profile()["id"], default_profile_id())
+            catalogue = json.loads(Path("execution-profiles.json").read_text())
+            self.assertEqual(default_profile_id(), catalogue["default"])
+
+    def test_namespace_profile_and_the_hosted_profile_are_both_selectable(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            profile = load_profile("palomar-namespace-16x32-v1")
             self.assertEqual(profile["id"], "palomar-namespace-16x32-v1")
             self.assertEqual(profile["runner"]["provider"], "namespace")
             self.assertEqual(profile["runner"]["labels"][1], "namespace-features:container.privileged=true")

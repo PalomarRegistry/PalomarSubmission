@@ -671,21 +671,6 @@ def verification_profile_evidence() -> dict[str, Any]:
     }
 
 
-def applied_limits_evidence() -> dict[str, Any]:
-    """The cgroup and rlimit values every ordinary phase actually runs under.
-
-    The profile publishes percentages; these are the numbers written to the
-    phase cgroup on this host. `memory.swap.max` and `cpu.max` are absent when
-    no property sets them, meaning the phase inherits the runner's setting.
-    """
-    limits = translate_resource_properties(permissive_resource_properties())
-    return {
-        "cgroup": dict(limits.cgroup),
-        "rlimits": dict(limits.rlimits),
-        "supervisor": "cgroup",
-    }
-
-
 def correction_source_evidence(
     correction: dict[str, Any],
     *,
@@ -5030,7 +5015,6 @@ def execute(args: argparse.Namespace) -> int:
             os.environ.get("PALOMAR_JOB_STARTED_AT"),
             getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
         )
-        report.setdefault("verification_profile", {})["applied_limits"] = applied_limits_evidence()
         comparator = Path(args.comparator).resolve()
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()

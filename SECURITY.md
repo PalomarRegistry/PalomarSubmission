@@ -423,8 +423,10 @@ records that host snapshot and the effective percentage-based memory thresholds;
 it is not a reservation or a promise about later free capacity.
 
 Each approved execution profile supplies 330 minutes of verifier capacity
-inside its 350-minute job; the report records the profile, its resolved runner
-and the cgroup and rlimit values actually applied (`applied_limits`). The cgroup supervisor's termination results identify
+inside its 350-minute job; the report records the profile and its resolved
+runner, and every phase's record carries the cgroup limits and rlimits the
+supervisor actually applied on that host (`rlimits_applied` is the value after
+clamping to the runner's hard limit). The cgroup supervisor's termination results identify
 OOM, timeout, and resource failures; the parent's wall-clock timeout is also
 trusted.
 An arbitrary payload exit status or printed OOM message is not such evidence.
