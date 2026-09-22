@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,7 +58,6 @@ class VerificationProfileTests(unittest.TestCase):
             self.assertEqual(load_profile()["id"], "palomar-standard-v1")
 
     def test_resolver_outputs_carry_the_render_timeout(self):
-        import subprocess, sys, os
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "out"
             subprocess.run(
