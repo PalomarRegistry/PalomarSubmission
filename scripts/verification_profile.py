@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,52 @@ class VerificationProfileError(RuntimeError):
     pass
 
 
-def load_profile(identifier: str | None = None, *, allow_disabled: bool = False) -> dict[str, Any]:
-    identifier = identifier or os.environ.get("PALOMAR_EXECUTION_PROFILE") or "palomar-standard-v1"
+HOSTED_PROFILE = "palomar-standard-v1"
+NAMESPACE_LABEL_RE = re.compile(r"^nscloud-ubuntu-24\.04-amd64-\d+x\d+-with-features$")
+NAMESPACE_FEATURE_LABEL = "namespace-features:container.privileged=true"
+CATALOGUE_LIMITS = {"minimum_host_memory_bytes", "job_timeout_minutes", "execution_budget_seconds"}
+
+
+def load_catalogue() -> dict[str, Any]:
+    """The approved execution profiles beside the hosted one, validated by shape."""
+    catalogue = json.loads(CATALOGUE_PATH.read_text(encoding="utf-8"))
+    if (
+        not isinstance(catalogue, dict)
+        or catalogue.get("schema_version") != 1
+        or not isinstance(catalogue.get("default"), str)
+        or not isinstance(catalogue.get("profiles"), dict)
+    ):
+        raise VerificationProfileError("approved execution profile catalogue is malformed")
+    for identifier, selected in catalogue["profiles"].items():
+        if not re.fullmatch(r"palomar-[a-z0-9-]+-v\d+", identifier) or identifier == HOSTED_PROFILE:
+            raise VerificationProfileError(f"execution profile id is malformed: {identifier}")
+        runner = selected.get("runner") if isinstance(selected, dict) else None
+        limits = selected.get("limits") if isinstance(selected, dict) else None
+        if (
+            set(selected) != {"runner", "limits"}
+            or not isinstance(runner, dict)
+            or set(runner) != {"provider", "label", "labels", "architecture"}
+            or runner["provider"] != "namespace"
+            or runner["architecture"] != "x86_64"
+            or not NAMESPACE_LABEL_RE.fullmatch(str(runner["label"]))
+            or runner["labels"] != [runner["label"], NAMESPACE_FEATURE_LABEL]
+            or not isinstance(limits, dict)
+            or set(limits) != CATALOGUE_LIMITS
+            or any(type(limits[name]) is not int or limits[name] <= 0 for name in CATALOGUE_LIMITS)
+            or limits["execution_budget_seconds"] > limits["job_timeout_minutes"] * 60
+        ):
+            raise VerificationProfileError(f"approved execution profile is malformed: {identifier}")
+    if catalogue["default"] != HOSTED_PROFILE and catalogue["default"] not in catalogue["profiles"]:
+        raise VerificationProfileError("approved execution profile catalogue default is not approved")
+    return catalogue
+
+
+def default_profile_id() -> str:
+    return load_catalogue()["default"]
+
+
+def load_profile(identifier: str | None = None) -> dict[str, Any]:
+    identifier = identifier or os.environ.get("PALOMAR_EXECUTION_PROFILE") or default_profile_id()
     value = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
@@ -69,30 +114,11 @@ def load_profile(identifier: str | None = None, *, allow_disabled: bool = False)
             or any(character not in "0123456789abcdef" for character in commit)
         ):
             raise VerificationProfileError(f"verification profile {name} is not a commit")
-    if identifier != "palomar-standard-v1":
-        catalogue = json.loads(CATALOGUE_PATH.read_text(encoding="utf-8"))
-        selected = catalogue.get("profiles", {}).get(identifier)
+    if identifier != HOSTED_PROFILE:
+        catalogue = load_catalogue()
+        selected = catalogue["profiles"].get(identifier)
         if not isinstance(selected, dict):
             raise VerificationProfileError("execution profile is not approved")
-        if (
-            catalogue.get("schema_version") != 1
-            or catalogue.get("default") != "palomar-standard-v1"
-            or set(selected) != {"runner", "limits"}
-            or selected.get("limits") != {"minimum_host_memory_bytes": 30064771072}
-            or selected.get("runner")
-            != {
-                "provider": "namespace",
-                "architecture": "x86_64",
-                "label": "nscloud-ubuntu-24.04-amd64-16x32-with-features",
-                "labels": [
-                    "nscloud-ubuntu-24.04-amd64-16x32-with-features",
-                    "namespace-features:container.privileged=true",
-                ],
-            }
-        ):
-            raise VerificationProfileError("approved execution profile catalogue is malformed")
-        if not allow_disabled and os.environ.get("PALOMAR_NAMESPACE_ENABLED") != "true":
-            raise VerificationProfileError("Namespace is disabled pending confinement qualification")
         value["id"] = identifier
         value["runner"] = selected["runner"]
         value["limits"].update(selected["limits"])
@@ -189,9 +215,8 @@ def main() -> int:
     parser.add_argument("--disk-path", type=Path)
     parser.add_argument("--profile", default=None)
     parser.add_argument("--resolve", action="store_true")
-    parser.add_argument("--allow-disabled", action="store_true")
     args = parser.parse_args()
-    profile = load_profile(args.profile, allow_disabled=args.allow_disabled)
+    profile = load_profile(args.profile)
     if args.resolve:
         runner = profile["runner"]
         labels = runner.get("labels", [runner["label"]])
@@ -200,6 +225,7 @@ def main() -> int:
             "profile": profile["id"],
             "digest": profile_digest(profile),
             "timeout": str(profile["limits"]["job_timeout_minutes"]),
+            "budget": str(profile["limits"]["execution_budget_seconds"]),
         }
         with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
             for name, value in outputs.items():

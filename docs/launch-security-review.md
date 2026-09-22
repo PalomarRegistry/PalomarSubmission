@@ -105,10 +105,13 @@ The maintained test surfaces are:
   contracts with Template commit
   `d720f59dbe2edd29e0b9273c113139cdb1f24d2b`; scheduled and manual checks
   reconcile those two files with Template `main`. The cold job
-  uses the hosted tier's 330-minute capacity measured from the start of its
-  350-minute job, so setup time and candidate execution consume one allowance.
-  The verifier's trusted default supports twelve hours on a suitably configured
-  worker; hosted-tier exhaustion is retryable infrastructure, not rejection.
+  runs where production verification runs, on the catalogue's default
+  execution profile (`execution-profiles.json`: a privileged Namespace
+  `nscloud-ubuntu-24.04-amd64-16x32` runner), with that profile's job timeout
+  and execution budget (350 minutes and 330 minutes of verifier capacity), so
+  setup time and candidate execution consume one allowance. The verifier's
+  trusted default supports twelve hours on a suitably configured worker;
+  budget exhaustion is retryable infrastructure, not rejection.
   Pull requests first classify their merge-base diff. Only changes confined to
   `README.md`, `SECURITY.md`, `LICENSE`,
   `docs/comparator-declaration-closure.md`,

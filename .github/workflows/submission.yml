@@ -37,9 +37,9 @@ on:
         default: full
         type: string
       execution_profile:
-        description: Approved operator-selected execution profile
+        description: Approved operator-selected execution profile (blank selects the catalogue default)
         required: false
-        default: palomar-standard-v1
+        default: ""
         type: string
       execution_attempt:
         description: Audited operator attempt identifier
@@ -73,9 +73,9 @@ on:
           - full
           - correction
       execution_profile:
-        description: Approved operator-selected execution profile
+        description: Approved operator-selected execution profile (blank selects the catalogue default)
         required: false
-        default: palomar-standard-v1
+        default: ""
         type: string
       execution_attempt:
         description: Audited operator attempt identifier
@@ -93,6 +93,8 @@ jobs:
       contents: read
     outputs:
       labels: ${{ steps.resolve.outputs.labels }}
+      timeout: ${{ steps.resolve.outputs.timeout }}
+      budget: ${{ steps.resolve.outputs.budget }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -103,15 +105,13 @@ jobs:
         id: resolve
         env:
           PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
-          PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
         run: python3 scripts/verification_profile.py --resolve
   verify:
     needs: profile
     runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
     env:
       PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
-      PALOMAR_NAMESPACE_ENABLED: ${{ vars.PALOMAR_NAMESPACE_ENABLED }}
-    timeout-minutes: 350
+    timeout-minutes: ${{ fromJSON(needs.profile.outputs.timeout) }}
     permissions:
       contents: read
     # Dispatches queue per admitted request; admission concurrency belongs to
@@ -276,7 +276,7 @@ jobs:
             --comparator-commit 575674928e239f5bc452aab72d1dd7b0f1326494 \
             --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
             --nanoda-commit 68d5ca9db226849b41a6fff59d796ff19d0a8840 \
-            --execution-budget-seconds 19800 \
+            --execution-budget-seconds "${{ needs.profile.outputs.budget }}" \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Finalize interrupted mechanical report
