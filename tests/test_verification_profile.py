@@ -61,7 +61,8 @@ class VerificationProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "out"
             subprocess.run(
-                [sys.executable, "scripts/verification_profile.py", "--resolve", "--profile", "palomar-standard-v1"],
+                [sys.executable, "scripts/verification_profile.py", "--resolve",
+                 "--profile", "palomar-standard-v1"],
                 check=True, env={**os.environ, "GITHUB_OUTPUT": str(output)},
             )
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
