@@ -65,9 +65,15 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         self.assertIn("There is no\ninput for the submitter's GitHub identity", SECURITY)
 
     def test_the_documented_wall_clock_allowance_is_the_one_dispatched(self):
-        # The verifier's own default is larger than what this workflow asks
-        # for, so the number a reader can check is the one on the command line.
-        self.assertIn("--execution-budget-seconds 19800", WORKFLOW_TEXT)
+        # The verifier's own default is larger than what the workflow asks for,
+        # so the number a reader can check is the one the resolved profile
+        # hands the command line; every approved profile grants the same one.
+        self.assertIn('--execution-budget-seconds "${{ needs.profile.outputs.budget }}"', WORKFLOW_TEXT)
+        catalogue = json.loads((ROOT / "execution-profiles.json").read_text())
+        hosted = json.loads((ROOT / "verification-profile.json").read_text())
+        budgets = {hosted["limits"]["execution_budget_seconds"]}
+        budgets.update(p["limits"]["execution_budget_seconds"] for p in catalogue["profiles"].values())
+        self.assertEqual(budgets, {19800}, "SECURITY.md documents one allowance for every profile")
         self.assertIn("19,800 seconds", SECURITY)
 
     def test_standard_profile_matches_the_workflow(self):
@@ -75,11 +81,7 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         job = WORKFLOW["jobs"]["verify"]
         self.assertEqual(job["runs-on"], "${{ fromJSON(needs.profile.outputs.labels) }}")
         self.assertEqual(WORKFLOW["jobs"]["profile"]["runs-on"], profile["runner"]["label"])
-        self.assertEqual(job["timeout-minutes"], profile["limits"]["job_timeout_minutes"])
-        self.assertIn(
-            f"--execution-budget-seconds {profile['limits']['execution_budget_seconds']}",
-            WORKFLOW_TEXT,
-        )
+        self.assertEqual(job["timeout-minutes"], "${{ fromJSON(needs.profile.outputs.timeout) }}")
         for commit in (
             profile["trusted_tools"]["comparator_commit"],
             profile["trusted_tools"]["landrun_commit"],

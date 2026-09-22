@@ -87,16 +87,39 @@ jobs:
             echo "cold_build=$cold_build" >> "$GITHUB_OUTPUT"
           fi
 
-  cold_build:
+  profile:
     needs: scope
     if: needs.scope.outputs.cold_build == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      labels: ${{ steps.resolve.outputs.labels }}
+      profile: ${{ steps.resolve.outputs.profile }}
+      timeout: ${{ steps.resolve.outputs.timeout }}
+      budget: ${{ steps.resolve.outputs.budget }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: resolve
+        run: python3 scripts/verification_profile.py --resolve
+
+  cold_build:
+    needs: [scope, profile]
+    if: needs.scope.outputs.cold_build == 'true'
+    # The cold build runs where production verification runs: the catalogue's
+    # default profile, with its timeout and budget.
+    runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
+    timeout-minutes: ${{ fromJSON(needs.profile.outputs.timeout) }}
     steps:
       - name: Record verification deadline origin
         run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        # Reclaims the preinstalled toolchains of the GitHub-hosted image only.
+        if: needs.profile.outputs.profile == 'palomar-standard-v1'
         with:
           tool-cache: false
           android: true
@@ -180,7 +203,7 @@ jobs:
       - name: Exercise cold trusted and candidate builds
         env:
           ELAN_TOOLCHAIN: leanprover/lean4:v4.31.0-rc2
-          PALOMAR_EXECUTION_BUDGET_SECONDS: "19800"
+          PALOMAR_EXECUTION_BUDGET_SECONDS: ${{ needs.profile.outputs.budget }}
         run: |
           python pipeline/scripts/smoke_trusted_challenge.py \
             --source fixture \

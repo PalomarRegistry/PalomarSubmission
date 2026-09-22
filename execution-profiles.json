@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "default": "palomar-standard-v1",
+  "default": "palomar-namespace-16x32-v1",
   "profiles": {
     "palomar-namespace-16x32-v1": {
       "runner": {
@@ -13,7 +13,9 @@
         "architecture": "x86_64"
       },
       "limits": {
-        "minimum_host_memory_bytes": 30064771072
+        "minimum_host_memory_bytes": 30064771072,
+        "job_timeout_minutes": 350,
+        "execution_budget_seconds": 19800
       }
     }
   }

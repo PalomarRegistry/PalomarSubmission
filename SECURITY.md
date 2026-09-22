@@ -365,7 +365,8 @@ from the submitted toolchain's own release tag rather than from a table, because
 a table is a second place for the answer to be wrong and it kept being the wrong
 one. Pin changes require security review and an end-to-end comparison probe.
 
-This design still trusts the GitHub-hosted Linux runner, the Linux kernel with
+This design still trusts the runner (the privileged Namespace container of the
+default execution profile, or the GitHub-hosted image of the hosted profile), the Linux kernel with
 its namespace, cgroup and Landlock implementations, bubblewrap, Git and its
 protocol parsers, the selected
 Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
@@ -421,8 +422,11 @@ minimum host memory, and free workspace before tool installation. The report
 records that host snapshot and the effective percentage-based memory thresholds;
 it is not a reservation or a promise about later free capacity.
 
-The automatic GitHub-hosted tier supplies 330 minutes of verifier capacity
-inside its 350-minute job. The cgroup supervisor's termination results identify
+Each approved execution profile supplies 330 minutes of verifier capacity
+inside its 350-minute job; the report records the profile and its resolved
+runner, and every phase's record carries the cgroup limits and rlimits the
+supervisor actually applied on that host (`rlimits_applied` is the value after
+clamping to the runner's hard limit). The cgroup supervisor's termination results identify
 OOM, timeout, and resource failures; the parent's wall-clock timeout is also
 trusted.
 An arbitrary payload exit status or printed OOM message is not such evidence.

@@ -26,7 +26,7 @@ jobs:
           CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
           echo "PALOMAR_TEST_LANDRUN=$(go env GOPATH)/bin/landrun" >> "$GITHUB_ENV"
       - name: Record effective capacity
-        run: python scripts/verification_profile.py --profile palomar-namespace-16x32-v1 --allow-disabled --disk-path "$RUNNER_TEMP"
+        run: python scripts/verification_profile.py --profile palomar-namespace-16x32-v1 --disk-path "$RUNNER_TEMP"
       - name: Require the existing resource and confinement boundaries
         run: |
           python -m unittest -v \

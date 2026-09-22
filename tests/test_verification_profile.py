@@ -13,8 +13,8 @@ from scripts.verification_profile import (
 
 
 class VerificationProfileTests(unittest.TestCase):
-    def test_checked_in_profile_is_closed_and_current(self):
-        profile = load_profile()
+    def test_hosted_profile_is_closed_and_current(self):
+        profile = load_profile("palomar-standard-v1")
         self.assertEqual(profile["id"], "palomar-standard-v1")
         self.assertEqual(profile["runner"]["label"], "ubuntu-24.04")
         self.assertEqual(
@@ -32,16 +32,52 @@ class VerificationProfileTests(unittest.TestCase):
         ), self.assertRaisesRegex(VerificationProfileError, "profile requires"):
             check_host(profile, Path(temporary))
 
-    def test_namespace_is_explicit_and_disabled_until_qualification(self):
+    def test_an_omitted_selection_follows_the_catalogue_default(self):
+        from scripts.verification_profile import default_profile_id
         with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(load_profile()["id"], "palomar-standard-v1")
-            with self.assertRaisesRegex(VerificationProfileError, "disabled"):
-                load_profile("palomar-namespace-16x32-v1")
-            with self.assertRaisesRegex(VerificationProfileError, "not approved"):
-                load_profile("arbitrary-runner")
-            profile = load_profile("palomar-namespace-16x32-v1", allow_disabled=True)
+            self.assertEqual(load_profile()["id"], default_profile_id())
+            catalogue = json.loads(Path("execution-profiles.json").read_text())
+            self.assertEqual(default_profile_id(), catalogue["default"])
+
+    def test_namespace_profile_and_the_hosted_profile_are_both_selectable(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            profile = load_profile("palomar-namespace-16x32-v1")
+            self.assertEqual(profile["id"], "palomar-namespace-16x32-v1")
+            self.assertEqual(profile["runner"]["provider"], "namespace")
+            self.assertEqual(profile["runner"]["labels"][1], "namespace-features:container.privileged=true")
             self.assertEqual(profile["limits"]["execution_budget_seconds"], 19800)
             self.assertEqual(profile["limits"]["job_timeout_minutes"], 350)
+            self.assertEqual(profile["limits"]["minimum_host_memory_bytes"], 28 * 1024**3)
+            self.assertEqual(load_profile("palomar-standard-v1")["runner"]["provider"], "github-hosted")
+            with self.assertRaisesRegex(VerificationProfileError, "not approved"):
+                load_profile("arbitrary-runner")
+        with mock.patch.dict("os.environ", {"PALOMAR_EXECUTION_PROFILE": "palomar-standard-v1"}):
+            self.assertEqual(load_profile()["id"], "palomar-standard-v1")
+
+    def test_catalogue_is_validated_by_shape(self):
+        from scripts.verification_profile import load_catalogue
+        good = json.loads(Path("execution-profiles.json").read_text())
+        namespace = good["profiles"]["palomar-namespace-16x32-v1"]
+        feature = "namespace-features:container.privileged=true"
+        bad_cases = {
+            "unknown default": {**good, "default": "palomar-other-v1"},
+            "foreign label": {**good, "profiles": {"palomar-x-v1": {
+                **namespace,
+                "runner": {**namespace["runner"], "label": "ubuntu-24.04",
+                           "labels": ["ubuntu-24.04", feature]},
+            }}},
+            "budget over timeout": {**good, "profiles": {"palomar-namespace-16x32-v1": {
+                **namespace,
+                "limits": {"minimum_host_memory_bytes": 1, "job_timeout_minutes": 1,
+                           "execution_budget_seconds": 61},
+            }}},
+        }
+        for name, catalogue in bad_cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw, \
+                 mock.patch("scripts.verification_profile.CATALOGUE_PATH", Path(raw) / "c.json"):
+                (Path(raw) / "c.json").write_text(json.dumps(catalogue))
+                with self.assertRaises(VerificationProfileError):
+                    load_catalogue()
 
     def test_effective_capacity_observes_parent_cgroup_limits(self):
         from scripts.verification_profile import effective_cpu_count, effective_memory_bytes
