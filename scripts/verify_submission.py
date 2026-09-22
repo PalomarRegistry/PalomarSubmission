@@ -3219,15 +3219,24 @@ def verify_sandbox_confinement(
         ]
         if Path("/dev/shm").is_dir():
             canaries.append(Path("/dev/shm") / f"palomar-host-canary-{token}")
-        for canary in canaries:
-            if canary.exists():
-                raise VerificationError(f"host canary path already exists: {canary}")
+        created: list[Path] = []
         try:
             for canary in canaries:
-                canary.write_text("palomar host canary\n", encoding="utf-8")
+                # Exclusive creation: a pre-existing path, symlink included,
+                # is somebody else's and is never removed by this probe.
+                try:
+                    with open(canary, "x", encoding="utf-8") as handle:
+                        handle.write("palomar host canary\n")
+                except FileExistsError as error:
+                    raise VerificationError(f"host canary path already exists: {canary}") from error
+                created.append(canary)
             host_userns = os.readlink("/proc/self/ns/user")
+            # Beyond the namespaces, the seccomp filter's controls: no tracing
+            # of the parent (the standalone comparator shares the sandbox with
+            # the candidate build it runs), no AF_UNIX sockets, no setuid
+            # files, no personality changes.
             namespace_script = (
-                "import ctypes, os, sys\n"
+                "import ctypes, errno, os, socket, sys\n"
                 "failures = []\n"
                 "if open('/proc/1/environ', 'rb').read(): failures.append('pid 1 carries an environment')\n"
                 "libc = ctypes.CDLL(None, use_errno=True)\n"
@@ -3235,7 +3244,19 @@ def verify_sandbox_confinement(
                 "if os.readlink('/proc/self/ns/user') == sys.argv[1]:\n"
                 "    failures.append('host user namespace')\n"
                 "for raw in sys.argv[2:]:\n"
-                "    if os.path.exists(raw): failures.append('host canary visible: ' + raw)\n"
+                "    if os.path.lexists(raw): failures.append('host canary visible: ' + raw)\n"
+                "if libc.ptrace(16, os.getppid(), 0, 0) != -1 or ctypes.get_errno() != errno.EPERM:\n"
+                "    failures.append('ptrace of the parent permitted')\n"
+                "try:\n"
+                "    socket.socket(socket.AF_UNIX).close(); failures.append('AF_UNIX socket permitted')\n"
+                "except PermissionError: pass\n"
+                "if libc.personality(0x0040000) != -1: failures.append('personality change permitted')\n"
+                "probe = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'palomar-setuid-probe')\n"
+                "open(probe, 'w').close()\n"
+                "try:\n"
+                "    os.chmod(probe, 0o4755); failures.append('setuid file creation permitted')\n"
+                "except PermissionError: pass\n"
+                "os.unlink(probe)\n"
                 "print('; '.join(failures))\n"
                 "sys.exit(1 if failures else 0)\n"
             )
@@ -3250,7 +3271,7 @@ def verify_sandbox_confinement(
                 check=False,
             )
         finally:
-            for canary in canaries:
+            for canary in created:
                 canary.unlink(missing_ok=True)
         if namespaces.returncode:
             raise VerificationError("outer sandbox namespace controls failed" + detail(namespaces))

@@ -169,6 +169,33 @@ class RenderChallengeTests(unittest.TestCase):
                 )
         self.assertEqual((downloaded, size), (0, 0))
 
+    def test_mathlib_cache_download_policy_exposes_only_the_cache_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            (root / "source").mkdir()
+            (root / "source" / "Challenge.lean").write_text("theorem probe : True := trivial\n")
+            calls = []
+
+            def record(command, **kwargs):
+                calls.append(kwargs)
+                return subprocess.CompletedProcess(command, 22, "", "404")
+
+            with mock.patch("scripts.render_challenge.sandboxed_run", side_effect=record):
+                download_mathlib_cache(
+                    {"0123456789abcdef"}, cache, trusted_work=root,
+                    environment={"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")},
+                    curl=Path("/usr/bin/curl"), env_tool=Path("/usr/bin/env"),
+                    executable_paths=[Path("/usr")], tools={},
+                )
+        self.assertTrue(calls)
+        for kwargs in calls:
+            self.assertEqual(kwargs["cwd"], root / "mathlib-cache-download")
+            self.assertEqual(kwargs["writable_directories"], [cache])
+            self.assertTrue(kwargs["unrestricted_network"])
+            for path in kwargs["readable_paths"]:
+                self.assertFalse(path.is_relative_to(root), path)
+
     def test_partial_mathlib_cache_is_used_and_the_build_may_fill_the_rest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -204,7 +231,7 @@ class RenderChallengeTests(unittest.TestCase):
             configurations = []
 
             def download(*_args, **_kwargs):
-                configurations.append((root / "mathlib-cache-download.conf").read_text())
+                configurations.append((root / "mathlib-cache-download" / "download.conf").read_text())
                 digest = first if len(configurations) == 1 else second
                 (cache / f"{digest}.ltar").write_bytes(digest.encode())
                 return subprocess.CompletedProcess([], 22, "", "one archive was missing")
@@ -394,8 +421,11 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                 bundle.addfile(binary_info, io.BytesIO(content))
             fixture_digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
 
-            def download(command, **_kwargs):
+            download_policies = []
+
+            def download(command, **kwargs):
                 archive = Path(command[command.index("--output") + 1])
+                download_policies.append((archive, kwargs))
                 shutil.copyfile(fixture, archive)
                 return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -409,7 +439,7 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
                 mock.patch(
                     "scripts.render_challenge.sandboxed_run",
                     side_effect=lambda command, **kwargs: (
-                        download(command)
+                        download(command, **kwargs)
                         if "--output" in command
                         else subprocess.CompletedProcess([], 0, "leantar 0.1.16\n", "")
                     ),
@@ -430,6 +460,11 @@ def install := s!"https://github.com/digama0/leangz/releases/download/v{LEANTARV
 
             self.assertIsNotNone(prepared)
             assert prepared is not None
+            # The archive download can write its own fresh directory and nothing else.
+            (archive, policy), = download_policies
+            self.assertEqual(archive.parent, trusted_work / "mathlib-cache-tool-download")
+            self.assertEqual(policy["writable_directories"], [archive.parent])
+            self.assertEqual(policy["cwd"], archive.parent)
             self.assertEqual(prepared.path.read_bytes(), b"trusted leantar fixture")
             self.assertEqual(prepared.sha256, hashlib.sha256(prepared.path.read_bytes()).hexdigest())
             self.assertEqual(

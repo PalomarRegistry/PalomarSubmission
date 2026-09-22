@@ -12,8 +12,19 @@ set -euo pipefail
 BWRAP_VERSION="0.12.0"
 BWRAP_SHA256="9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314"
 PREFIX="${1:?usage: install_bwrap.sh <install-dir>}"
+case "$PREFIX" in
+  /*) ;;
+  *) echo "install_bwrap: the install directory must be an absolute path" >&2; exit 2 ;;
+esac
+if [[ "$PREFIX" =~ [[:space:]] ]]; then
+  # The path is written into an AppArmor profile attachment, where a space
+  # would need quoting that the profile syntax and this script do not share.
+  echo "install_bwrap: the install directory must not contain whitespace" >&2
+  exit 2
+fi
 
 mkdir -p "$PREFIX"
+PREFIX="$(cd "$PREFIX" && pwd -P)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \

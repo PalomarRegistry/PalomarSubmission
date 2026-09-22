@@ -2022,11 +2022,15 @@ def download_mathlib_cache(
     except Exception:
         held_tool.unlink(missing_ok=True)
         raise
-    config = trusted_work / "mathlib-cache-download.conf"
-    if config.is_symlink() or (config.exists() and not config.is_file()):
-        raise VerificationError("invalid Mathlib cache download configuration path")
-    if config.exists():
-        config.unlink()
+    # curl runs from a fresh directory holding only its configuration, so the
+    # download policy exposes nothing else of the trusted work tree.
+    download_dir = trusted_work / "mathlib-cache-download"
+    if download_dir.is_symlink() or (download_dir.exists() and not download_dir.is_dir()):
+        raise VerificationError("invalid Mathlib cache download directory")
+    if download_dir.exists():
+        shutil.rmtree(download_dir)
+    download_dir.mkdir()
+    config = download_dir / "download.conf"
     clean_path = "/usr/bin:/bin"
     clean_env = {
         "HOME": environment["HOME"],
@@ -2079,10 +2083,10 @@ def download_mathlib_cache(
             # and the certificate and name-service files are readable.
             sandboxed_run(
                 command,
-                cwd=trusted_work,
+                cwd=download_dir,
                 environment=environment,
                 writable_directories=[cache_dir],
-                readable_paths=[config, *system_readable_paths()],
+                readable_paths=list(system_readable_paths()),
                 executable_paths=executable_paths,
                 tools=tools,
                 timeout=1800,
@@ -2309,7 +2313,14 @@ def prepare_legacy_mathlib_cache_tool(
         raise VerificationError("legacy Mathlib cache tool version is not allowlisted")
 
     target = f"leantar-v{version}-x86_64-unknown-linux-musl"
-    archive = trusted_work / f"{target}.tar.gz"
+    # The archive lands in a fresh directory of its own: it is the only thing
+    # the download policy can write, and the only thing beside the certificate
+    # and name-service files it can read.
+    download_dir = trusted_work / "mathlib-cache-tool-download"
+    if download_dir.exists() or download_dir.is_symlink():
+        raise VerificationError("legacy Mathlib cache tool download directory is not fresh")
+    download_dir.mkdir()
+    archive = download_dir / f"{target}.tar.gz"
     binary = cache_dir / f"leantar-{version}"
     if archive.exists() or archive.is_symlink() or binary.exists() or binary.is_symlink():
         raise VerificationError("legacy Mathlib cache tool path is not fresh")
@@ -2343,9 +2354,9 @@ def prepare_legacy_mathlib_cache_tool(
     try:
         sandboxed_run(
             command,
-            cwd=trusted_work,
+            cwd=download_dir,
             environment=environment,
-            writable_directories=[archive.parent],
+            writable_directories=[download_dir],
             readable_paths=list(system_readable_paths()),
             executable_paths=executable_paths,
             tools=tools,

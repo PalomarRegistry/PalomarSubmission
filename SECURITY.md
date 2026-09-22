@@ -240,17 +240,35 @@ directory, `/tmp` and `/dev/shm` are invisible. If a positive operation is
 denied, a negative operation succeeds, or the sandbox cannot be established,
 verification fails closed.
 
+bubblewrap also loads a small seccomp filter (`scripts/seccomp_filter.py`,
+hand-written BPF) into every phase. It refuses `ptrace` and
+`process_vm_readv`/`process_vm_writev`, because the standalone Comparator
+builds candidate code inside the same sandbox as its own process and its
+challenge export, and that separation must not depend on Landlock being
+present on the runner or on the kernel's Yama setting; it refuses `AF_UNIX`
+sockets, personality changes and the creation of setuid or setgid files, which
+are what the systemd unit's `RestrictAddressFamilies`, `LockPersonality` and
+`RestrictSUIDSGID` used to do; and it kills a process that uses a foreign
+syscall ABI. The confinement self-check exercises each of these as a negative
+control. What the unit did that is not reproduced: `ProcSubset=pid`, so global
+`/proc` files such as `/proc/meminfo` are readable inside the sandbox; the
+process list itself is still the sandbox's own.
+
 Resource limits and the wall-clock deadline come from a cgroup v2 subtree the
 verifier owns. On a systemd host it is a `Delegate=yes` user scope; on a
 container runner without systemd, `scripts/cgroup_delegate.py` runs once as
 root to move the container's own processes out of the root cgroup, enable the
 memory, pids and cpu controllers, enter a fresh run cgroup, hand it to the
 runner user and drop privileges. `scripts/supervise_cgroup.py` then owns one
-cgroup per phase: it applies `memory.max`, `pids.max` and the file limits
-before the workload starts, sends SIGTERM at the deadline and `cgroup.kill`
-after a grace period, kills whatever the phase left behind when it ends, and
-writes an atomic status file that is the only trusted account of how the phase
-stopped. The verifier holds a FIFO open for the phase's lifetime; if the
+cgroup per phase: it applies `memory.max`, `pids.max` and the file limits one
+level above the cgroup the workload runs in (bubblewrap's cgroup namespace is
+rooted at the lower level, so the limits are out of the payload's reach even
+where the kernel would let a namespace root rewrite its own controller files),
+sends SIGTERM at the deadline and `cgroup.kill` after a grace period, kills
+whatever the phase left behind when it ends, and writes an atomic status file
+that is the only trusted account of how the phase stopped. A launcher that
+failed to start, a sandbox that never reported its child, or a cgroup still
+populated after the kill are infrastructure failures, never candidate results. The verifier holds a FIFO open for the phase's lifetime; if the
 verifier dies, the babysitter reads end-of-file and kills the workload. The
 bootstrap is proven once per verifier by running the whole chain on `true`, so
 a runner that cannot delegate a cgroup fails closed before candidate code runs.
@@ -424,11 +442,13 @@ cgroup's memory events, then kills and removes the cgroup with a bounded
 cleanup budget. Absent post-mortem cgroup files are not proof that no OOM
 occurred. When the parent reaches its deadline first, the record marks
 `supervisor_timeout` and leaves `systemd_result` unset, because no termination
-verdict exists yet. The `systemd_result`, `systemd_active_state` and
-`systemd_result_before_cleanup` field names are kept for readers of existing
-records; their values come from the cgroup supervisor, and every record also
-carries `supervisor`, `deadline_fired`, `cpu_max_applied` and
-`pids_events_max`.
+verdict exists yet. The `systemd_result`, `systemd_active_state`,
+`exec_main_code`, `exec_main_status` and `systemd_result_before_cleanup` fields
+keep their names and encodings for readers of existing records (`exec_main_code`
+is still `1` for an exit and `2` for a signal; `systemd_active_state` is
+`failed` for a finished phase that did not succeed); their values come from the
+cgroup supervisor, and every record also carries `supervisor`, `deadline_fired`,
+`cpu_max_applied`, `pids_events_max` and `rlimits_applied`.
 The report binds the profile id and digest; the profile
 is not a submitter-selectable Comparator configuration field.
 

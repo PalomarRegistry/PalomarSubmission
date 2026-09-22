@@ -3913,6 +3913,42 @@ review:
             self.assertFalse(denied.exists())
             self.assertFalse(read_denied.exists())
 
+    def test_full_confinement_fails_closed_when_a_namespace_control_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writable = root / "writable"
+            writable.mkdir()
+            positive_read = root / "positive-read"
+            positive_read.write_text("readable")
+            allowed = writable / ".palomar-write-probe"
+
+            def leaky_namespace(command, **_kwargs):
+                path = Path(command[-1])
+                if "palomar-host-canary" in path.name:
+                    return subprocess.CompletedProcess(command, 1, "host canary visible: " + str(path), "")
+                path.touch()
+                return subprocess.CompletedProcess(command, 0 if path == allowed else 1, "", "")
+
+            with (
+                mock.patch("scripts.verify_submission.sandboxed_run", side_effect=leaky_namespace),
+                self.assertRaisesRegex(VerificationError, "namespace controls failed.*host canary visible"),
+            ):
+                verify_sandbox_confinement(
+                    root / "write-denied",
+                    root / "read-denied",
+                    positive_read=positive_read,
+                    python=Path(sys.executable),
+                    touch=Path("/usr/bin/touch"),
+                    cwd=root,
+                    environment={},
+                    writable_directories=[writable],
+                    readable_paths=[positive_read],
+                    executable_paths=[],
+                    tools={},
+                )
+            self.assertFalse(allowed.exists())
+            self.assertFalse(list(Path.home().glob(".palomar-host-canary-*")))
+
     def test_full_confinement_rejects_a_created_denied_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
