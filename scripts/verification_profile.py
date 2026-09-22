@@ -225,6 +225,10 @@ def main() -> int:
             "profile": profile["id"],
             "digest": profile_digest(profile),
             "timeout": str(profile["limits"]["job_timeout_minutes"]),
+            # Rendering starts from an accepted submission whose build the
+            # budget already bounds; it gets the verification timeout plus a
+            # margin. Computed here because workflow expressions cannot add.
+            "render_timeout": str(profile["limits"]["job_timeout_minutes"] + 10),
             "budget": str(profile["limits"]["execution_budget_seconds"]),
         }
         with open(os.environ["GITHUB_OUTPUT"], "a") as handle:

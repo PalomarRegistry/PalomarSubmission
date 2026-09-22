@@ -4661,7 +4661,7 @@ class DispatchWorkflowTests(unittest.TestCase):
     def test_render_job_takes_its_timeout_from_the_profile(self):
         self.assertEqual(
             self.render_workflow()["jobs"]["render"]["timeout-minutes"],
-            "${{ fromJSON(needs.profile.outputs.timeout) + 10 }}",
+            "${{ fromJSON(needs.profile.outputs.render_timeout) }}",
         )
 
     def test_root_project_render_dispatch_uses_the_empty_default(self):
