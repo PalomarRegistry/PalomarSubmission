@@ -2769,7 +2769,7 @@ def _supervisor_unavailable(message: str) -> VerificationError:
     )
 
 
-def supervisor_bootstrap(cwd: Path, environment: dict[str, str]) -> list[str]:
+def supervisor_bootstrap(cwd: Path) -> list[str]:
     """Choose, once per verifier process, how a delegated cgroup is obtained.
 
     On a systemd host the user manager hands out a `Delegate=yes` scope; on a
@@ -2806,10 +2806,13 @@ def supervisor_bootstrap(cwd: Path, environment: dict[str, str]) -> list[str]:
     for candidate in candidates:
         with tempfile.TemporaryDirectory(prefix="palomar-supervisor-probe-") as directory:
             status = Path(directory) / "status.json"
+            # The launcher is trusted and runs with the verifier's own
+            # environment (systemd-run needs the user bus variables); the
+            # payload receives only what the babysitter's --setenv names.
             probe = run(
                 [*candidate, python, babysitter, "--parent", "self", "--collect", "--deadline", "20",
                  "--grace", "1", "--cwd", str(cwd), "--status", str(status), "--", true],
-                cwd=cwd, env=environment, timeout=60, check=False,
+                cwd=cwd, env=os.environ.copy(), timeout=60, check=False,
             )
             try:
                 report = json.loads(status.read_text(encoding="utf-8"))
@@ -2843,7 +2846,7 @@ def supervisor_command(
     python = str(Path(sys.executable).resolve())
     babysitter = str((ROOT / "scripts" / "supervise_cgroup.py").resolve())
     result = [
-        *supervisor_bootstrap(cwd, environment),
+        *supervisor_bootstrap(cwd),
         python, babysitter,
         "--parent", "self",
         "--name", unit_name,
@@ -3017,7 +3020,13 @@ def bwrap_command(
         for point in ("/home", "/root", "/run/user", "/var"):
             result.extend(["--dir", point])
     bound: set[Path] = set()
-    for path in sorted({*(readable_paths or []), *readable_directories, *executable_paths}):
+    # Debian's alternatives farm is where /usr/bin/cc, awk, which and friends
+    # point; without it those are dangling symlinks. Landlock never restricted
+    # symlink traversal, so the old policy never had to name it. It holds only
+    # symlinks into the system directories bound below.
+    alternatives = Path("/etc/alternatives")
+    system = {alternatives} if alternatives.is_dir() else set()
+    for path in sorted({*(readable_paths or []), *readable_directories, *executable_paths, *system}):
         bound.add(path)
         result.extend(["--ro-bind", str(path), str(path)])
     # Merged-usr hosts keep /bin, /sbin, /lib and /lib64 as symlinks into /usr;
@@ -3254,7 +3263,7 @@ def _cgroup_supervised_run(
         try:
             try:
                 proc = run(
-                    confined_command, cwd=cwd, env=environment,
+                    confined_command, cwd=cwd, env=os.environ.copy(),
                     timeout=timeout + SUPERVISOR_PARENT_MARGIN_SECONDS, check=False,
                 )
             except subprocess.TimeoutExpired:
