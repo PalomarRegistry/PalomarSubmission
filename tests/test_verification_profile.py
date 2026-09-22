@@ -54,6 +54,19 @@ class VerificationProfileTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"PALOMAR_EXECUTION_PROFILE": "palomar-standard-v1"}):
             self.assertEqual(load_profile()["id"], "palomar-standard-v1")
 
+    def test_resolver_outputs_carry_the_render_timeout(self):
+        import subprocess, sys, os
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / "out"
+            subprocess.run(
+                [sys.executable, "scripts/verification_profile.py", "--resolve", "--profile", "palomar-standard-v1"],
+                check=True, env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            )
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(values["timeout"], "350")
+        self.assertEqual(values["render_timeout"], "360")
+        self.assertEqual(values["budget"], "19800")
+
     def test_catalogue_is_validated_by_shape(self):
         from scripts.verification_profile import load_catalogue
         good = json.loads(Path("execution-profiles.json").read_text())
