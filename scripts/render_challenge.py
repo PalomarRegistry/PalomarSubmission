@@ -41,6 +41,7 @@ from scripts.verify_submission import (  # noqa: E402
     TOOLCHAIN_RE,
     LeanHeader,
     clone_commit,
+    configure_bwrap,
     ensure_lake_manifest,
     github_repository,
     lake_environment_value,
@@ -63,7 +64,6 @@ from scripts.verify_submission import (  # noqa: E402
     stage_trusted_closure,
     supported_toolchain,
     system_readable_paths,
-    systemd_command,
     tool_snapshot,
     tree_size,
     validate_staged_lake_promotions,
@@ -1907,7 +1907,6 @@ def discover_mathlib_cache_hashes(
     *,
     environment: dict[str, str],
     lake: Path,
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -1934,7 +1933,6 @@ def discover_mathlib_cache_hashes(
         [str(lake), "exe", "cache", "get-"],
         cwd=workspace,
         environment=cache_env,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -1989,6 +1987,8 @@ def download_mathlib_cache(
     environment: dict[str, str],
     curl: Path,
     env_tool: Path,
+    executable_paths: list[Path],
+    tools: dict[Path, str],
     preserved_tool: PreparedMathlibCacheTool | None = None,
 ) -> tuple[int, int]:
     """Fetch any available fixed-host cache bytes without requiring a cache hit.
@@ -2022,11 +2022,15 @@ def download_mathlib_cache(
     except Exception:
         held_tool.unlink(missing_ok=True)
         raise
-    config = trusted_work / "mathlib-cache-download.conf"
-    if config.is_symlink() or (config.exists() and not config.is_file()):
-        raise VerificationError("invalid Mathlib cache download configuration path")
-    if config.exists():
-        config.unlink()
+    # curl runs from a fresh directory holding only its configuration, so the
+    # download policy exposes nothing else of the trusted work tree.
+    download_dir = trusted_work / "mathlib-cache-download"
+    if download_dir.is_symlink() or (download_dir.exists() and not download_dir.is_dir()):
+        raise VerificationError("invalid Mathlib cache download directory")
+    if download_dir.exists():
+        shutil.rmtree(download_dir)
+    download_dir.mkdir()
+    config = download_dir / "download.conf"
     clean_path = "/usr/bin:/bin"
     clean_env = {
         "HOME": environment["HOME"],
@@ -2074,20 +2078,21 @@ def download_mathlib_cache(
                 "--config",
                 str(config),
             ]
-            run(
-                systemd_command(
-                    command,
-                    cwd=trusted_work,
-                    environment=environment,
-                    unrestricted_network=True,
-                    resource_properties=CACHE_DOWNLOAD_PROPERTIES,
-                ),
-                cwd=trusted_work,
-                # systemd-run needs the caller's user-bus variables. The actual
-                # curl child is still launched through ``env -i`` above.
-                env=environment,
+            # Trusted curl, fixed hosts, but still the full boundary: only the
+            # cache directory is writable and only the download configuration
+            # and the certificate and name-service files are readable.
+            sandboxed_run(
+                command,
+                cwd=download_dir,
+                environment=environment,
+                writable_directories=[cache_dir],
+                readable_paths=list(system_readable_paths()),
+                executable_paths=executable_paths,
+                tools=tools,
                 timeout=1800,
                 check=False,
+                unrestricted_network=True,
+                resource_properties=CACHE_DOWNLOAD_PROPERTIES,
             )
             downloaded = set()
             total = 0
@@ -2275,7 +2280,6 @@ def prepare_legacy_mathlib_cache_tool(
     checkout: Path,
     trusted_work: Path,
     environment: dict[str, str],
-    landrun: Path,
     curl: Path,
     env_tool: Path,
     git: Path,
@@ -2309,7 +2313,14 @@ def prepare_legacy_mathlib_cache_tool(
         raise VerificationError("legacy Mathlib cache tool version is not allowlisted")
 
     target = f"leantar-v{version}-x86_64-unknown-linux-musl"
-    archive = trusted_work / f"{target}.tar.gz"
+    # The archive lands in a fresh directory of its own: it is the only thing
+    # the download policy can write, and the only thing beside the certificate
+    # and name-service files it can read.
+    download_dir = trusted_work / "mathlib-cache-tool-download"
+    if download_dir.exists() or download_dir.is_symlink():
+        raise VerificationError("legacy Mathlib cache tool download directory is not fresh")
+    download_dir.mkdir()
+    archive = download_dir / f"{target}.tar.gz"
     binary = cache_dir / f"leantar-{version}"
     if archive.exists() or archive.is_symlink() or binary.exists() or binary.is_symlink():
         raise VerificationError("legacy Mathlib cache tool path is not fresh")
@@ -2341,18 +2352,17 @@ def prepare_legacy_mathlib_cache_tool(
         f"https://github.com/digama0/leangz/releases/download/v{version}/{target}.tar.gz",
     ]
     try:
-        run(
-            systemd_command(
-                command,
-                cwd=trusted_work,
-                environment=environment,
-                timeout=300,
-                unrestricted_network=True,
-                resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
-            ),
-            cwd=trusted_work,
-            env=environment,
+        sandboxed_run(
+            command,
+            cwd=download_dir,
+            environment=environment,
+            writable_directories=[download_dir],
+            readable_paths=list(system_readable_paths()),
+            executable_paths=executable_paths,
+            tools=tools,
             timeout=300,
+            unrestricted_network=True,
+            resource_properties=CACHE_TOOL_DOWNLOAD_PROPERTIES,
         )
         if (
             archive.is_symlink()
@@ -2395,7 +2405,6 @@ def prepare_legacy_mathlib_cache_tool(
             [str(binary.resolve()), "--version"],
             cwd=cache_dir,
             environment=environment,
-            landrun=landrun,
             writable_directories=[cache_dir.resolve()],
             readable_paths=[],
             executable_paths=sorted({*executable_paths, binary.resolve()}),
@@ -2432,7 +2441,6 @@ def stage_legacy_proofwidgets_release(
     checkout: Path,
     environment: dict[str, str],
     lake: Path,
-    landrun: Path,
     git: Path,
     executable_paths: list[Path],
     tools: dict[Path, str],
@@ -2524,7 +2532,6 @@ def stage_legacy_proofwidgets_release(
             [str(lake), "build", "proofwidgets:release"],
             cwd=staged.root_package,
             environment=staged_env,
-            landrun=landrun,
             writable_directories=list(staged.lake_roots),
             readable_paths=sorted({staged.source, *system_readable_paths()}),
             executable_paths=executable_paths,
@@ -2554,7 +2561,6 @@ def hydrate_mathlib_cache(
     trusted_work: Path,
     environment: dict[str, str],
     lake: Path,
-    landrun: Path,
     curl: Path,
     env_tool: Path,
     git: Path,
@@ -2578,7 +2584,6 @@ def hydrate_mathlib_cache(
         checkout=checkout,
         trusted_work=trusted_work,
         environment=environment,
-        landrun=landrun,
         curl=curl,
         env_tool=env_tool,
         git=git,
@@ -2589,7 +2594,6 @@ def hydrate_mathlib_cache(
         workspace,
         environment=environment,
         lake=lake,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -2604,6 +2608,8 @@ def hydrate_mathlib_cache(
         environment=environment,
         curl=curl,
         env_tool=env_tool,
+        executable_paths=executable_paths,
+        tools=tools,
         preserved_tool=prepared_tool,
     )
     cache_env = environment.copy()
@@ -2613,7 +2619,6 @@ def hydrate_mathlib_cache(
             [str(lake), "exe", "cache", "unpack"],
             cwd=workspace,
             environment=cache_env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -2669,7 +2674,6 @@ def build_core_notation_audit(
     *,
     environment: dict[str, str],
     lake: Path,
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -2716,7 +2720,6 @@ supportInterpreter = true
             [str(lake), "build", "palomar-audit"],
             cwd=project,
             environment=environment,
-            landrun=landrun,
             writable_directories=[*writable_directories, audit_build, audit_config],
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -2855,6 +2858,7 @@ def execute(args: argparse.Namespace) -> int:
         workspace = render_workspace.project
 
         landrun = Path(args.landrun).resolve(strict=True)
+        bwrap = configure_bwrap(Path(args.bwrap))
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
         env.pop("LAKE_PKG_URL_MAP", None)
@@ -2907,6 +2911,7 @@ def execute(args: argparse.Namespace) -> int:
             [
                 output,
                 landrun,
+                bwrap,
                 renderer,
                 lake,
                 lean,
@@ -2921,7 +2926,7 @@ def execute(args: argparse.Namespace) -> int:
             writable_directories,
         )
         tools = tool_snapshot(
-            [landrun, renderer, lake, lean, python, printenv, touch, curl, git, env_tool]
+            [landrun, bwrap, renderer, lake, lean, python, printenv, touch, curl, git, env_tool]
         )
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
@@ -2932,14 +2937,13 @@ def execute(args: argparse.Namespace) -> int:
         # it has a separate, narrower filesystem policy. Trusted `curl` also
         # fetches fixed-host Mathlib cache archives outside candidate execution.
         verify_sandbox_confinement(
-            work / "render-landrun-write-denial-probe",
-            work / "render-landrun-read-denial-probe",
+            work / "render-write-denial-probe",
+            work / "render-read-denial-probe",
             positive_read=render_workspace.challenge,
             python=python,
             touch=touch,
             cwd=workspace,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=allowed_exec,
@@ -2950,7 +2954,6 @@ def execute(args: argparse.Namespace) -> int:
             checkout=workspace_checkout,
             environment=env,
             lake=lake,
-            landrun=landrun,
             git=git,
             executable_paths=allowed_exec,
             tools=tools,
@@ -2959,7 +2962,6 @@ def execute(args: argparse.Namespace) -> int:
             work,
             environment=env,
             lake=lake,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=allowed_exec,
@@ -2973,7 +2975,6 @@ def execute(args: argparse.Namespace) -> int:
             trusted_work=work,
             environment=env,
             lake=lake,
-            landrun=landrun,
             curl=curl,
             env_tool=env_tool,
             git=git,
@@ -2990,7 +2991,6 @@ def execute(args: argparse.Namespace) -> int:
             [str(lake), "build", "Challenge:literate"],
             cwd=workspace,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
             readable_paths=readable_paths,
@@ -3009,7 +3009,6 @@ def execute(args: argparse.Namespace) -> int:
             lake=lake,
             printenv=printenv,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=allowed_exec,
@@ -3037,7 +3036,6 @@ def execute(args: argparse.Namespace) -> int:
             audit_command,
             cwd=workspace,
             environment=audit_environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
             readable_paths=readable_paths,
@@ -3072,7 +3070,6 @@ def execute(args: argparse.Namespace) -> int:
             ],
             cwd=workspace,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
             readable_paths=readable_paths,
@@ -3112,7 +3109,6 @@ def execute(args: argparse.Namespace) -> int:
             ],
             cwd=workspace,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             writable_files=writable_files,
             readable_paths=[*readable_paths, audit_declarations_path],
@@ -3201,6 +3197,7 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--work-dir", required=True)
     execute_parser.add_argument("--output", required=True)
     execute_parser.add_argument("--landrun", required=True)
+    execute_parser.add_argument("--bwrap", required=True)
     execute_parser.add_argument("--renderer-commit", required=True)
     execute_parser.add_argument("--landrun-commit", required=True)
     execute_parser.add_argument("--workflow-url", required=True)

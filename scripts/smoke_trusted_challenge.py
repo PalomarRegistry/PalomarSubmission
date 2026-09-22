@@ -20,6 +20,7 @@ from scripts.verify_submission import (  # noqa: E402
     audit_challenge_sources,
     build_allowlisted_roots,
     compile_canonical_challenge,
+    configure_bwrap,
     get_mathlib_cache,
     install_execution_deadline,
     lake_environment_value,
@@ -47,6 +48,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--landrun", type=Path, required=True)
+    parser.add_argument("--bwrap", type=Path, required=True)
     parser.add_argument("--comparator", type=Path, required=True)
     parser.add_argument("--lean4export", type=Path, required=True)
     parser.add_argument("--nanoda", type=Path, required=True)
@@ -60,6 +62,7 @@ def main() -> int:
 
     source = args.source.resolve(strict=True)
     landrun = args.landrun.resolve(strict=True)
+    configure_bwrap(args.bwrap)
     comparator = args.comparator.resolve(strict=True)
     lean4export = args.lean4export.resolve(strict=True)
     nanoda = args.nanoda.resolve(strict=True)
@@ -172,7 +175,6 @@ def main() -> int:
         touch=touch,
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -222,7 +224,6 @@ def main() -> int:
         base_env=environment,
         allowlist=allowlist,
         lake=lake,
-        landrun=landrun,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
@@ -269,7 +270,6 @@ def main() -> int:
         allowlist=allowlist,
         base_env=environment,
         lake=lake,
-        landrun=landrun,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
@@ -314,7 +314,6 @@ def main() -> int:
         lean_prefix=lean_prefix,
         allowlist=allowlist,
         environment=environment,
-        landrun=landrun,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
@@ -344,7 +343,6 @@ def main() -> int:
         touch=touch,
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=candidate_writable,
         protected_write_directories=sorted(trusted_builds),
         readable_paths=readable_paths,
@@ -357,7 +355,6 @@ def main() -> int:
         lake=lake,
         printenv=printenv,
         environment=environment,
-        landrun=landrun,
         writable_directories=candidate_writable,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -370,7 +367,6 @@ def main() -> int:
         lake=lake,
         printenv=printenv,
         environment=environment,
-        landrun=landrun,
         writable_directories=candidate_writable,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -391,7 +387,6 @@ def main() -> int:
             [str(lake), "build", target],
             cwd=source,
             environment=environment,
-            landrun=landrun,
             writable_directories=candidate_writable,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -403,7 +398,6 @@ def main() -> int:
         [str(comparator), str(comparator_config)],
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=candidate_writable,
         readable_paths=readable_paths,
         executable_paths=executable_paths,

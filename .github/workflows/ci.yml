@@ -86,9 +86,11 @@ jobs:
 
           load_comparator_config(pathlib.Path(sys.argv[1]))
           PY
-      - name: Exercise the real Landrun and systemd boundary
+      - name: Exercise the real bubblewrap and cgroup boundary
         run: |
-          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
+          PALOMAR_BWRAP="$(scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")"
           curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/elan.tar.gz" \
             https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
@@ -98,7 +100,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.0
-          PALOMAR_TEST_LANDRUN="$(go env GOPATH)/bin/landrun" \
+          PALOMAR_BWRAP="$PALOMAR_BWRAP" \
           PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.32.0 "$HOME/.elan/bin/elan" which lean)" \
             python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
       - name: Validate configuration JSON

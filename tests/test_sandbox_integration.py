@@ -180,8 +180,8 @@ supportInterpreter = true
                 self.assertIn(diagnostic, rejected.stderr)
 
     @unittest.skipUnless(
-        os.environ.get("PALOMAR_TEST_LANDRUN"),
-        "set PALOMAR_TEST_LANDRUN to exercise the real Landrun/systemd boundary",
+        os.environ.get("PALOMAR_BWRAP"),
+        "set PALOMAR_BWRAP to exercise the real bubblewrap and cgroup boundary",
     )
     def test_real_read_write_process_and_network_boundary(self):
         # `PrivateTmp=yes` deliberately hides the host /tmp. Put the fixture in
@@ -201,7 +201,6 @@ supportInterpreter = true
             tmp.mkdir()
 
             python = Path(sys.executable).resolve(strict=True)
-            landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
             touch_command = shutil.which("touch")
             self.assertIsNotNone(touch_command)
             touch = Path(touch_command).absolute()
@@ -216,7 +215,6 @@ supportInterpreter = true
             executable_paths = [
                 Path(sys.executable).resolve().parent.parent,
                 python,
-                landrun,
                 touch,
                 frozen,
             ]
@@ -240,17 +238,16 @@ supportInterpreter = true
                 touch=touch,
                 cwd=source,
                 environment=environment,
-                landrun=landrun,
                 writable_directories=[build, config],
                 protected_write_directories=[frozen],
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
                 executable_paths=sorted(set(executable_paths)),
-                tools=tool_snapshot([python, landrun, touch]),
+                tools=tool_snapshot([python, touch]),
             )
 
     @unittest.skipUnless(
-        os.environ.get("PALOMAR_TEST_LANDRUN"),
-        "set PALOMAR_TEST_LANDRUN to exercise the real Landrun/systemd boundary",
+        os.environ.get("PALOMAR_BWRAP"),
+        "set PALOMAR_BWRAP to exercise the real bubblewrap and cgroup boundary",
     )
     def test_real_renderer_policy_proves_the_same_controls(self):
         # The render build runs untrusted compile-time Lean, so it is held to
@@ -271,7 +268,6 @@ supportInterpreter = true
             tmp.mkdir()
 
             python = Path(sys.executable).resolve(strict=True)
-            landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
             touch_command = shutil.which("touch")
             self.assertIsNotNone(touch_command)
             touch = Path(touch_command).absolute()
@@ -288,22 +284,21 @@ supportInterpreter = true
             # programs, their linkage, and the immutable system directories.
             toolchain_prefix = python.parent.parent
             executable_paths = renderer_executable_paths(
-                toolchain_prefix, [landrun, python, touch]
+                toolchain_prefix, [python, touch]
             )
 
             verify_sandbox_confinement(
-                work / "render-landrun-write-denial-probe",
-                work / "render-landrun-read-denial-probe",
+                work / "render-write-denial-probe",
+                work / "render-read-denial-probe",
                 positive_read=challenge,
                 python=python,
                 touch=touch,
                 cwd=workspace_checkout,
                 environment=environment,
-                landrun=landrun,
                 writable_directories=[build, config],
                 readable_paths=[workspace_checkout.resolve()],
                 executable_paths=executable_paths,
-                tools=tool_snapshot([python, landrun, touch]),
+                tools=tool_snapshot([python, touch]),
             )
 
             # The trusted sanitizer starts inside this boundary too. Its shared
@@ -313,17 +308,16 @@ supportInterpreter = true
                 [str(python), str(renderer), "sanitize", "--help"],
                 cwd=workspace_checkout,
                 environment=environment,
-                landrun=landrun,
                 writable_directories=[build, config],
                 readable_paths=[workspace_checkout.resolve(), renderer.parent.parent],
                 executable_paths=executable_paths,
-                tools=tool_snapshot([python, landrun]),
+                tools=tool_snapshot([python]),
             )
             self.assertIn("--input-dir", result.stdout)
 
     @unittest.skipUnless(
-        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
-        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
+        os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_BWRAP and PALOMAR_TEST_LEAN for canonical compilation",
     )
     def test_challenge_is_compiled_outside_candidate_lake_state(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -340,9 +334,8 @@ supportInterpreter = true
                     text=True,
                 ).stdout.strip()
             ).resolve(strict=True)
-            landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
             python = Path(sys.executable).resolve(strict=True)
-            executable_paths = [lean_prefix, python.parent.parent, lean, landrun]
+            executable_paths = [lean_prefix, python.parent.parent, lean]
             for raw in ("/usr", "/bin", "/lib", "/lib64", "/nix/store"):
                 path = Path(raw)
                 if path.exists():
@@ -362,10 +355,9 @@ supportInterpreter = true
                 lean_prefix=lean_prefix,
                 allowlist={},
                 environment=environment,
-                landrun=landrun,
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
                 executable_paths=sorted(set(executable_paths)),
-                tools=tool_snapshot([lean, landrun]),
+                tools=tool_snapshot([lean]),
             )
             self.assertEqual(canonical.parent, work / "canonical-challenge")
             self.assertTrue(canonical.is_file())
@@ -401,8 +393,8 @@ supportInterpreter = true
             )
 
     @unittest.skipUnless(
-        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
-        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
+        os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_BWRAP and PALOMAR_TEST_LEAN for canonical compilation",
     )
     def test_protected_alias_does_not_capture_a_sibling_solution_module(self):
         """A search root owns a top-level prefix, not one object-file path."""
@@ -414,7 +406,7 @@ supportInterpreter = true
             challenge_source.write_text("theorem challengeProbe : True := by trivial\n")
             solution_source = source / "Shared" / "Solution.lean"
             solution_source.write_text("theorem solutionProbe : True := by trivial\n")
-            lean, lean_prefix, landrun, environment, executable_paths = canonical_toolchain()
+            lean, lean_prefix, environment, executable_paths = canonical_toolchain()
             canonical, _dependencies, trusted_paths = compile_canonical_challenge(
                 work,
                 source,
@@ -426,10 +418,9 @@ supportInterpreter = true
                 lean_prefix=lean_prefix,
                 allowlist={},
                 environment=environment,
-                landrun=landrun,
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
                 executable_paths=executable_paths,
-                tools=tool_snapshot([lean, landrun]),
+                tools=tool_snapshot([lean]),
             )
             candidate = work / "candidate-build" / "lib" / "lean"
             (candidate / "Shared").mkdir(parents=True)
@@ -470,8 +461,8 @@ supportInterpreter = true
             )
 
     @unittest.skipUnless(
-        os.environ.get("PALOMAR_TEST_LANDRUN") and os.environ.get("PALOMAR_TEST_LEAN"),
-        "set PALOMAR_TEST_LANDRUN and PALOMAR_TEST_LEAN for canonical compilation",
+        os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_BWRAP and PALOMAR_TEST_LEAN for canonical compilation",
     )
     def test_module_system_challenge_publishes_every_artifact(self):
         # A module-system source compiles to a public module plus private,
@@ -484,7 +475,7 @@ supportInterpreter = true
             (source / "Challenge.lean").write_text(
                 "module\n\npublic theorem probe : True := by trivial\n"
             )
-            lean, lean_prefix, landrun, environment, executable_paths = canonical_toolchain()
+            lean, lean_prefix, environment, executable_paths = canonical_toolchain()
             canonical, _dependencies, trusted_paths = compile_canonical_challenge(
                 work,
                 source,
@@ -493,10 +484,9 @@ supportInterpreter = true
                 lean_prefix=lean_prefix,
                 allowlist={},
                 environment=environment,
-                landrun=landrun,
                 readable_paths=sorted({source.resolve(), *system_readable_paths()}),
                 executable_paths=executable_paths,
-                tools=tool_snapshot([lean, landrun]),
+                tools=tool_snapshot([lean]),
             )
             self.assertEqual(
                 sorted(path.name for path in canonical.parent.iterdir()),
@@ -525,8 +515,8 @@ supportInterpreter = true
             )
 
 
-def canonical_toolchain() -> tuple[Path, Path, Path, dict[str, str], list[Path]]:
-    """Resolve the real Lean and Landrun binaries the canonical compile needs."""
+def canonical_toolchain() -> tuple[Path, Path, dict[str, str], list[Path]]:
+    """Resolve the real Lean binaries the canonical compile needs."""
     lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
     lean_prefix = Path(
         subprocess.run(
@@ -536,9 +526,8 @@ def canonical_toolchain() -> tuple[Path, Path, Path, dict[str, str], list[Path]]
             text=True,
         ).stdout.strip()
     ).resolve(strict=True)
-    landrun = Path(os.environ["PALOMAR_TEST_LANDRUN"]).resolve(strict=True)
     python = Path(sys.executable).resolve(strict=True)
-    executable_paths = [lean_prefix, python.parent.parent, lean, landrun]
+    executable_paths = [lean_prefix, python.parent.parent, lean]
     for raw in ("/usr", "/bin", "/lib", "/lib64", "/nix/store"):
         path = Path(raw)
         if path.exists():
@@ -550,7 +539,7 @@ def canonical_toolchain() -> tuple[Path, Path, Path, dict[str, str], list[Path]]
             "LEAN_ABORT_ON_PANIC": "1",
         }
     )
-    return lean, lean_prefix, landrun, environment, sorted(set(executable_paths))
+    return lean, lean_prefix, environment, sorted(set(executable_paths))
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:

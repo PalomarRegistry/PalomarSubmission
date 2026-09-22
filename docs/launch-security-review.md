@@ -52,7 +52,7 @@ artifact as hostile. Its security-relevant sequence is:
    dependency list and source bytes before candidate Challenge/Solution
    compilation and comparison.
 6. Build the candidate Challenge/Solution and run Comparator under the explicit
-   outer Landrun/systemd boundary with a verifier-authored protected
+   outer bubblewrap and cgroup boundary with a verifier-authored protected
    configuration that forces `"enable_nanoda": true` and replaces only the
    Challenge module name with the canonical alias.
    Publish the protected Challenge under a collision-resistant verifier-owned
@@ -68,7 +68,8 @@ artifact as hostile. Its security-relevant sequence is:
 
 The outer filesystem policy has no `--ro /` or broad home/workspace rule. Live
 tests establish permitted source reads and build writes, reject sibling reads
-and writes, hide another process's environment, and deny normal-phase network
+and writes, hide another process's environment and the host home directory and
+temporaries, refuse a nested user namespace, and deny normal-phase network
 access. The Mathlib cache operation is the only network exception and never
 loads candidate Lake configuration.
 
@@ -78,9 +79,12 @@ The maintained test surfaces are:
 
 - `tests/test_verify_submission.py`: current provenance and exact tool pins,
   official closure substitution, duplicate form sections, artifact rejection,
-  protected paths, environment path bounds, and systemd policy construction;
-- `tests/test_sandbox_integration.py`: real Landrun/systemd read, write, process,
-  and network probes plus direct canonical Challenge compilation;
+  protected paths, environment path bounds, and supervisor and sandbox
+  argument construction;
+- `tests/test_sandbox_integration.py`: real bubblewrap and cgroup read, write,
+  process, namespace, and network probes plus direct canonical Challenge
+  compilation; `tests/test_resource_supervision.py`: the real OOM, deadline and
+  exit-status classification of the cgroup supervisor;
 - `tests/test_render_challenge.py` and `tests/test_landrun_passthrough.py`:
   the pinned Verso rendering path and the sandbox flags it is given;
 - `tests/test_compatibility_workflow.py`: the merge-base scope decision and the
@@ -160,7 +164,7 @@ verifier forces the exact JSON boolean `true` in the protected configuration
 that Comparator consumes. It also replaces the submitted Challenge module name
 with the canonical alias while leaving the Solution and declaration selection
 unchanged. Comparator's own Landrun domains remain in place.
-They are nested inside Palomar's outer domain, so they can narrow but not widen
+They are nested inside Palomar's outer sandbox, so they can narrow but not widen
 Palomar's filesystem or network policy. Palomar independently protects
 the Challenge module because Comparator assumes the supplied Challenge build is
 the intended statement.
@@ -229,7 +233,8 @@ remains append-only for existing versioned record paths.
 - A project Palomar has already accepted is not thereby an allowed Challenge
   input. The allowlisted roots are the only statement dependencies, and a
   recursively reached source outside them remains forbidden.
-- GitHub-hosted runners, Linux/Landlock/systemd, Git, Lean and its kernel,
+- GitHub-hosted runners, Linux namespaces, cgroups and Landlock, bubblewrap,
+  Git, Lean and its kernel,
   Comparator, NanoDa, Landrun, `lean4export`, and the Palomar implementation remain in
   the trusted computing base. This hardening is defense in depth around those
   components, not a proof that they are bug-free.

@@ -87,37 +87,8 @@ class CapacityReportTests(unittest.TestCase):
         self.assertEqual(report["status"], "pending")
         self.assertEqual(report["verification_profile"]["observed_host"], {"memory_bytes": 123})
 
-    def test_cleanup_uses_privilege_and_survives_expired_work_deadline(self):
-        calls = []
 
-        def run(command, **kwargs):
-            calls.append(command)
-            return subprocess.CompletedProcess(command, 0, "Result=timeout\nControlGroup=\n", "")
-
-        with mock.patch.object(verifier, "_SYSTEMD_MANAGER", "system"), \
-             mock.patch.object(verifier, "_EXECUTION_DEADLINE", 0), \
-             mock.patch.object(verifier.shutil, "which", side_effect=lambda name: "/usr/bin/" + name), \
-             mock.patch.object(verifier.subprocess, "run", side_effect=run):
-            outcome = verifier.systemd_unit_outcome(
-                "palomar-" + "a" * 24, cwd=Path.cwd(), environment={}
-            )
-        self.assertEqual(outcome["Result"], "timeout")
-        self.assertEqual(calls[1][:6], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "kill",
-                                      "--signal=KILL", "--kill-whom=all"])
-        self.assertEqual(calls[2][3], "stop")
-        self.assertEqual(calls[3][3], "reset-failed")
-
-
-CGROUP_MODE = verifier.SUPERVISOR_KIND == "cgroup"
-REAL_BOUNDARY_AVAILABLE = (
-    bool(os.environ.get("PALOMAR_BWRAP")) if CGROUP_MODE else bool(os.environ.get("PALOMAR_TEST_LANDRUN"))
-)
-
-
-@unittest.skipUnless(
-    REAL_BOUNDARY_AVAILABLE,
-    "requires the real supervisor: Landrun/systemd, or PALOMAR_SUPERVISOR=cgroup with PALOMAR_BWRAP",
-)
+@unittest.skipUnless(os.environ.get("PALOMAR_BWRAP"), "set PALOMAR_BWRAP for the real cgroup boundary")
 class RealResourceBoundaryTests(unittest.TestCase):
     def run_phase(self, code, *, memory="256M", timeout=30, expected=None,
                   extra_properties=()):
@@ -127,28 +98,24 @@ class RealResourceBoundaryTests(unittest.TestCase):
             scratch.mkdir()
             metrics = work / "metrics.jsonl"
             python = Path(sys.executable).resolve()
-            # The cgroup supervisor confines with bubblewrap; the landrun argument
-            # is then only a tool the phase snapshots.
-            landrun = Path(os.environ.get("PALOMAR_TEST_LANDRUN") or verifier.shutil.which("true")).resolve()
-            executable = [python.parent.parent, python, landrun]
+            executable = [python.parent.parent, python]
             for raw in ("/usr", "/bin", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"):
                 path = Path(raw)
                 if path.exists():
                     executable.append(path.resolve())
             environment = {**os.environ, "TMPDIR": str(scratch)}
-            spied = "supervisor_command" if CGROUP_MODE else "systemd_command"
-            with mock.patch.object(verifier, "_SYSTEMD_MANAGER", None), \
-                 mock.patch.object(verifier, "_EXECUTION_DEADLINE", verifier._EXECUTION_DEADLINE), \
+            with mock.patch.object(verifier, "_EXECUTION_DEADLINE", verifier._EXECUTION_DEADLINE), \
                  mock.patch.object(verifier, "_RESOURCE_METRICS_PATH", metrics), \
                  mock.patch.object(verifier, "_RESOURCE_DISK_PATH", work), \
-                 mock.patch.object(verifier, spied, wraps=getattr(verifier, spied)) as command_spy:
+                 mock.patch.object(verifier, "supervisor_command",
+                                   wraps=verifier.supervisor_command) as command_spy:
                 def invoke():
                     return verifier.sandboxed_run(
                         [str(python), "-c", code], cwd=work, environment=environment,
-                        landrun=landrun, writable_directories=[scratch],
+                        writable_directories=[scratch],
                         readable_paths=[work, *verifier.system_readable_paths()],
                         executable_paths=sorted(set(executable)),
-                        tools=verifier.tool_snapshot([python, landrun]), timeout=timeout,
+                        tools=verifier.tool_snapshot([python]), timeout=timeout,
                         # A tiny, deterministic fixture ceiling; production swap policy is unchanged.
                         resource_properties=(f"MemoryMax={memory}", "MemoryHigh=infinity",
                                              "MemorySwapMax=0", "TimeoutStopSec=2s",
@@ -162,20 +129,9 @@ class RealResourceBoundaryTests(unittest.TestCase):
                     self.assertEqual(invoke().returncode, 0)
                     error = None
                 unit_name = command_spy.call_args.kwargs["unit_name"]
-                if CGROUP_MODE:
-                    # KillMode=control-group: the phase cgroup is gone once the phase is over.
-                    leftovers = [p for p in Path("/sys/fs/cgroup").rglob(unit_name)]
-                    self.assertEqual(leftovers, [], unit_name)
-                else:
-                    unit = unit_name + ".service"
-                    manager = ["systemctl"]
-                    if verifier._SYSTEMD_MANAGER == "user":
-                        manager.append("--user")
-                    active = subprocess.run(
-                        [*manager, "is-active", unit], capture_output=True, text=True, timeout=10,
-                    )
-                    self.assertNotEqual(active.stdout.strip(), "active", unit)
-                    self.assertNotEqual(active.stdout.strip(), "deactivating", unit)
+                # KillMode=control-group: the phase cgroup is gone once the phase is over.
+                leftovers = [p for p in Path("/sys/fs/cgroup").rglob(unit_name)]
+                self.assertEqual(leftovers, [], unit_name)
             self.assertTrue(metrics.exists(), f"No worker telemetry; phase error: {error}")
             records = [json.loads(line) for line in metrics.read_text().splitlines()]
             # The payload has write access only to scratch, never the trusted metrics.
@@ -212,7 +168,6 @@ class RealResourceBoundaryTests(unittest.TestCase):
         self.assertTrue(timeout_records, records)
         self.assertTrue(all(row["systemd_result"] is None for row in timeout_records))
 
-    @unittest.skipUnless(CGROUP_MODE, "the babysitter's deadline and grace; systemd has its own")
     def test_real_deadline_terminates_after_grace_and_is_a_timeout(self):
         started = time.monotonic()
         records, error = self.run_phase(

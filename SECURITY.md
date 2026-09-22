@@ -133,7 +133,7 @@ not this credential-free verification workflow.
   match for a file tracked at that package's pinned commit. Sources below a
   sandbox-writable directory are never trusted.
 
-### Landrun confinement
+### Sandbox confinement
 
 Before Lake is started, the verifier deletes all submitted `.lake` state from
 the root project and materialized packages. It creates fresh `.lake/build` and
@@ -183,23 +183,28 @@ directories, but it cannot replace the statement module or a trusted dependency
 used to compile it. A nonstandard output layout fails closed.
 
 Every invocation that can load project Lake configuration runs under the same
-outer Landrun policy. This includes Mathlib cache retrieval, `lake env` used to
-discover Lean paths, and Comparator itself. There is no blanket read rule for
-the runner filesystem. The policy grants read-only access to the submitted
-source tree and a small explicit set of certificate/name-service files,
-read/execute access to the selected Lean toolchain, pinned verifier programs,
-and immutable system/Python runtime directories, and write/execute access only
-to the fresh build and Lake-configuration directories. Unrelated runner
-temporary directories, home-directory contents, the report, and sibling
-process state are outside the read allowlist. Sandboxed Git ignores system and
-global configuration and cannot prompt for credentials, preventing ambient
-runner configuration from rewriting authenticated remotes. The protected
-Landrun adapter injects the same fixed Git isolation into Comparator's nested
-challenge and solution build domains.
+outer bubblewrap policy. This includes Mathlib cache retrieval, `lake env` used
+to discover Lean paths, and Comparator itself. The sandbox root is an empty
+tmpfs: there is no blanket read rule for the runner filesystem, and a path that
+is not bound in does not exist. The policy binds read-only the submitted source
+tree, a small explicit set of certificate/name-service files (and the
+`/etc/alternatives` symlink farm Debian tools resolve through), the selected
+Lean toolchain, pinned verifier programs, and immutable system/Python runtime
+directories, and binds writable only the fresh build and Lake-configuration
+directories. Unrelated runner temporary directories, the host home directory,
+the report, `/run` and `/var` (and so every host daemon socket), and sibling
+process state (a private `/proc`) are absent from the sandbox's mount
+namespace. Its PID, IPC, UTS, cgroup and user namespaces are unshared and
+nested user namespaces are disabled, so a candidate cannot build a second
+sandbox to escape the first. Sandboxed Git ignores system and global
+configuration and cannot prompt for credentials, preventing ambient runner
+configuration from rewriting authenticated remotes. The protected Landrun
+adapter injects the same fixed Git isolation into Comparator's nested challenge
+and solution build domains.
 
-Normal configuration and comparison also run in a systemd private network
-namespace; Landrun independently restricts supported TCP operations. The
-verified Mathlib cache client has a narrowly scoped exception because
+Normal configuration and comparison run with the network namespace unshared,
+so there is no interface to reach rather than a filter to pass. The verified
+Mathlib cache client has a narrowly scoped exception because
 downloading official cache artifacts is its purpose. During that phase Mathlib
 is the workspace root and its exact official closure is exposed through
 temporary package links. The links are deleted immediately afterward, the
@@ -213,32 +218,60 @@ always enables NanoDa and replaces only the Challenge module name with the
 per-run protected alias before executing candidate code. Comparator's redundant
 `lake build` of that exact alias is skipped by the trusted adapter because the
 verifier has already compiled it outside the candidate Lake plan.
-Linux Landlock domains compose by intersection:
-the inner policy cannot widen the outer policy's filesystem or network access.
-The pinned Landrun binary is built without cgo so its pre-Landlock-v8
-all-thread enforcement does not enumerate `/proc/$PID/task`; nested confinement
-therefore remains compatible with the outer process-read denial.
-The outer Landrun process is launched in an unprivileged systemd unit that also
-applies the private-network and address-family policy, a private device and
-temporary-file view, `NoNewPrivileges`, and process-information hiding.
-Landrun uses compatibility mode across GitHub runner kernel versions, so the
-verifier first exercises the complete outer policy with positive source-read
-and build-write probes and negative outside-read, outside-write, sibling
-process-environment, and outbound-network probes. It also runs a positive nested
-Landrun probe. If a positive operation is denied, a negative operation succeeds,
-or either confinement layer cannot be established, verification fails closed.
+Those Landlock domains sit inside the outer mount namespace and compose with
+it by intersection: the inner policy cannot widen what the outer sandbox
+exposes, and on a kernel without Landlock the outer bubblewrap policy is the
+boundary on its own. The pinned Landrun binary is built without cgo so its
+pre-Landlock-v8 all-thread enforcement does not enumerate `/proc/$PID/task`.
 
-Compatibility mode is what makes those probes load-bearing rather than
-decorative. The pinned Landrun asks the kernel to handle every access right
-up to Landlock ABI v9, including the v9 Unix-socket resolution right that the
-runner kernels do not yet provide. Refusing the downgrade would therefore not
-make the boundary strict, it would make every confined command fail to start
-on every host in use. The downgrade is measured instead: rights the kernel
-does not support are dropped silently, and a policy degraded far enough to
-permit a denied read, write, or connection is caught by these probes before
-any submitted Lean or Lake configuration runs. Landlock being absent
-altogether degrades the policy to nothing, which the write and read denial
-probes reject.
+The outer sandbox is bubblewrap 0.12.0, built from the pinned upstream release
+tarball by `scripts/install_bwrap.sh` in the trusted phase (the distribution
+package predates the fix for symlink handling under bind mounts, and Palomar
+binds into candidate-written trees on every phase after the first). It is
+started with an empty environment and receives only the named sandbox
+variables, so the sandbox's PID 1 carries nothing from the runner. Before any
+submitted Lean or Lake configuration runs, the verifier exercises the complete
+outer policy with positive source-read and build-write probes and negative
+outside-read, outside-write, sibling process-environment and outbound-network
+probes, and with the namespace controls: the sandbox's PID 1 has no
+environment, a nested user namespace is refused, the user namespace differs
+from the host's, and canaries the verifier has just written under the host home
+directory, `/tmp` and `/dev/shm` are invisible. If a positive operation is
+denied, a negative operation succeeds, or the sandbox cannot be established,
+verification fails closed.
+
+bubblewrap also loads a small seccomp filter (`scripts/seccomp_filter.py`,
+hand-written BPF) into every phase. It refuses `ptrace` and
+`process_vm_readv`/`process_vm_writev`, because the standalone Comparator
+builds candidate code inside the same sandbox as its own process and its
+challenge export, and that separation must not depend on Landlock being
+present on the runner or on the kernel's Yama setting; it refuses `AF_UNIX`
+sockets, personality changes and the creation of setuid or setgid files, which
+are what the systemd unit's `RestrictAddressFamilies`, `LockPersonality` and
+`RestrictSUIDSGID` used to do; and it kills a process that uses a foreign
+syscall ABI. The confinement self-check exercises each of these as a negative
+control. What the unit did that is not reproduced: `ProcSubset=pid`, so global
+`/proc` files such as `/proc/meminfo` are readable inside the sandbox; the
+process list itself is still the sandbox's own.
+
+Resource limits and the wall-clock deadline come from a cgroup v2 subtree the
+verifier owns. On a systemd host it is a `Delegate=yes` user scope; on a
+container runner without systemd, `scripts/cgroup_delegate.py` runs once as
+root to move the container's own processes out of the root cgroup, enable the
+memory, pids and cpu controllers, enter a fresh run cgroup, hand it to the
+runner user and drop privileges. `scripts/supervise_cgroup.py` then owns one
+cgroup per phase: it applies `memory.max`, `pids.max` and the file limits one
+level above the cgroup the workload runs in (bubblewrap's cgroup namespace is
+rooted at the lower level, so the limits are out of the payload's reach even
+where the kernel would let a namespace root rewrite its own controller files),
+sends SIGTERM at the deadline and `cgroup.kill` after a grace period, kills
+whatever the phase left behind when it ends, and writes an atomic status file
+that is the only trusted account of how the phase stopped. A launcher that
+failed to start, a sandbox that never reported its child, or a cgroup still
+populated after the kill are infrastructure failures, never candidate results. The verifier holds a FIFO open for the phase's lifetime; if the
+verifier dies, the babysitter reads end-of-file and kills the workload. The
+bootstrap is proven once per verifier by running the whole chain on `true`, so
+a runner that cannot delegate a cgroup fails closed before candidate code runs.
 
 The post-acceptance renderer runs the same probe contract as the verifier,
 under its own narrower policy, and fails closed on the same conditions. That
@@ -297,7 +330,8 @@ plausibly named definition. A reviewer still has to read the pinned source and
 the definitions it uses; the core-notation rendering closes notation and macro
 spoofing only.
 
-Comparator, `lean4export`, NanoDa, Landrun, the Landrun adapter, Lake, the
+Comparator, `lean4export`, NanoDa, Landrun, bubblewrap, the Landrun adapter,
+the supervisor scripts, Lake, the
 protected Comparator configuration, and the verifier script are outside the
 writable allowlist. Their hashes are captured before any project configuration
 executes and checked before and after sandboxed phases.
@@ -308,9 +342,9 @@ written only by the trusted verifier after the sandboxed process exits.
 
 The verification job has `contents: read` permission and is not given a write
 token, App token, private-repository credential, or submission secret. Trusted
-checkouts disable credential persistence, and Landrun passes an explicit small
-environment-variable allowlist to untrusted processes through the systemd unit
-and its own environment filter.
+checkouts disable credential persistence, and the supervisor and bubblewrap
+pass an explicit small environment-variable allowlist to untrusted processes
+and reset everything else.
 
 There is no longer a second job to compromise. Verification writes a bounded
 JSON report outside every sandbox-writable directory and uploads it as the
@@ -323,16 +357,17 @@ anywhere.
 
 ## Pins and trusted computing base
 
-GitHub Actions, Comparator, Landrun, NanoDa, elan releases, and source-built
-verifier tools are pinned to immutable revisions or checksums. NanoDa uses the
+GitHub Actions, Comparator, Landrun, NanoDa, bubblewrap, elan releases, and
+source-built verifier tools are pinned to immutable revisions or checksums. NanoDa uses the
 `robsimmons/nanoda_lib` fork deployed by Comparator Live at commit
 `68d5ca9db226849b41a6fff59d796ff19d0a8840`. A `lean4export` revision is resolved
 from the submitted toolchain's own release tag rather than from a table, because
 a table is a second place for the answer to be wrong and it kept being the wrong
 one. Pin changes require security review and an end-to-end comparison probe.
 
-This design still trusts the GitHub-hosted Linux runner, the Linux kernel and
-Landlock implementation, systemd, Git and its protocol parsers, the selected
+This design still trusts the GitHub-hosted Linux runner, the Linux kernel with
+its namespace, cgroup and Landlock implementations, bubblewrap, Git and its
+protocol parsers, the selected
 Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
 verifier/reporter, NanoDa's independent kernel, the governance of the canonical allowlisted repositories,
 the pinned Licensee SPDX detector and its locked Ruby dependencies,
@@ -387,8 +422,9 @@ records that host snapshot and the effective percentage-based memory thresholds;
 it is not a reservation or a promise about later free capacity.
 
 The automatic GitHub-hosted tier supplies 330 minutes of verifier capacity
-inside its 350-minute job. Trusted systemd termination results identify OOM,
-timeout, and resource failures; the parent's wall-clock timeout is also trusted.
+inside its 350-minute job. The cgroup supervisor's termination results identify
+OOM, timeout, and resource failures; the parent's wall-clock timeout is also
+trusted.
 An arbitrary payload exit status or printed OOM message is not such evidence.
 Missing termination telemetry is an inconclusive provider error. Resource
 exhaustion retains the existing `infrastructure/resource-exhausted` outcome,
@@ -397,15 +433,22 @@ retrying: repeated exhaustion may require reducing resource use or arranging
 more capacity. A transient failure may permit an unchanged retry after its
 cause clears. Normal submission cooldowns apply; resource failures grant no refund.
 
-Successful per-phase CPU, maximum RSS, observed task peak, elapsed time, and
-approximate workspace usage are measured inside the systemd unit, outside
-Landrun. If that observer dies with the workload, the parent reads the unit's
-trusted termination result and available cgroup evidence, then stops/resets it
-with a bounded cleanup budget. Absent post-mortem cgroup files are not proof
-that no OOM occurred. When the parent reaches its deadline, the record marks
-`supervisor_timeout` and keeps the observed unit result in
-`systemd_result_before_cleanup`. It leaves `systemd_result` unset because a
-still-running unit's initial `Result=success` is not a termination verdict.
+Successful per-phase CPU, peak memory, observed task peak, elapsed time, and
+approximate workspace usage are measured by an observer inside the phase
+cgroup, which reads the cgroup's own peak-memory and CPU accounting (the
+sandbox's PID 1 does not pass its children's `rusage` up). If that observer
+dies with the workload, the parent reads the babysitter's status file and the
+cgroup's memory events, then kills and removes the cgroup with a bounded
+cleanup budget. Absent post-mortem cgroup files are not proof that no OOM
+occurred. When the parent reaches its deadline first, the record marks
+`supervisor_timeout` and leaves `systemd_result` unset, because no termination
+verdict exists yet. The `systemd_result`, `systemd_active_state`,
+`exec_main_code`, `exec_main_status` and `systemd_result_before_cleanup` fields
+keep their names and encodings for readers of existing records (`exec_main_code`
+is still `1` for an exit and `2` for a signal; `systemd_active_state` is
+`failed` for a finished phase that did not succeed); their values come from the
+cgroup supervisor, and every record also carries `supervisor`, `deadline_fired`,
+`cpu_max_applied`, `pids_events_max` and `rlimits_applied`.
 The report binds the profile id and digest; the profile
 is not a submitter-selectable Comparator configuration field.
 

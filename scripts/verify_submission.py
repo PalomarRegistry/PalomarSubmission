@@ -430,7 +430,6 @@ VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
-_SYSTEMD_MANAGER: str | None = None
 _RESOURCE_PHASE: str | None = None
 _RESOURCE_METRICS_PATH: Path | None = None
 _RESOURCE_DISK_PATH: Path | None = None
@@ -2233,7 +2232,6 @@ def build_allowlisted_roots(
     allowlist: dict[str, tuple[str, str]],
     base_env: dict[str, str],
     lake: Path,
-    landrun: Path,
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
@@ -2294,7 +2292,6 @@ def build_allowlisted_roots(
                 [str(lake), "build"],
                 cwd=root_dir,
                 environment=build_env,
-                landrun=landrun,
                 writable_directories=writable,
                 readable_paths=readable_paths,
                 executable_paths=executable_paths,
@@ -2425,50 +2422,6 @@ def system_readable_paths() -> list[Path]:
     return sorted(result)
 
 
-def landrun_command(
-    command: list[str],
-    *,
-    landrun: Path,
-    writable_directories: list[Path],
-    writable_files: tuple[Path, ...] | list[Path] = (),
-    readable_paths: list[Path] | None = None,
-    executable_paths: list[Path],
-    environment: dict[str, str],
-    readable_directories: tuple[Path, ...] | list[Path] = (),
-    unrestricted_network: bool = False,
-) -> list[str]:
-    """Build the outer, submission-wide Landrun policy."""
-    result = [
-        str(landrun),
-        "--best-effort",
-        "--ldd",
-        "--add-exec",
-    ]
-    for device in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
-        if Path(device).exists():
-            result.extend(["--rw", device])
-    for name in SANDBOX_ENVIRONMENT:
-        value = environment.get(name)
-        if value is not None:
-            if any(character in value for character in ("\0", "\n", "\r")):
-                raise VerificationError(f"invalid control character in sandbox environment {name}")
-            # Landrun looks the value up in the environment installed on the
-            # transient service. Passing JSON values inline would let its
-            # string-slice parser split them at commas.
-            result.extend(["--env", name])
-    for path in sorted({*(readable_paths or []), *readable_directories}):
-        result.extend(["--ro", str(path)])
-    for directory in sorted(set(writable_directories)):
-        result.extend(["--rwx", str(directory)])
-    for path in sorted(set(writable_files)):
-        result.extend(["--rw", str(path)])
-    for path in sorted(set(executable_paths)):
-        result.extend(["--rox", str(path)])
-    if unrestricted_network:
-        result.append("--unrestricted-network")
-    return [*result, "--", *command]
-
-
 def tool_snapshot(paths: list[Path]) -> dict[Path, str]:
     snapshot: dict[Path, str] = {}
     for path in paths:
@@ -2489,205 +2442,30 @@ def verify_tool_snapshot(snapshot: dict[Path, str]) -> None:
             raise VerificationError(f"verifier tool changed during execution: {path}")
 
 
-def systemd_command(
-    command: list[str],
-    *,
-    cwd: Path,
-    environment: dict[str, str],
-    timeout: int = 600,
-    unrestricted_network: bool = False,
-    resource_properties: tuple[str, ...] = (),
-    unit_name: str | None = None,
-) -> list[str]:
-    global _SYSTEMD_MANAGER
-
-    runner = shutil.which("systemd-run")
-    if not runner:
-        raise VerificationError("systemd-run is required for fail-closed confinement")
-    common = [
-        "--quiet",
-        "--pipe",
-        "--wait",
-        "--property=RestrictAddressFamilies=~AF_UNIX",
-        "--property=LimitNOFILE=524288",
-        "--property=NoNewPrivileges=yes",
-        "--property=RestrictSUIDSGID=yes",
-        "--property=LockPersonality=yes",
-        "--property=PrivateDevices=yes",
-        "--property=PrivateTmp=yes",
-        "--property=ProtectProc=invisible",
-        "--property=ProcSubset=pid",
-        f"--property=RuntimeMaxSec={max(1, timeout)}s",
-        f"--working-directory={cwd}",
-    ]
-    if unit_name is None:
-        common.append("--collect")
-    else:
-        if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
-            raise VerificationError("invalid verifier-owned systemd unit name")
-        common.append(f"--unit={unit_name}")
-    if not unrestricted_network:
-        common.append("--property=PrivateNetwork=yes")
-    for property_value in resource_properties:
-        if not property_value or "\n" in property_value or "\r" in property_value:
-            raise VerificationError("invalid systemd resource property")
-        common.append(f"--property={property_value}")
-    sudo = shutil.which("sudo")
-    true = shutil.which("true")
-    if not true:
-        raise VerificationError("true is required to probe the systemd confinement manager")
-
-    def manager_command(manager: str, properties: list[str]) -> list[str]:
-        if manager == "system":
-            if sudo is None:
-                raise VerificationError("passwordless sudo disappeared during verification")
-            return [
-                sudo,
-                "-n",
-                runner,
-                *properties,
-                f"--uid={os.getuid()}",
-                f"--gid={os.getgid()}",
-            ]
-        return [runner, "--user", *properties]
-
-    if _SYSTEMD_MANAGER is None:
-        # Probe the properties that hosted user managers commonly reject, not
-        # merely access to sudo or the bus. The successful choice is stable for
-        # this verifier process and avoids repeating transient probe units.
-        probe_common = [p for p in common if not p.startswith("--unit=")]
-        if "--collect" not in probe_common:
-            probe_common.append("--collect")
-        if "--property=PrivateNetwork=yes" not in probe_common:
-            probe_common.append("--property=PrivateNetwork=yes")
-        candidates = ["system", "user"] if sudo is not None else ["user"]
-        for candidate in candidates:
-            probe = run(
-                [*manager_command(candidate, probe_common), "--", true],
-                cwd=cwd,
-                env=environment,
-                timeout=30,
-                check=False,
-            )
-            if probe.returncode == 0:
-                _SYSTEMD_MANAGER = candidate
-                break
-        if _SYSTEMD_MANAGER is None:
-            raise VerificationError(
-                "neither passwordless systemd-run nor a user systemd manager can apply "
-                "the required confinement properties"
-            )
-
-    result = manager_command(_SYSTEMD_MANAGER, common)
-    for name in SANDBOX_ENVIRONMENT:
-        value = environment.get(name)
-        if value is not None:
-            if any(character in value for character in ("\0", "\n", "\r")):
-                raise VerificationError(f"invalid control character in sandbox environment {name}")
-            result.append(f"--setenv={name}={value}")
-    return [*result, "--", *command]
-
-
-def systemd_unit_outcome(
-    unit_name: str,
-    *,
-    cwd: Path,
-    environment: dict[str, str],
-) -> dict[str, Any]:
-    """Read cgroup termination evidence before systemd is allowed to collect it."""
-    def unavailable(message: str) -> VerificationError:
-        return VerificationError(
-            message,
-            code="provider.resource_telemetry_missing",
-            owner="provider",
-            next_action=(
-                "Palomar could not determine how the worker stopped. Report the workflow URL "
-                "if this persists; retry only after the reported condition is addressed. "
-                "Normal submission cooldowns still apply."
-            ),
-            retryable=True,
-        )
-
-    if _SYSTEMD_MANAGER not in {"system", "user"}:
-        raise unavailable("systemd confinement manager is unavailable")
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        raise unavailable("systemctl is required to inspect confined phases")
-    manager = [systemctl] if _SYSTEMD_MANAGER == "system" else [systemctl, "--user"]
-    unit = f"{unit_name}.service"
-    properties = [
-        "Result",
-        "ActiveState",
-        "ExecMainCode",
-        "ExecMainStatus",
-        "ControlGroup",
-        "MemoryPeak",
-        "CPUUsageNSec",
-    ]
-    try:
-        proc = subprocess.run(
-            [*manager, "show", unit, *[f"--property={name}" for name in properties]],
-            cwd=cwd, env=environment, timeout=10, check=False, capture_output=True, text=True,
-        )
-        if proc.returncode:
-            raise unavailable("could not inspect the completed confined phase")
-        outcome = {}
-        for line in proc.stdout.splitlines():
-            key, separator, value = line.partition("=")
-            if separator and key in properties:
-                outcome[key] = value
-        if not outcome.get("Result") or "ControlGroup" not in outcome:
-            raise unavailable("completed confined phase has incomplete systemd evidence")
-        events = {"oom": 0, "oom_kill": 0}
-        control_group = outcome.get("ControlGroup", "")
-        if control_group.startswith("/") and ".." not in Path(control_group).parts:
-            event_path = Path("/sys/fs/cgroup") / control_group.removeprefix("/") / "memory.events"
-            try:
-                for line in event_path.read_text(encoding="utf-8").splitlines():
-                    name, _, raw = line.partition(" ")
-                    if name in events and raw.isdigit():
-                        events[name] = int(raw)
-            except OSError:
-                # Result remains authoritative when this kernel does not expose
-                # cgroup-v2 memory events to the runner.
-                pass
-        return {**outcome, "memory_events": events}
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise unavailable(f"could not inspect the completed confined phase: {error}") from error
-    finally:
-        cleanup_manager = manager
-        if _SYSTEMD_MANAGER == "system":
-            sudo = shutil.which("sudo")
-            cleanup_manager = [sudo, "-n", *manager] if sudo else manager
-        # A timed-out worker may ignore SIGTERM. Kill the remaining cgroup
-        # before stop so cleanup does not depend on the manager's stop timeout.
-        for action in (["kill", "--signal=KILL", "--kill-whom=all"],
-                       ["stop"], ["reset-failed"]):
-            try:
-                subprocess.run(
-                    [*cleanup_manager, *action, unit], cwd=cwd, env=environment,
-                    timeout=10, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass  # Cleanup must not replace the phase's diagnostic.
-
-
-# --- cgroup supervisor (Phase 1a: inactive unless PALOMAR_SUPERVISOR=cgroup) ---------------
+# --- cgroup supervisor -----------------------------------------------------------------
 #
-# The systemd transient unit above supplied three things at once: isolation
-# properties, cgroup resource limits with a deadline, and trustworthy evidence of
-# how the phase ended. On a runner without systemd (the Namespace job container,
-# where PID 1 is a shell) the same three are supplied by bubblewrap
-# (`bwrap_command`), a small babysitter that owns a delegated cgroup
-# (`scripts/supervise_cgroup.py`, driven by `supervisor_command`) and its
-# status file (`supervisor_outcome`). The classification vocabulary and the
-# telemetry field names are kept so the mechanical report does not change shape.
+# Three things confine a phase: isolation (bubblewrap, `bwrap_command`), cgroup
+# resource limits with a deadline (a small babysitter that owns a delegated
+# cgroup, `scripts/supervise_cgroup.py`, driven by `supervisor_command`), and
+# trustworthy evidence of how the phase ended (its status file, read by
+# `supervisor_outcome`). The systemd transient unit that used to supply all
+# three is gone; the classification vocabulary and the telemetry field names
+# it established are kept so the mechanical report does not change shape.
 
-SUPERVISOR_KIND = os.environ.get("PALOMAR_SUPERVISOR", "systemd")
 _SUPERVISOR_BOOTSTRAP: list[str] | None = None
 _BWRAP: Path | None = (
     Path(os.environ["PALOMAR_BWRAP"]).resolve() if os.environ.get("PALOMAR_BWRAP") else None
 )
+
+
+def configure_bwrap(path: Path) -> Path:
+    """Select the bubblewrap binary every confined phase of this process uses."""
+    global _BWRAP
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise VerificationError(f"bubblewrap is not an executable file: {resolved}")
+    _BWRAP = resolved
+    return resolved
 SUPERVISOR_PARENT_MARGIN_SECONDS = 15
 SUPERVISOR_DEFAULT_GRACE_SECONDS = 30
 # Descriptors the babysitter hands the sandbox: bwrap reports on the first
@@ -3140,7 +2918,6 @@ def sandboxed_run(
     *,
     cwd: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     writable_files: tuple[Path, ...] | list[Path] = (),
     readable_paths: list[Path] | None = None,
@@ -3154,36 +2931,22 @@ def sandboxed_run(
 ) -> subprocess.CompletedProcess[str]:
     timeout = _deadline_timeout(timeout, command)
     verify_tool_snapshot(tools)
-    cgroup_supervisor = SUPERVISOR_KIND == "cgroup"
-    if cgroup_supervisor:
-        if _BWRAP is None:
-            raise VerificationError("bubblewrap is required for fail-closed confinement")
-        confined = bwrap_command(
-            command,
-            bwrap=_BWRAP,
-            writable_directories=writable_directories,
-            writable_files=writable_files,
-            readable_paths=readable_paths,
-            executable_paths=executable_paths,
-            environment=environment,
-            readable_directories=[cwd],
-            unrestricted_network=unrestricted_network,
-            nested_sandbox=nested_sandbox,
-            sandbox_status_fd=SANDBOX_STATUS_FD,
-            seccomp_fd=SECCOMP_FD,
-        )
-    else:
-        confined = landrun_command(
-            command,
-            landrun=landrun,
-            writable_directories=writable_directories,
-            writable_files=writable_files,
-            readable_paths=readable_paths,
-            executable_paths=executable_paths,
-            environment=environment,
-            readable_directories=[cwd],
-            unrestricted_network=unrestricted_network,
-        )
+    if _BWRAP is None:
+        raise VerificationError("bubblewrap is required for fail-closed confinement")
+    confined = bwrap_command(
+        command,
+        bwrap=_BWRAP,
+        writable_directories=writable_directories,
+        writable_files=writable_files,
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        environment=environment,
+        readable_directories=[cwd],
+        unrestricted_network=unrestricted_network,
+        nested_sandbox=nested_sandbox,
+        sandbox_status_fd=SANDBOX_STATUS_FD,
+        seccomp_fd=SECCOMP_FD,
+    )
     phase = _RESOURCE_PHASE or Path(command[0]).name[:80] or "phase"
     unit_name = f"palomar-{secrets.token_hex(12)}"
     if _RESOURCE_METRICS_PATH is not None:
@@ -3191,8 +2954,8 @@ def sandboxed_run(
         python = Path(sys.executable).resolve()
         if not metrics_wrapper.is_file():
             raise VerificationError("trusted resource measurement wrapper is missing")
-        # Successful rusage must measure the worker, not the systemd-run client.
-        # If this observer dies, the parent still inspects the unit result.
+        # The observer runs inside the phase cgroup, so its usage figures are
+        # the workload's. If it dies, the babysitter's status still classifies.
         confined = [
             str(python),
             str(metrics_wrapper),
@@ -3203,54 +2966,16 @@ def sandboxed_run(
             "--disk-path",
             str(_RESOURCE_DISK_PATH or cwd),
             "--cgroup-accounting",
-            *(
-                ["--pass-fd", str(SANDBOX_STATUS_FD), "--pass-fd", str(SECCOMP_FD)]
-                if cgroup_supervisor else []
-            ),
+            "--pass-fd", str(SANDBOX_STATUS_FD), "--pass-fd", str(SECCOMP_FD),
             "--",
             *confined,
         ]
     properties = tuple(dict.fromkeys((*permissive_resource_properties(), *resource_properties)))
-    if cgroup_supervisor:
-        return _cgroup_supervised_run(
-            command, confined, cwd=cwd, environment=environment, timeout=timeout, check=check,
-            resource_properties=properties, unit_name=unit_name, phase=phase, tools=tools,
-            unrestricted_network=unrestricted_network,
-        )
-    confined_command = systemd_command(
-        confined,
-        cwd=cwd,
-        environment=environment,
-        timeout=timeout,
+    return _cgroup_supervised_run(
+        command, confined, cwd=cwd, environment=environment, timeout=timeout, check=check,
+        resource_properties=properties, unit_name=unit_name, phase=phase, tools=tools,
         unrestricted_network=unrestricted_network,
-        resource_properties=properties,
-        unit_name=unit_name,
     )
-    try:
-        proc = run(
-            confined_command, cwd=cwd, env=environment, timeout=timeout, check=False,
-        )
-    except subprocess.TimeoutExpired:
-        # Killing the launcher alone need not stop its service. Inspection also
-        # stops/resets the unit using a bounded budget outside the work deadline.
-        try:
-            outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
-            if _RESOURCE_METRICS_PATH is not None:
-                append_resource_outcome(
-                    _RESOURCE_METRICS_PATH, phase, outcome, supervisor_timeout=True,
-                )
-        except VerificationError:
-            pass  # The parent's observed wall-clock expiry is already sufficient.
-        raise
-    outcome: dict[str, Any] = {}
-    # Failed transient services remain inspectable until reset. Successful
-    # services may be collected immediately, and need no termination diagnosis.
-    if proc.returncode:
-        outcome = systemd_unit_outcome(unit_name, cwd=cwd, environment=environment)
-        if _RESOURCE_METRICS_PATH is not None:
-            append_resource_outcome(_RESOURCE_METRICS_PATH, phase, outcome)
-    verify_tool_snapshot(tools)
-    return _classify_confined_result(command, proc, outcome, check=check)
 
 
 def _classify_confined_result(
@@ -3262,7 +2987,7 @@ def _classify_confined_result(
 ) -> subprocess.CompletedProcess[str]:
     # Payload output is attacker-controlled and must never manufacture an
     # infrastructure outcome merely by printing an OOM or timeout phrase.
-    # Numeric exit statuses are payload-controlled too. Only trusted unit
+    # Numeric exit statuses are payload-controlled too. Only the babysitter's
     # telemetry (or the parent's TimeoutExpired) establishes resource exhaustion.
     memory_events = outcome.get("memory_events", {})
     resource_results = {"oom-kill", "resources", "timeout", "watchdog"}
@@ -3376,7 +3101,6 @@ def _run_filesystem_confinement_probe(
     touch: Path,
     cwd: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -3394,7 +3118,7 @@ def _run_filesystem_confinement_probe(
     require_protected_paths([denied_probe], writable_directories)
     if denied_probe.exists():
         raise VerificationError(f"{existing_probe_error}: {denied_probe}")
-    allowed_probe = writable_directories[0] / ".palomar-landrun-write-probe"
+    allowed_probe = writable_directories[0] / ".palomar-write-probe"
     if allowed_probe.exists():
         raise VerificationError(
             f"filesystem confinement probe path already exists: {allowed_probe}"
@@ -3405,7 +3129,6 @@ def _run_filesystem_confinement_probe(
             [str(touch), str(allowed_probe)],
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -3424,7 +3147,6 @@ def _run_filesystem_confinement_probe(
             [str(touch), str(denied_probe)],
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -3451,7 +3173,6 @@ def verify_sandbox_confinement(
     touch: Path,
     cwd: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     protected_write_directories: list[Path] | None = None,
     readable_paths: list[Path],
@@ -3460,27 +3181,21 @@ def verify_sandbox_confinement(
 ) -> None:
     """Prove the composed outer boundary before untrusted code runs.
 
-    Positive controls: a write inside the first writable directory, a read of
-    ``positive_read``, and a nested Landrun domain. Negative controls: a write
-    outside the writable set, a write into each ``protected_write_directories``
-    entry, a read outside the read allowlist, a read of a live sibling
-    process's ``/proc`` environment, and an outbound TCP connection to a
-    listener the trusted parent has just accepted on.
+    Positive controls: a write inside the first writable directory and a read
+    of ``positive_read``. Negative controls: a write outside the writable set,
+    a write into each ``protected_write_directories`` entry, a read outside the
+    read allowlist, a read of a live sibling process's ``/proc`` environment,
+    an outbound TCP connection to a listener the trusted parent has just
+    accepted on, and the namespace controls: the sandbox's PID 1 carries no
+    environment, a nested user namespace is refused, the user namespace differs
+    from the host's, and canaries the parent has just written under the host
+    home directory, ``/tmp`` and ``/dev/shm`` are invisible.
 
-    The probes run under the same readable-path policy as the work they stand
-    for, so that what they demonstrate is a property of the policy actually
-    used. The filesystem assertions hold either way, since a readable path
-    grants no right to create or write; matching the real policy makes the
-    probes representative rather than merely sound. Every parameter is
-    required rather than defaulted, so that a later caller cannot quietly
-    probe a configuration nobody runs under.
-
-    Landrun is invoked with ``--best-effort``, which silently drops access
-    rights the running kernel's Landlock ABI does not support. These controls
-    are what makes that safe: a boundary degraded to the point of permitting a
-    denied read, write, or connection fails here, before any candidate Lean or
-    Lake configuration executes. Callers must therefore run this under the
-    same policy, and in the same network phase, as the work that follows.
+    The probes run under the same policy as the work they stand for, so that
+    what they demonstrate is a property of the policy actually used. Every
+    parameter is required rather than defaulted, so that a later caller cannot
+    quietly probe a configuration nobody runs under. Callers must run this in
+    the same network phase as the work that follows.
     """
 
     def detail(proc: subprocess.CompletedProcess[str]) -> str:
@@ -3496,40 +3211,70 @@ def verify_sandbox_confinement(
 
     read_probe.write_text("palomar confidential read sentinel\n", encoding="utf-8")
 
-    def verify_nested_confinement() -> None:
-        nested_probe = writable_directories[0] / ".palomar-nested-landrun-probe"
-        if nested_probe.exists():
-            raise VerificationError(
-                f"nested confinement probe path already exists: {nested_probe}"
-            )
+    def verify_namespace_confinement() -> None:
+        token = secrets.token_hex(8)
+        canaries = [
+            Path.home() / f".palomar-host-canary-{token}",
+            Path("/tmp") / f"palomar-host-canary-{token}",
+        ]
+        if Path("/dev/shm").is_dir():
+            canaries.append(Path("/dev/shm") / f"palomar-host-canary-{token}")
+        created: list[Path] = []
         try:
-            inner = landrun_command(
-                [str(touch), str(nested_probe)],
-                landrun=landrun,
-                writable_directories=writable_directories,
-                readable_paths=readable_paths,
-                executable_paths=executable_paths,
-                environment=environment,
-                readable_directories=[cwd],
+            for canary in canaries:
+                # Exclusive creation: a pre-existing path, symlink included,
+                # is somebody else's and is never removed by this probe.
+                try:
+                    with open(canary, "x", encoding="utf-8") as handle:
+                        handle.write("palomar host canary\n")
+                except FileExistsError as error:
+                    raise VerificationError(f"host canary path already exists: {canary}") from error
+                created.append(canary)
+            host_userns = os.readlink("/proc/self/ns/user")
+            # Beyond the namespaces, the seccomp filter's controls: no tracing
+            # of the parent (the standalone comparator shares the sandbox with
+            # the candidate build it runs), no AF_UNIX sockets, no setuid
+            # files, no personality changes.
+            namespace_script = (
+                "import ctypes, errno, os, socket, sys\n"
+                "failures = []\n"
+                "if open('/proc/1/environ', 'rb').read(): failures.append('pid 1 carries an environment')\n"
+                "libc = ctypes.CDLL(None, use_errno=True)\n"
+                "if libc.unshare(0x10000000) == 0: failures.append('nested user namespace permitted')\n"
+                "if os.readlink('/proc/self/ns/user') == sys.argv[1]:\n"
+                "    failures.append('host user namespace')\n"
+                "for raw in sys.argv[2:]:\n"
+                "    if os.path.lexists(raw): failures.append('host canary visible: ' + raw)\n"
+                "if libc.ptrace(16, os.getppid(), 0, 0) != -1 or ctypes.get_errno() != errno.EPERM:\n"
+                "    failures.append('ptrace of the parent permitted')\n"
+                "try:\n"
+                "    socket.socket(socket.AF_UNIX).close(); failures.append('AF_UNIX socket permitted')\n"
+                "except PermissionError: pass\n"
+                "if libc.personality(0x0040000) != -1: failures.append('personality change permitted')\n"
+                "probe = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'palomar-setuid-probe')\n"
+                "open(probe, 'w').close()\n"
+                "try:\n"
+                "    os.chmod(probe, 0o4755); failures.append('setuid file creation permitted')\n"
+                "except PermissionError: pass\n"
+                "os.unlink(probe)\n"
+                "print('; '.join(failures))\n"
+                "sys.exit(1 if failures else 0)\n"
             )
-            nested = sandboxed_run(
-                inner,
+            namespaces = sandboxed_run(
+                [str(python), "-c", namespace_script, host_userns, *(str(c) for c in canaries)],
                 cwd=cwd,
                 environment=environment,
-                landrun=landrun,
                 writable_directories=writable_directories,
                 readable_paths=readable_paths,
                 executable_paths=executable_paths,
                 tools=tools,
                 check=False,
             )
-            nested_created = nested_probe.is_file()
         finally:
-            nested_probe.unlink(missing_ok=True)
-        if nested.returncode or not nested_created:
-            raise VerificationError(
-                "nested Landrun confinement is unavailable" + detail(nested)
-            )
+            for canary in created:
+                canary.unlink(missing_ok=True)
+        if namespaces.returncode:
+            raise VerificationError("outer sandbox namespace controls failed" + detail(namespaces))
 
     result: _ConfinementProbeResult | None = None
     try:
@@ -3539,12 +3284,11 @@ def verify_sandbox_confinement(
             touch=touch,
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
-            after_allowed=verify_nested_confinement,
+            after_allowed=verify_namespace_confinement,
         )
     finally:
         if result is None:
@@ -3584,7 +3328,6 @@ def verify_sandbox_confinement(
             [str(python), "-c", frozen_script, *(str(path) for path in protected)],
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -3603,7 +3346,6 @@ def verify_sandbox_confinement(
         [str(python), "-c", read_script, str(positive_read)],
         cwd=cwd,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -3618,7 +3360,6 @@ def verify_sandbox_confinement(
         [str(python), "-c", read_script, str(read_probe)],
         cwd=cwd,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -3655,7 +3396,6 @@ def verify_sandbox_confinement(
             [str(python), "-c", read_script, f"/proc/{holder.pid}/environ"],
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -3689,7 +3429,6 @@ def verify_sandbox_confinement(
             [str(python), "-c", network_script, str(port)],
             cwd=cwd,
             environment=environment,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -4451,7 +4190,6 @@ def get_mathlib_cache(
     base_env: dict[str, str],
     allowlist: dict[str, tuple[str, str]],
     lake: Path,
-    landrun: Path,
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
@@ -4565,7 +4303,6 @@ def get_mathlib_cache(
             [str(lake), "exe", "cache", "get"],
             cwd=staged.root_package,
             environment=staged_env,
-            landrun=landrun,
             writable_directories=list(staged.lake_roots),
             readable_paths=sorted({staged.source, *system_readable_paths()}),
             executable_paths=executable_paths,
@@ -4629,7 +4366,6 @@ def get_mathlib_cache(
             [str(lake), "build"],
             cwd=package_dir,
             environment=cache_env,
-            landrun=landrun,
             writable_directories=cache_writable,
             writable_files=replay_writable_files,
             readable_paths=readable_paths,
@@ -4664,7 +4400,6 @@ def get_mathlib_cache(
                 [str(lake), "build"],
                 cwd=replay.source,
                 environment=replay_env,
-                landrun=landrun,
                 writable_directories=[replay.lake_root, *cache_writable],
                 readable_paths=sorted(
                     {replay.source, checkout.resolve(), *system_readable_paths()}
@@ -4764,7 +4499,6 @@ def lean_header(
     lean_source: Path,
     lean: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -4781,7 +4515,6 @@ def lean_header(
         [str(lean), "--deps-json", str(lean_source)],
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -4796,7 +4529,6 @@ def lean_source_dependencies(
     challenge_source: Path,
     lean: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -4806,7 +4538,6 @@ def lean_source_dependencies(
         [str(lean), "--src-deps", str(challenge_source)],
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -4894,7 +4625,6 @@ def lake_environment_value(
     lake: Path,
     printenv: Path,
     environment: dict[str, str],
-    landrun: Path,
     writable_directories: list[Path],
     readable_paths: list[Path],
     executable_paths: list[Path],
@@ -4905,7 +4635,6 @@ def lake_environment_value(
         [str(lake), "env", str(printenv), name],
         cwd=source,
         environment=environment,
-        landrun=landrun,
         writable_directories=writable_directories,
         readable_paths=readable_paths,
         executable_paths=executable_paths,
@@ -5063,7 +4792,6 @@ def compile_canonical_challenge(
     lean_prefix: Path,
     allowlist: dict[str, tuple[str, str]],
     environment: dict[str, str],
-    landrun: Path,
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
@@ -5136,7 +4864,6 @@ def compile_canonical_challenge(
         [str(lean), "-o", str(compiled_olean), str(challenge_source)],
         cwd=source,
         environment=canonical_env,
-        landrun=landrun,
         writable_directories=[scratch.resolve()],
         readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
@@ -5150,7 +4877,6 @@ def compile_canonical_challenge(
         lean_source=challenge_source,
         lean=lean,
         environment=canonical_env,
-        landrun=landrun,
         writable_directories=[scratch.resolve()],
         readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
@@ -5186,7 +4912,6 @@ def compile_canonical_challenge(
         challenge_source=challenge_source,
         lean=lean,
         environment=canonical_env,
-        landrun=landrun,
         writable_directories=[scratch.resolve()],
         readable_paths=canonical_readable_paths,
         executable_paths=executable_paths,
@@ -5294,12 +5019,13 @@ def execute(args: argparse.Namespace) -> int:
         lean4export = Path(args.lean4export).resolve()
         landrun = Path(args.landrun).resolve()
         nanoda = Path(args.nanoda).resolve()
+        bwrap = configure_bwrap(Path(args.bwrap))
         adapter = (ROOT / "scripts" / "landrun_passthrough.py").resolve()
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         babysitter = (ROOT / "scripts" / "supervise_cgroup.py").resolve()
         delegate = (ROOT / "scripts" / "cgroup_delegate.py").resolve()
         verifier = Path(__file__).resolve()
-        for tool in (comparator, lean4export, landrun, nanoda, adapter, metrics_wrapper,
+        for tool in (comparator, lean4export, landrun, nanoda, bwrap, adapter, metrics_wrapper,
                      babysitter, delegate, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
@@ -5419,6 +5145,7 @@ def execute(args: argparse.Namespace) -> int:
                 lean4export,
                 landrun,
                 nanoda,
+                bwrap,
                 adapter,
                 metrics_wrapper,
                 verifier,
@@ -5438,6 +5165,7 @@ def execute(args: argparse.Namespace) -> int:
                 landrun,
                 nanoda,
                 comparator_config,
+                bwrap,
                 adapter,
                 metrics_wrapper,
                 babysitter,
@@ -5456,14 +5184,13 @@ def execute(args: argparse.Namespace) -> int:
         # proves that its positive and negative controls work on this runner.
         # No candidate-controlled Lean or Lake code executes before this probe.
         verify_sandbox_confinement(
-            work / "landrun-initial-write-denial-probe",
-            work / "landrun-initial-read-denial-probe",
+            work / "initial-write-denial-probe",
+            work / "initial-read-denial-probe",
             positive_read=lakefile_path,
             python=python,
             touch=touch,
             cwd=source,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5477,7 +5204,6 @@ def execute(args: argparse.Namespace) -> int:
             lake=lake,
             printenv=printenv,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5510,7 +5236,6 @@ def execute(args: argparse.Namespace) -> int:
             lean_source=challenge_source,
             lean=lean,
             environment=env,
-            landrun=landrun,
             writable_directories=writable_directories,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5553,7 +5278,6 @@ def execute(args: argparse.Namespace) -> int:
             base_env=env,
             allowlist=allowlist,
             lake=lake,
-            landrun=landrun,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
@@ -5567,7 +5291,6 @@ def execute(args: argparse.Namespace) -> int:
             allowlist=allowlist,
             base_env=env,
             lake=lake,
-            landrun=landrun,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
@@ -5598,7 +5321,6 @@ def execute(args: argparse.Namespace) -> int:
             lean_prefix=lean_prefix,
             allowlist=allowlist,
             environment=env,
-            landrun=landrun,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
@@ -5650,14 +5372,13 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "confinement-final"
         guarded_write()
         verify_sandbox_confinement(
-            work / "landrun-write-denial-probe",
-            work / "landrun-read-denial-probe",
+            work / "write-denial-probe",
+            work / "read-denial-probe",
             positive_read=challenge_source,
             python=python,
             touch=touch,
             cwd=source,
             environment=env,
-            landrun=landrun,
             writable_directories=candidate_writable,
             protected_write_directories=sorted(trusted_build_directories),
             readable_paths=readable_paths,
@@ -5673,7 +5394,6 @@ def execute(args: argparse.Namespace) -> int:
             lake=lake,
             printenv=printenv,
             environment=env,
-            landrun=landrun,
             writable_directories=candidate_writable,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5686,7 +5406,6 @@ def execute(args: argparse.Namespace) -> int:
             lake=lake,
             printenv=printenv,
             environment=env,
-            landrun=landrun,
             writable_directories=candidate_writable,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5705,7 +5424,6 @@ def execute(args: argparse.Namespace) -> int:
             [str(comparator), str(comparator_config)],
             cwd=source,
             environment=env,
-            landrun=landrun,
             writable_directories=candidate_writable,
             readable_paths=readable_paths,
             executable_paths=executable_paths,
@@ -5815,6 +5533,7 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--comparator", required=True)
     execute_parser.add_argument("--lean4export", required=True)
     execute_parser.add_argument("--landrun", required=True)
+    execute_parser.add_argument("--bwrap", required=True)
     execute_parser.add_argument("--nanoda", required=True)
     execute_parser.add_argument("--comparator-commit", required=True)
     execute_parser.add_argument("--landrun-commit", required=True)
