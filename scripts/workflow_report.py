@@ -122,8 +122,25 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
         if not re.fullmatch(r"[0-9a-f]{32}", attempt):
             raise ValueError("invalid execution attempt")
         result["execution_attempt"] = attempt
-    result["execution_profile"] = inputs.get("execution_profile") or "palomar-standard-v1"
+    result["execution_profile"] = inputs.get("execution_profile") or resolved_profile(report)
     return result
+
+
+def resolved_profile(report: Any) -> str:
+    """The profile the verifier ran under when the dispatch named none.
+
+    The verifier records it in the report's resource evidence; before that
+    evidence exists (a failure during setup) the answer is the catalogue's
+    default, which is what the workflow's profile job resolved.
+    """
+    if isinstance(report, dict):
+        evidence = report.get("verification_profile")
+        if isinstance(evidence, dict) and isinstance(evidence.get("id"), str):
+            return evidence["id"]
+    catalogue = json.loads(
+        (Path(__file__).resolve().parents[1] / "execution-profiles.json").read_text(encoding="utf-8")
+    )
+    return str(catalogue["default"])
 
 
 def gate(report: dict, mode: str, ready: str, steps: dict) -> bool:

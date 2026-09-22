@@ -37,6 +37,24 @@ class WorkflowRecoveryTests(unittest.TestCase):
             result = workflow_report.finalize(report, self.inputs, {}, workflow_url="run")
             self.assertEqual(result["status"], "error")
 
+    def test_execution_profile_records_what_the_verifier_resolved(self):
+        inputs = {**self.inputs, "execution_profile": ""}
+        evidence = {"verification_profile": {"id": "palomar-namespace-16x32-v1"}}
+        result = workflow_report.finalize(
+            {"status": "pending", "errors": [], **evidence}, inputs, {}, workflow_url="run",
+        )
+        self.assertEqual(result["execution_profile"], "palomar-namespace-16x32-v1")
+        # Before any resource evidence exists the answer is the catalogue default.
+        result = workflow_report.finalize({"status": "pending", "errors": []}, inputs, {}, workflow_url="run")
+        self.assertEqual(result["execution_profile"], workflow_report.resolved_profile({}))
+        self.assertNotEqual(workflow_report.resolved_profile({}), "")
+        # An operator's explicit choice is recorded as given.
+        chosen = {**self.inputs, "execution_profile": "palomar-standard-v1"}
+        result = workflow_report.finalize(
+            {"status": "pending", "errors": [], **evidence}, chosen, {}, workflow_url="run",
+        )
+        self.assertEqual(result["execution_profile"], "palomar-standard-v1")
+
     def test_terminal_failure_preserved(self):
         report = self.report("fail")
         report["errors"] = ["user error"]
