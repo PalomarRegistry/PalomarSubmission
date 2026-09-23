@@ -16,9 +16,10 @@ and safety on both sides; its name enters the worklist. `Compare.loop` then
 walks the used-constant graph transitively and requires each ordinary
 declaration reached to be identical in both environments. The kernel's builtin
 constants (`primitiveTargets`) seed the same walk, which is why Palomar exports
-them alongside the declarations; the list is read from the toolchain's own
-source rather than copied, and an export that lacked one would fail a valid
-proof.
+them alongside the declarations; that list is read from the toolchain's own
+source rather than copied (the quotient additions `builtinTargets` makes when
+`Quot.sound` is permitted are held in Palomar), and an export that lacked one
+would fail a valid proof.
 
 Configured `definition_names` are deliberate holes, not ordinary dependencies.
 A named definition is compared by type and safety, the constants used by that

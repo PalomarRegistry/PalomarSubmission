@@ -67,25 +67,31 @@ PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
 TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")
 BWRAP_SOURCE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 # `lake comparator` exits 2 when it could not run at all and 1 both when it has
-# found against the submission and when a step of its own failed. These are the
-# lines it prints in the first case (Lake/Check/Compare.lean, Axioms.lean and
-# CLI/Check.lean at v4.35.0-rc2); no candidate code runs in the judge phase, so
-# the log is the comparator's own. The infrastructure markers win: a kernel
-# whose nested sandbox never started also "exited with" a code.
-COMPARATOR_VERDICT_MARKERS = (
-    "Const not found in challenge",
-    "Const not found in solution",
-    "Constant not found in solution",
-    "Const does not match between challenge and target",
-    "Challenge and solution constant kind don't match",
-    "Challenge and solution theorem statement do not match",
-    "Challenge constant is not a definition",
-    "Solution constant is not a definition",
-    "Solution constant is not a theorem",
-    "Illegal axiom detected",
-    "kernel rejected the solution",
+# found against the submission and when a step of its own failed. What it
+# prints tells the two apart (Lake/Check/Compare.lean, Axioms.lean and
+# CLI/Check.lean at v4.35.0-rc2). No candidate code runs in the judge phase,
+# but the transcript quotes declaration names the submitter chose, so every
+# marker is anchored to the start of its line and the names are kept free of
+# control characters: a name cannot begin a line of its own.
+COMPARATOR_VERDICT_RE = re.compile(
+    r"^error: (?:"
+    r"Const not found in challenge|Const not found in solution|Constant not found in solution"
+    r"|Const does not match between challenge and target"
+    r"|Challenge and solution constant kind don't match"
+    r"|Challenge and solution theorem statement do not match"
+    r"|Challenge constant is not a definition|Solution constant is not a definition"
+    r"|Solution constant is not a theorem|Illegal axiom detected)",
+    re.MULTILINE,
 )
-COMPARATOR_INFRASTRUCTURE_MARKERS = ("Error while interacting with", "bwrap: ")
+# `runExternalKernel` says "rejected" for every nonzero kernel exit, a crash
+# included, so a kernel's word alone is not a verdict. Lean's own kernel runs
+# last and is the arbiter: its rejection is the submission's; an independent
+# kernel failing while Lean's accepts is Palomar's to look at.
+COMPARATOR_KERNEL_REJECTED_RE = re.compile(r"^(?P<kernel>[^\n]+) kernel rejected the solution$", re.MULTILINE)
+COMPARATOR_LEAN_KERNEL = "Lean default"
+COMPARATOR_INFRASTRUCTURE_RE = re.compile(
+    r"^(?:bwrap: |Error while interacting with |error: Error while interacting with )", re.MULTILINE
+)
 COMPARATOR_REQUIRED_KEYS = {
     "challenge_module",
     "solution_module",
@@ -1066,6 +1072,8 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         raise VerificationError("comparator theorem_names must be a nonempty array")
     if not all(isinstance(item, str) and item for item in theorem_names + definition_names):
         raise VerificationError("comparator declaration names must be nonempty strings")
+    if any(re.search(r"[\x00-\x1f\x7f]", item) for item in theorem_names + definition_names):
+        raise VerificationError("comparator declaration names must not contain control characters")
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError(
@@ -4762,7 +4770,7 @@ def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
             next_action=RETRY_SAME_COMMIT,
             retryable=True,
         )
-    if any(marker in log for marker in COMPARATOR_INFRASTRUCTURE_MARKERS):
+    if COMPARATOR_INFRASTRUCTURE_RE.search(log):
         return VerificationError(
             "lake comparator's nested sandbox or one of its kernels failed to run",
             code="palomar.comparator_sandbox_failed",
@@ -4771,7 +4779,10 @@ def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
             next_action=RETRY_SAME_COMMIT,
             retryable=True,
         )
-    if returncode == 1 and any(marker in log for marker in COMPARATOR_VERDICT_MARKERS):
+    rejecting_kernels = COMPARATOR_KERNEL_REJECTED_RE.findall(log)
+    if returncode == 1 and (
+        COMPARATOR_VERDICT_RE.search(log) or COMPARATOR_LEAN_KERNEL in rejecting_kernels
+    ):
         return VerificationError(
             "lake comparator rejected the project",
             code="comparator.rejected",
@@ -4780,6 +4791,19 @@ def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
                 "Correct the Comparator failure quoted above, commit it, and make "
                 "a new submission."
             ),
+        )
+    if rejecting_kernels:
+        return VerificationError(
+            "an independent kernel failed or rejected the proof that Lean's kernel accepted: "
+            + ", ".join(sorted(set(rejecting_kernels))),
+            code="palomar.kernel_disagreement",
+            owner="palomar",
+            detail=excerpt,
+            next_action=(
+                "Do not change the repository. Palomar must examine this run; report the "
+                "workflow URL."
+            ),
+            retryable=True,
         )
     return VerificationError(
         f"lake comparator stopped without a verdict (exit {returncode})",
@@ -4858,10 +4882,23 @@ def primitive_targets(lean_prefix: Path) -> list[str]:
     )
     if match is None:
         raise refusal
+    # Strip comments (`-- ``Nat.zero,` is a commented-out entry, not an entry),
+    # then accept exactly one literal array of quoted names and nothing else:
+    # a list assembled any other way would be read only in part.
+    body = re.sub(r"/-.*?-/", "", match.group("body"), flags=re.DOTALL)
+    body = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+    literal = re.fullmatch(r"\s*return\s*#\[(?P<items>[^\[\]]*)\]\s*", body)
+    if literal is None:
+        raise refusal
     names: list[str] = []
-    for line in match.group("body").splitlines():
-        # `-- ``Nat.zero,` is a commented-out entry, not an entry.
-        names.extend(re.findall(r"``([A-Za-z_][A-Za-z0-9_'.]*)", line.split("--", 1)[0]))
+    for item in literal.group("items").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name = re.fullmatch(r"``([A-Za-z_][A-Za-z0-9_'.]*)", item)
+        if name is None:
+            raise refusal
+        names.append(name.group(1))
     if not names or len(set(names)) != len(names):
         raise refusal
     return names
@@ -4913,6 +4950,79 @@ def export_module(
         check=False,
         stdout_path=output,
     )
+
+
+def export_failure(
+    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool
+) -> VerificationError:
+    """Say what a failed export means.
+
+    The exporter panics on a declaration the module does not define, and the
+    declarations it is asked for are the ones `comparator.json` names, so that
+    is the submitter's configuration to fix, whichever module it was. Any
+    other failure of the Challenge export is Palomar's, because Palomar
+    compiled that module; any other failure of the Solution export is the
+    candidate build's.
+    """
+    excerpt = comparator_failure_excerpt(proc.stderr)
+    if "not found in environment" in proc.stderr:
+        return VerificationError(
+            f"comparator.json names a declaration that {module} does not define",
+            code="comparator.declaration_missing",
+            detail=excerpt,
+            next_action=(
+                "Name in comparator.json only declarations the Challenge and Solution "
+                "modules define, commit the correction, and make a new submission."
+            ),
+        )
+    if palomar_owned:
+        return VerificationError(
+            f"exporting the Challenge that Palomar compiled failed (exit {proc.returncode})",
+            code="palomar.challenge_export_failed",
+            owner="palomar",
+            detail=excerpt,
+            next_action=RETRY_SAME_COMMIT,
+            retryable=True,
+        )
+    return VerificationError(
+        f"exporting the Solution failed (exit {proc.returncode})",
+        code="solution.export_failed",
+        detail=excerpt,
+        next_action=(
+            "Correct the failure quoted above, commit it, and make a new submission."
+        ),
+    )
+
+
+def ill_typed_export(source: Path, theorem: str) -> bytes:
+    """A copy of an export in which `theorem`'s proof is its own statement.
+
+    The export is NDJSON: a name table, an expression table and one record per
+    declaration referring into them. Replacing the theorem's `value` by its
+    `type` keeps every record well-formed and makes the proof ill-typed, which
+    is exactly what a kernel, and nothing before it, must refuse.
+    """
+    lines = source.read_bytes().split(b"\n")
+    records = [json.loads(line) for line in lines if line.strip()]
+    name_index = next(
+        (
+            record["in"]
+            for record in records
+            if "in" in record and record.get("str", {}).get("str") == theorem
+        ),
+        None,
+    )
+    if name_index is None:
+        raise VerificationError(f"export does not name {theorem}")
+    for position, record in enumerate(records):
+        declaration = record.get("thm")
+        if isinstance(declaration, dict) and declaration.get("name") == name_index:
+            declaration["value"] = declaration["type"]
+            records[position] = {"thm": declaration}
+            break
+    else:
+        raise VerificationError(f"export carries no theorem record for {theorem}")
+    return b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
 
 
 def verify_export(output: Path) -> None:
@@ -4987,7 +5097,7 @@ def judge_exports(
         environment=env,
         writable_directories=[scratch.resolve()],
         readable_paths=sorted({
-            config.resolve(), challenge_export.parent.resolve(), solution_export.parent.resolve(),
+            config.resolve(), challenge_export.resolve(), solution_export.resolve(),
             *system_readable_paths(),
         }),
         executable_paths=sorted({lean_prefix, bwrap, *system_executables}),
@@ -5102,7 +5212,19 @@ def comparator_preflight(
             raise
         raise failure(str(error), error.detail or "") from error
 
-    for solution, expected in (("PalomarPreflightSolution", 0), ("PalomarPreflightWrong", 1)):
+    # The mismatched pair is refused before any kernel runs. A copy of the
+    # matching Solution export whose proof is replaced by its own statement
+    # is well-formed and ill-typed: only the kernels can refuse it, and Lean's
+    # must, in the words the verdict reader expects.
+    tampered = exports / "PalomarPreflightIllTyped.export"
+    tampered.write_bytes(
+        ill_typed_export(exports / "PalomarPreflightSolution.export", "palomar_preflight")
+    )
+    for solution, expected in (
+        ("PalomarPreflightSolution", 0),
+        ("PalomarPreflightWrong", 1),
+        ("PalomarPreflightIllTyped", 1),
+    ):
         scratch = root / f"judge-{solution}"
         proc = judge_exports(
             lake=lake,
@@ -5120,12 +5242,16 @@ def comparator_preflight(
         verdict = comparator_verdict(proc.returncode, log)
         if expected == 0 and (verdict is not None or "Your solution is okay!" not in log):
             raise failure("a matching export pair was not accepted", log)
-        if expected == 1 and (
-            verdict is None
-            or verdict.code != "comparator.rejected"
-            or "Challenge and solution theorem statement do not match" not in log
+        if expected == 1 and (verdict is None or verdict.code != "comparator.rejected"):
+            raise failure(f"{solution} was not found against", log)
+        if solution == "PalomarPreflightWrong" and (
+            "Challenge and solution theorem statement do not match" not in log
         ):
-            raise failure("a mismatched export pair was not found against", log)
+            raise failure("a mismatched export pair was not found against by comparison", log)
+        if solution == "PalomarPreflightIllTyped" and (
+            COMPARATOR_LEAN_KERNEL not in COMPARATOR_KERNEL_REJECTED_RE.findall(log)
+        ):
+            raise failure("an ill-typed proof was not refused by Lean's kernel", log)
 
 
 def protected_lean_path(
@@ -5517,10 +5643,10 @@ def execute(args: argparse.Namespace) -> int:
         protected_challenge = protected_config["challenge_module"]
         env["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
         # The configuration the judge consumes travels with the report, which
-        # the evidence bundle archives, so the record's digest can be checked
-        # against the bytes rather than against a description of them.
+        # the evidence bundle archives: the file's exact text, so the record's
+        # digest is checked against the bytes and not a description of them.
         report["protected_config_sha256"] = sha256(comparator_config)
-        report["protected_config"] = protected_config
+        report["protected_config"] = comparator_config.read_text(encoding="utf-8")
         report["stage"] = "setup"
         guarded_write()
         readable_paths = sorted(
@@ -5819,6 +5945,37 @@ def execute(args: argparse.Namespace) -> int:
             guarded_write()
             return 0
 
+        # Both exports go to a verifier-owned directory that no candidate
+        # phase can write to, and are snapshotted so the judge reads exactly
+        # what the exporter wrote. The Challenge export comes from the
+        # canonical module, first on the protected search path, so the
+        # candidate's own Challenge build output never supplies the statement.
+        exports = work / "exports"
+        exports.mkdir()
+        require_protected_paths([exports], candidate_writable)
+        targets = comparator_export_targets(protected_config, primitives)
+        report["stage"] = "challenge-export"
+        guarded_write()
+        challenge_export = exports / "challenge.export"
+        proc = export_module(
+            protected_challenge,
+            targets,
+            output=challenge_export,
+            leanexport=leanexport,
+            cwd=source,
+            environment=env,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        if proc.returncode:
+            return stop(
+                export_failure(proc, module="the Challenge", palomar_owned=True), "challenge-export"
+            )
+        verify_export(challenge_export)
+        tools[challenge_export.resolve()] = sha256(challenge_export)
+
         # The candidate's Lake build, under the candidate policy. This is
         # where the submitted code runs.
         report["stage"] = "solution-build"
@@ -5850,45 +6007,6 @@ def execute(args: argparse.Namespace) -> int:
                 "solution-build",
             )
 
-        # Both exports go to a verifier-owned directory that no candidate
-        # phase can write to, and are snapshotted so the judge reads exactly
-        # what the exporter wrote. The Challenge export comes from the
-        # canonical module, first on the protected search path, so the
-        # candidate's own Challenge build output never supplies the statement.
-        exports = work / "exports"
-        exports.mkdir()
-        require_protected_paths([exports], candidate_writable)
-        targets = comparator_export_targets(protected_config, primitives)
-        report["stage"] = "challenge-export"
-        guarded_write()
-        challenge_export = exports / "challenge.export"
-        proc = export_module(
-            protected_challenge,
-            targets,
-            output=challenge_export,
-            leanexport=leanexport,
-            cwd=source,
-            environment=env,
-            readable_paths=readable_paths,
-            executable_paths=executable_paths,
-            tools=tools,
-            timeout=EXECUTION_BUDGET_SECONDS,
-        )
-        if proc.returncode:
-            return stop(
-                VerificationError(
-                    f"exporting the Challenge that Palomar compiled failed (exit {proc.returncode})",
-                    code="palomar.challenge_export_failed",
-                    owner="palomar",
-                    detail=comparator_failure_excerpt(proc.stderr),
-                    next_action=RETRY_SAME_COMMIT,
-                    retryable=True,
-                ),
-                "challenge-export",
-            )
-        verify_export(challenge_export)
-        tools[challenge_export.resolve()] = sha256(challenge_export)
-
         report["stage"] = "solution-export"
         guarded_write()
         solution_export = exports / "solution.export"
@@ -5906,17 +6024,7 @@ def execute(args: argparse.Namespace) -> int:
         )
         if proc.returncode:
             return stop(
-                VerificationError(
-                    f"exporting the Solution failed (exit {proc.returncode})",
-                    code="solution.export_failed",
-                    detail=comparator_failure_excerpt(proc.stderr),
-                    next_action=(
-                        "Make sure every declaration named in comparator.json exists in the "
-                        "Solution module, correct the failure quoted above, commit it, and "
-                        "make a new submission."
-                    ),
-                ),
-                "solution-export",
+                export_failure(proc, module="the Solution", palomar_owned=False), "solution-export"
             )
         verify_export(solution_export)
         tools[solution_export.resolve()] = sha256(solution_export)

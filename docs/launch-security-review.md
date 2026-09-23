@@ -59,15 +59,18 @@ artifact as hostile. Its security-relevant sequence is:
    toolchain's `leanexport` into verifier-owned files, and run the toolchain's
    `lake comparator` over the two exports under a policy that binds no
    candidate tree, with a verifier-authored protected configuration that
-   registers the toolchain's bundled NanoDa and con-ron kernels and replaces
-   only the Challenge module name with the canonical alias.
+   registers the toolchain's bundled NanoDa and con-ron kernels (two of the
+   five checkers `--paranoid` would add) and replaces only the Challenge
+   module name with the canonical alias.
    Publish the protected Challenge under a collision-resistant verifier-owned
    top-level module alias, then resolve that alias, Lean core, and frozen trusted
    modules before candidate paths in the export's `LEAN_PATH`; candidate output
    cannot replace any of them, and the protected root cannot capture a sibling
    Solution under the submitted Challenge namespace. Require Lean's kernel and
    both bundled independent kernels to accept the exported proof, and read the
-   comparator's exit as a rejection only when its transcript says so.
+   comparator's exit as a rejection only when its comparison, its axiom pass
+   or Lean's own kernel says so; an independent kernel failing alone is a
+   disagreement for Palomar to examine, not a verdict.
 7. Write the bounded report after sandboxed execution, outside every
    sandbox-writable directory, and upload it as a run artifact. There is no
    second job: the submission server collects the artifact, so nothing here
@@ -185,10 +188,12 @@ candidate tree, so they can narrow but not widen it. The from-export form does
 not check that the exports belong to the project; Palomar produced both, from
 the canonical Challenge and the verified checkout, which is why the Challenge
 module is independently protected and both export files are snapshotted before
-the judge reads them. The export target list (the configured declarations, the
-permitted axioms, the kernel's builtin constants and the quotient primitives)
-is read from the selected toolchain's own `Lake/CLI/Check.lean` rather than
-copied, and the preflight proves it on every run.
+the judge reads them. The kernel's builtin constants in the export target list
+are read from the selected toolchain's own `Lake/CLI/Check.lean` (accepting
+only a literal array of names, so a list assembled any other way is refused
+rather than read in part); the quotient additions and the ordering follow
+`compareIt` and are small enough to hold in Palomar. The preflight, whose
+matching pair must pass, proves the list on every run.
 
 ### Reviewer and policy
 

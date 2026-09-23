@@ -2870,13 +2870,45 @@ review:
             "error: Solution constant is not a definition: 'Foo.bar'",
             "error: Solution constant is not a theorem: 'Foo.bar'",
             "error: Illegal axiom detected: 'sorryAx'",
-            "con-ron kernel rejected the solution\nerror: con-ron exited with 1",
+            "con-ron kernel accepts the solution\nLean default kernel rejected the solution\n"
+            "error: Lean default exited with 1",
+            "nanoda kernel rejected the solution\nLean default kernel rejected the solution\n"
+            "error: nanoda exited with 101",
         ):
             with self.subTest(line=line):
                 error = comparator_verdict(1, "Running con-ron kernel on solution\n" + line)
                 self.assertEqual(error.code, "comparator.rejected")
                 self.assertEqual(error.owner, "submitter")
                 self.assertFalse(error.retryable)
+
+    def test_an_independent_kernel_alone_does_not_reject(self):
+        # `runExternalKernel` says "rejected" for every nonzero exit, a crash
+        # included; Lean's own kernel is the arbiter.
+        for log in (
+            "con-ron kernel rejected the solution\nLean default kernel accepts the solution\n"
+            "error: con-ron exited with 139",
+            "nanoda kernel rejected the solution\ncon-ron kernel accepts the solution\n"
+            "Lean default kernel accepts the solution\nerror: nanoda exited with 101",
+        ):
+            with self.subTest(log=log[:24]):
+                error = comparator_verdict(1, log)
+                self.assertEqual(error.code, "palomar.kernel_disagreement")
+                self.assertEqual(error.owner, "palomar")
+                self.assertTrue(error.retryable)
+
+    def test_a_marker_quoted_inside_a_declaration_name_is_not_a_marker(self):
+        # The transcript quotes names the submitter chose; only a line of the
+        # comparator's own counts, and names cannot start a line.
+        error = comparator_verdict(
+            1, "error: Challenge and solution theorem statement do not match: '«bwrap: x»'"
+        )
+        self.assertEqual(error.code, "comparator.rejected")
+        error = comparator_verdict(
+            1, "error: Const not found in solution: '«Lean default kernel rejected the solution»'"
+        )
+        self.assertEqual(error.code, "comparator.rejected")
+        error = comparator_verdict(1, "something: error: Illegal axiom detected: 'x'")
+        self.assertEqual(error.code, "palomar.comparator_unclassified")
 
     def test_a_comparator_that_could_not_run_is_palomars(self):
         error = comparator_verdict(2, "error: `con-ron` kernel `/toolchain/bin/con-ron` was not found")
@@ -4665,6 +4697,49 @@ class LakeComparatorTests(unittest.TestCase):
                 verifier.primitive_targets(prefix)
             self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
 
+    def test_a_primitive_list_assembled_any_other_way_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            head = "def primitiveTargets : M (Array Lean.Name) := do\n"
+            for body in (
+                "  return #[``Nat.add] ++ extraTargets\n",
+                "  let extra := #[``Nat.sub]\n  return #[``Nat.add]\n",
+                "  return #[``Nat.add, someList]\n",
+                "  return #[``Nat.add, ``Nat.add]\n",
+                "  return #[]\n",
+            ):
+                with self.subTest(body=body):
+                    source.write_text(head + body + "def builtinTargets := 0\n")
+                    with self.assertRaises(VerificationError) as raised:
+                        verifier.primitive_targets(prefix)
+                    self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+            source.write_text(
+                head + "  /- ``Nat.mul is not here -/\n  return #[``Nat.add, -- ``Nat.zero\n    ``outParam]\n"
+                + "def builtinTargets := 0\n"
+            )
+            self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "outParam"])
+
+    def test_a_declaration_the_module_does_not_define_is_the_submitters(self):
+        panic = subprocess.CompletedProcess(
+            ["leanexport"], 134, "",
+            "PANIC at LeanExport.dumpConstant LeanExport.Basic:254:48: "
+            "Constant Foo.mian not found in environment.\n",
+        )
+        for module, palomar_owned in (("the Challenge", True), ("the Solution", False)):
+            with self.subTest(module=module):
+                error = verifier.export_failure(panic, module=module, palomar_owned=palomar_owned)
+                self.assertEqual(error.code, "comparator.declaration_missing")
+                self.assertEqual(error.owner, "submitter")
+                self.assertIn("Foo.mian", error.detail)
+        crash = subprocess.CompletedProcess(["leanexport"], 139, "", "Segmentation fault\n")
+        error = verifier.export_failure(crash, module="the Challenge", palomar_owned=True)
+        self.assertEqual(error.code, "palomar.challenge_export_failed")
+        self.assertTrue(error.retryable)
+        error = verifier.export_failure(crash, module="the Solution", palomar_owned=False)
+        self.assertEqual(error.code, "solution.export_failed")
+        self.assertEqual(error.owner, "submitter")
+
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LEAN"), "set PALOMAR_TEST_LEAN to read a real toolchain"
     )
@@ -4745,6 +4820,38 @@ class LakeComparatorTests(unittest.TestCase):
         self.assertEqual(verifier.bwrap_source_tag_from_installer(), "v0.12.0")
         self.assertTrue(verifier.BWRAP_SOURCE_TAG_RE.fullmatch("v0.12.0"))
         self.assertFalse(verifier.BWRAP_SOURCE_TAG_RE.fullmatch("0.12.0"))
+
+    def test_an_ill_typed_export_replaces_only_the_named_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export = Path(directory) / "solution.export"
+            export.write_text(
+                '{"meta":{"exporter":{"name":"lean4export"}}}\n'
+                '{"in":1,"str":{"pre":0,"str":"other"}}\n'
+                '{"in":2,"str":{"pre":0,"str":"palomar_preflight"}}\n'
+                '{"thm":{"all":[1],"levelParams":[],"name":1,"type":3,"value":4}}\n'
+                '{"thm":{"all":[2],"levelParams":[],"name":2,"type":5,"value":6}}\n'
+            )
+            tampered = verifier.ill_typed_export(export, "palomar_preflight").decode()
+            records = [json.loads(line) for line in tampered.splitlines()]
+            self.assertEqual(records[3]["thm"]["value"], 4)
+            self.assertEqual(
+                records[4]["thm"], {"all": [2], "levelParams": [], "name": 2, "type": 5, "value": 5}
+            )
+            self.assertEqual(len(records), 5)
+            with self.assertRaisesRegex(VerificationError, "does not name"):
+                verifier.ill_typed_export(export, "absent")
+
+    def test_declaration_names_cannot_carry_control_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "comparator.json"
+            path.write_text(json.dumps({
+                "challenge_module": "Challenge",
+                "solution_module": "Solution",
+                "theorem_names": ["main\nLean default kernel rejected the solution"],
+                "permitted_axioms": ["propext"],
+            }))
+            with self.assertRaisesRegex(VerificationError, "control characters"):
+                verifier.load_comparator_config(path)
 
     def test_an_export_must_start_with_the_exporters_header(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4840,7 +4947,10 @@ class LakeComparatorTests(unittest.TestCase):
             self.assertIn("--unshare-user", confined)
             joined = " ".join(confined)
             self.assertNotIn(str(candidate), joined)
-            self.assertIn(f"--ro-bind {exports} {exports}", joined)
+            for name in ("challenge", "solution"):
+                path = exports / f"{name}.export"
+                self.assertIn(f"--ro-bind {path} {path}", joined)
+            self.assertNotIn(f"--ro-bind {exports} {exports}", joined)
             self.assertIn(f"--bind {root / 'judge'} {root / 'judge'}", joined)
             self.assertIn("--setenv COMPARATOR_BWRAP /opt/bwrap", joined)
             self.assertNotIn("LEAN_PATH", joined)

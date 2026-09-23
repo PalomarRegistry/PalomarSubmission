@@ -230,18 +230,25 @@ sandbox.
 The submitted `enable_nanoda` field is non-authoritative and a submitted
 `external_kernels` is rejected: the runner writes a protected configuration
 that registers the toolchain's bundled `nanoda_bin` and `con-ron` as external
-kernels (the same binaries `lake comparator --paranoid` would run, so Palomar
-makes no kernel version choice of its own) and replaces only the Challenge
-module name with the per-run protected alias. The comparator's exit code is
-read the way it is meant: 2 is a run that could not start, 1 is a rejection
-only when the transcript carries one of the comparator's own verdicts, and a
-kernel that "exited with" a code behind a `bwrap:` failure of its nested
-sandbox, or any other unexplained stop, is Palomar's problem to retry, never
-the submitter's. Before any candidate code runs, the verifier exports and
-judges three one-line modules of its own: a matching pair must pass and a
-mismatched pair must be found against in the comparator's words, so a runner
-where the nested sandbox or a kernel binary does not work fails closed with a
-Palomar-owned diagnostic.
+kernels (two of the five checkers `lake comparator --paranoid` would add, at
+exactly the revisions the toolchain bundles, so Palomar makes no kernel
+version choice of its own) and replaces only the Challenge module name with
+the per-run protected alias. The comparator's exit code is read the way it is
+meant: 2 is a run that could not start, and 1 is a rejection only when the
+transcript carries one of the comparator's own comparison or axiom verdicts,
+or Lean's own kernel refused the proof. The comparator says "rejected" for
+every nonzero kernel exit, a crash included, so Lean's kernel is the arbiter:
+an independent kernel failing while Lean's accepts is recorded as a kernel
+disagreement for Palomar to examine, and a `bwrap:` failure of a nested
+sandbox or any other unexplained stop is Palomar's to retry, never the
+submitter's. Every marker is matched at the start of its own line, and
+declaration names may not carry control characters, because the transcript
+quotes names the submitter chose. Before any candidate code runs, the
+verifier exports and judges three one-line modules of its own: a matching
+pair must pass, a mismatched pair must be found against by the comparison,
+and a copy of the matching export whose proof is replaced by its statement
+must be refused by Lean's kernel, so a runner where the nested sandbox or a
+kernel binary does not work fails closed with a Palomar-owned diagnostic.
 
 The outer sandbox is bubblewrap 0.12.0, built from the pinned upstream release
 tarball by `scripts/install_bwrap.sh` in the trusted phase (the distribution
@@ -382,7 +389,10 @@ carries the lean4 commit the toolchain's release tag names, resolved from the
 tag rather than from a table (a table is a second place for the answer to be
 wrong, and it kept being the wrong one), together with the sha256 of each of
 those binaries as installed, the kernels the protected configuration
-registered, the configuration's own digest and the bubblewrap release. The
+registered, the configuration's own digest and text, and the bubblewrap
+release. The digests cover the entrypoints; the shared libraries they load
+(`lake comparator` itself lives in `libLake_shared.so`) are pinned by the
+release commit and the read-only toolchain binding rather than digested. The
 floor in `toolchains.json` is the oldest toolchain whose comparator Palomar
 has verified this way. Pin and floor changes require security review and an
 end-to-end comparison probe.
