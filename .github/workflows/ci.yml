@@ -102,9 +102,10 @@ jobs:
             python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
       - name: Refuse the comparator's sandbox-disabling flag anywhere in the pipeline
         # `lake comparator --inadvisably-no-sandbox` is guarded upstream by a
-        # warning alone. It must never appear here, in code, workflows or tests.
+        # warning alone. It must never appear in the code or the workflows; the
+        # tests name it only to assert that it is absent from the judge's argv.
         run: |
-          if grep -rn -- "--inadvisably-no-sandbox" scripts tests .github; then
+          if grep -rn -- "--inadvisably-no-sandbox" scripts .github; then
             echo "::error::the comparator's sandbox-disabling flag must not appear in the pipeline"
             exit 1
           fi
