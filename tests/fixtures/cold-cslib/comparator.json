@@ -1,0 +1,14 @@
+{
+  "challenge_module": "PalomarCold.Challenge",
+  "solution_module": "PalomarCold.Solution",
+  "theorem_names": [
+    "PalomarColdFixture.dependencyClosure"
+  ],
+  "definition_names": [],
+  "permitted_axioms": [
+    "propext",
+    "Quot.sound",
+    "Classical.choice"
+  ],
+  "enable_nanoda": true
+}

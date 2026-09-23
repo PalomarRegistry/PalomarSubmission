@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PATH_FIELDS = (
@@ -199,7 +199,7 @@ def parse_prepared_report(value: object) -> PreparedRenderReport:
         raise RenderReportError("prepared render report must be a JSON object")
     if value.get("schema_version") != SCHEMA_VERSION:
         raise RenderReportError(
-            "prepared render report must use schema_version 2 with the complete accepted path set"
+            "prepared render report must use schema_version 3 with the complete accepted path set"
         )
     expected = {
         "schema_version",

@@ -67,7 +67,7 @@ class RenderReportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RenderReportError,
-            "schema_version 2 with the complete accepted path set",
+            "schema_version 3 with the complete accepted path set",
         ):
             parse_prepared_report(report)
 
@@ -121,7 +121,7 @@ class RenderReportTests(unittest.TestCase):
             parse_prepared_report(with_errors)
 
     def test_intake_failures_use_the_current_schema(self):
-        self.assertEqual(intake_report("2026-08-08T00:00:00Z")["schema_version"], 2)
+        self.assertEqual(intake_report("2026-08-08T00:00:00Z")["schema_version"], 3)
 
 
 if __name__ == "__main__":

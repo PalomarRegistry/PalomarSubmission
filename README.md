@@ -15,15 +15,18 @@ declarations is verified and reviewed as a whole. CI then:
 
 1. validates the required root files and pinned commit, including parsing
    `formalization.yaml` and enforcing Palomar's documented metadata minimum;
-2. installs a matching `lean4export`;
-3. runs [Comparator](https://github.com/leanprover/comparator) under its Landrun
-   sandbox, permitting at most the three standard axioms, and forces every
-   exported proof through both Lean's kernel and the pinned independent NanoDa
-   kernel;
-4. compiles the Challenge against frozen, canonical Mathlib, Tau Ceti, or
+2. installs the submitted Lean toolchain, which brings its own `lake
+   comparator`, `leanexport`, `leanchecker` and the bundled independent
+   kernels;
+3. compiles the Challenge against frozen, canonical Mathlib, Tau Ceti, or
    CSLib output;
-5. computes the transitive source closure of the Challenge and verifies every
+4. computes the transitive source closure of the Challenge and verifies every
    byte in it;
+5. builds the Solution under Palomar's own bubblewrap sandbox, exports the
+   canonical Challenge and the built Solution with the toolchain's exporter,
+   and has `lake comparator` judge the two exports, permitting at most the
+   three standard axioms and running the Solution through Lean's kernel and
+   the toolchain's bundled NanoDa and con-ron kernels;
 6. publishes a machine-readable report as a run artifact.
 
 Verification is dispatched by the submission server, not started from this
@@ -114,7 +117,7 @@ Git. The Challenge is compiled
 separately without candidate Lake configuration, against only verified
 allowlisted dependencies; its protected module is published under an
 unpredictable per-run verifier-owned top-level namespace and is the statement
-Comparator exports. The alias prevents a Challenge and Solution that share a
+Palomar exports for the comparator. The alias prevents a Challenge and Solution that share a
 submitted top-level namespace from capturing one another through Lean's
 package-prefix search. Common submitted prebuilt artifacts are rejected early,
 and no candidate build output can replace the protected statement or frozen
@@ -131,13 +134,15 @@ an official patch release can add a toolchain-bump commit to the previous
 release while `master` has already advanced on the next release line. Arbitrary,
 nightly, and repository-local tags do not broaden the trusted history.
 
-NanoDa replay is a registry invariant, not a submitter option. The optional
-`enable_nanoda` field in a submitted `comparator.json` is retained for upstream
-compatibility but is deliberately non-authoritative: missing, false, or any
-other JSON value does not disable or block verification. The trusted runner
-writes a separate protected configuration with NanoDa enabled and passes that
-copy to Comparator. This avoids making submitters maintain a switch whose value
-Palomar must override for every accepted result.
+Independent kernel replay is a registry invariant, not a submitter option.
+The optional `enable_nanoda` field in a submitted `comparator.json` is retained
+for upstream compatibility but is deliberately non-authoritative: missing,
+false, or any other JSON value does not disable or block verification, and a
+submitted `external_kernels` is rejected. The trusted runner writes a separate
+protected configuration that registers the toolchain's bundled NanoDa and
+con-ron binaries as external kernels and passes that copy to `lake comparator`.
+This avoids making submitters maintain a switch whose value Palomar must
+override for every accepted result.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
@@ -241,13 +246,14 @@ The prototype accepts public GitHub repositories and any released or RC Lean
 toolchain at or above the minimum recorded in
 [`toolchains.json`](toolchains.json). There is no list of accepted versions:
 tooling revisions are derived from release tags, which is what a table of them
-kept getting wrong. Verification and rendering first select the exact
-lean4export and Verso release tags. When a stable positive Lean patch release
-has no exact tooling tag, Palomar uses that same major/minor release line's
-patch-zero tag and rebuilds the pinned source with the submission's exact Lean
-toolchain. Release candidates never fall back. The resolved lean4export commit
-is recorded in the mechanical report, and the resolved Verso commit is recorded
-in the render report. The file is deliberately a closed record containing only
+kept getting wrong. Everything that judges a submission ships in the submitted
+toolchain itself, so verification records the lean4 commit its release tag
+names together with the digests of the installed binaries. Rendering selects
+the exact Verso release tag; when a stable positive Lean patch release has no
+exact Verso tag, Palomar uses that same major/minor release line's patch-zero
+tag and rebuilds the pinned source with the submission's exact Lean toolchain.
+Release candidates never fall back. The resolved Verso commit is recorded in
+the render report. The file is deliberately a closed record containing only
 its schema version and the minimum Lean release; it does not claim to configure
 tooling repositories that the verifier does not read from it.
 

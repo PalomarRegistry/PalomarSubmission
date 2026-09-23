@@ -54,9 +54,6 @@ jobs:
         with:
           ruby-version: "3.3.12"
           bundler-cache: true
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.24.0"
       - name: Install verifier dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r requirements.txt
       - name: Compile and test
@@ -99,10 +96,18 @@ jobs:
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.0
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.35.0-rc2
           PALOMAR_BWRAP="$PALOMAR_BWRAP" \
-          PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.32.0 "$HOME/.elan/bin/elan" which lean)" \
+          PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.35.0-rc2 "$HOME/.elan/bin/elan" which lean)" \
             python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
+      - name: Refuse the comparator's sandbox-disabling flag anywhere in the pipeline
+        # `lake comparator --inadvisably-no-sandbox` is guarded upstream by a
+        # warning alone. It must never appear here, in code, workflows or tests.
+        run: |
+          if grep -rn -- "--inadvisably-no-sandbox" scripts tests .github; then
+            echo "::error::the comparator's sandbox-disabling flag must not appear in the pipeline"
+            exit 1
+          fi
       - name: Validate configuration JSON
         run: |
           python -m json.tool toolchains.json >/dev/null

@@ -18,10 +18,8 @@
     "minimum_host_memory_bytes": 15032385536
   },
   "trusted_tools": {
-    "comparator_commit": "575674928e239f5bc452aab72d1dd7b0f1326494",
-    "landrun_commit": "811cfff51ceaf3d9843708aa6d22e9b84ccac8b4",
-    "nanoda_commit": "68d5ca9db226849b41a6fff59d796ff19d0a8840",
-    "lean4export": "release derived from the submitted Lean toolchain"
+    "toolchain_floor": "v4.35.0-rc2",
+    "bwrap_source_tag": "v0.12.0"
   },
   "cache_policy": "fresh submitted .lake state; pinned Mathlib cache artifacts when available"
 }

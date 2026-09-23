@@ -1,10 +1,10 @@
-name = "PalomarColdTauCetiFixture"
+name = "PalomarColdFixture"
 defaultTargets = ["Challenge", "Solution"]
 
 [[require]]
-name = "TauCeti"
-git = "https://github.com/FormalFrontier/TauCeti"
-rev = "221bb56a017bb794421eac4fa543d7a5e85add75"
+name = "cslib"
+git = "https://github.com/leanprover/cslib"
+rev = "133d92d4b159304c99def4dae7b7e15a50ac4699"
 
 [[lean_lib]]
 name = "Challenge"

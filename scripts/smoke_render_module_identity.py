@@ -39,11 +39,10 @@ def regular_file(root: Path, relative: Path, field: str) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--landrun", type=Path, required=True)
     parser.add_argument("--bwrap", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--renderer-commit", required=True)
-    parser.add_argument("--landrun-commit", required=True)
+    parser.add_argument("--bwrap-source-tag", required=True)
     parser.add_argument("--workflow-url", required=True)
     args = parser.parse_args()
 
@@ -101,10 +100,9 @@ def main() -> int:
         argparse.Namespace(
             work_dir=str(work),
             output=str(output),
-            landrun=str(args.landrun),
             bwrap=str(args.bwrap),
             renderer_commit=args.renderer_commit,
-            landrun_commit=args.landrun_commit,
+            bwrap_source_tag=args.bwrap_source_tag,
             workflow_url=args.workflow_url,
         )
     )

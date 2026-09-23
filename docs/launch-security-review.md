@@ -51,16 +51,23 @@ artifact as hostile. Its security-relevant sequence is:
    allowlisted output. Snapshot its `Challenge.olean` and audit Lean's source
    dependency list and source bytes before candidate Challenge/Solution
    compilation and comparison.
-6. Build the candidate Challenge/Solution and run Comparator under the explicit
-   outer bubblewrap and cgroup boundary with a verifier-authored protected
-   configuration that forces `"enable_nanoda": true` and replaces only the
-   Challenge module name with the canonical alias.
+6. Prove the judge on this runner first: export and judge three one-line
+   modules of the verifier's own, requiring a matching pair to pass and a
+   mismatched pair to be found against in the comparator's own words. Then
+   build the candidate Solution under the explicit outer bubblewrap and cgroup
+   boundary, export the canonical Challenge and the built Solution with the
+   toolchain's `leanexport` into verifier-owned files, and run the toolchain's
+   `lake comparator` over the two exports under a policy that binds no
+   candidate tree, with a verifier-authored protected configuration that
+   registers the toolchain's bundled NanoDa and con-ron kernels and replaces
+   only the Challenge module name with the canonical alias.
    Publish the protected Challenge under a collision-resistant verifier-owned
    top-level module alias, then resolve that alias, Lean core, and frozen trusted
-   modules before candidate paths in Comparator's `LEAN_PATH`; candidate output
+   modules before candidate paths in the export's `LEAN_PATH`; candidate output
    cannot replace any of them, and the protected root cannot capture a sibling
-   Solution under the submitted Challenge namespace. Require both Lean's kernel
-   and the pinned independent NanoDa kernel to accept the exported proof.
+   Solution under the submitted Challenge namespace. Require Lean's kernel and
+   both bundled independent kernels to accept the exported proof, and read the
+   comparator's exit as a rejection only when its transcript says so.
 7. Write the bounded report after sandboxed execution, outside every
    sandbox-writable directory, and upload it as a run artifact. There is no
    second job: the submission server collects the artifact, so nothing here
@@ -82,22 +89,24 @@ The maintained test surfaces are:
   protected paths, environment path bounds, and supervisor and sandbox
   argument construction;
 - `tests/test_sandbox_integration.py`: real bubblewrap and cgroup read, write,
-  process, namespace, and network probes plus direct canonical Challenge
-  compilation; `tests/test_resource_supervision.py`: the real OOM, deadline and
-  exit-status classification of the cgroup supervisor;
-- `tests/test_render_challenge.py` and `tests/test_landrun_passthrough.py`:
-  the pinned Verso rendering path and the sandbox flags it is given;
+  process, namespace, and network probes, direct canonical Challenge
+  compilation, and the real `lake comparator` over real exports under the
+  nested judge policy, including a corrupt export and a missing kernel binary
+  that must not read as rejections; `tests/test_resource_supervision.py`: the
+  real OOM, deadline and exit-status classification of the cgroup supervisor;
+- `tests/test_render_challenge.py`: the pinned Verso rendering path and the
+  sandbox it is given;
 - `tests/test_compatibility_workflow.py`: the merge-base scope decision and the
   required final gate, including renames, deletions, unusual paths, and failed
   classification or build jobs;
 - `.github/workflows/compatibility.yml`: a cold production-like run of the
-  checked multi-dependency fixture in `tests/fixtures/cold-tauceti`, followed by
-  the real pinned Comparator, toolchain-matched `lean4export`, and pinned NanoDa
-  under the nested sandbox. Before the real cache phase, that route plants an
-  ignored executable in Mathlib and one closure dependency, then requires the
-  production cache boundary to remove both. It also plants an executable in the
-  qualified Tau Ceti root and requires the trusted-root boundary to remove it
-  before the real build. The same checked fixture gives the Challenge a dotted
+  checked multi-dependency fixture in `tests/fixtures/cold-cslib`, followed by
+  the real exports and the floor toolchain's own `lake comparator` with both
+  bundled kernels under the nested sandbox. Before the real cache phase, that
+  route plants an ignored executable in Mathlib and one closure dependency,
+  then requires the production cache boundary to remove both. It also plants
+  an executable in the qualified cslib root and requires the trusted-root
+  boundary to remove it before the real build. The same checked fixture gives the Challenge a dotted
   module path and a private declaration, then runs the production renderer and
   requires the original-module `.olean` and raw Verso page while retaining the
   stable public `Challenge/index.html` artifact. The ordinary pull-request check
@@ -123,16 +132,17 @@ The maintained test surfaces are:
   succeeds and either the selected cold build succeeds or the change is
   explicitly confined to that exact prose set.
 
-The cold fixture uses Lean `v4.31.0-rc2`, the toolchain fixed by the accepted
-Tau Ceti revision, exact Comparator boolean
-`"enable_nanoda": true`, and ten pinned project packages. Its canonical
-Challenge imports only Mathlib. Its candidate Solution imports the Tau Ceti
-root at accepted revision `221bb56a017bb794421eac4fa543d7a5e85add75`, so the
+The cold fixture uses Lean `v4.35.0-rc2`, the floor in `toolchains.json` and
+the toolchain cslib's `main` builds with, the Comparator boolean
+`"enable_nanoda": true` that Palomar ignores, and ten pinned project packages.
+Its canonical Challenge imports only Mathlib. Its candidate Solution imports
+the cslib root at revision `133d92d4b159304c99def4dae7b7e15a50ac4699`, so the
 run verifies the qualified trusted root and its exact flattened dependency
-closure and compiles Tau Ceti's broad module graph. The same run exercises
+closure and compiles cslib's broad module graph. The same run exercises
 canonical Challenge compilation, source provenance audit, the complete
-confinement probe set, candidate Challenge/Solution builds, and comparison
-through both kernels. CI materializes the checked files as a clean temporary Git
+confinement probe set, the judge preflight, candidate Challenge/Solution
+builds, both exports and comparison through Lean's kernel and both bundled
+independent kernels. CI materializes the checked files as a clean temporary Git
 checkout to mirror the production checkout boundary; it does not rewrite the
 submitted configuration.
 
@@ -144,33 +154,41 @@ state entries, the extra work is `O(P + R + S)` local filesystem work and
 dependency build, or service. The canonical-role uniqueness check reuses the
 allowlist's existing root/package scan and adds no new asymptotic term.
 
-This fixture does not cold-build Template's current `v4.32.0` project,
-`lakefile.toml`, or `lake-manifest.json`. The Template checks above establish
-the current authoring metadata and Comparator bytes, not current-toolchain
-execution compatibility. Runtime coverage here is instead exact for the older
-toolchain and dependency graph required by the accepted Tau Ceti snapshot. The
-pull-request workflow must reproduce that result on the supported GitHub-hosted
-runner before merging any execution-affecting change. The explicit prose-only
-gate is sufficient for the documentation paths described above.
+This fixture does not cold-build Template's current project, `lakefile.toml`,
+or `lake-manifest.json`. The Template checks above establish the current
+authoring metadata and Comparator bytes, not execution compatibility. Runtime
+coverage here is instead exact for the floor toolchain and the dependency
+graph of the cslib revision the fixture pins. The pull-request workflow must
+reproduce that result on the default execution profile before merging any
+execution-affecting change. The explicit prose-only gate is sufficient for the
+documentation paths described above.
 
 ## Component review
 
-### Comparator
+### lake comparator
 
-The workflow pins Comparator commit
-`575674928e239f5bc452aab72d1dd7b0f1326494`. The reviewed path separately
-exports Challenge and Solution environments, checks configured declarations and
-their dependency closures, enforces the permitted-axiom set, and replays the
-comparison through both Lean's kernel and the pinned independent NanoDa kernel.
-The submitted `enable_nanoda` compatibility field is non-authoritative: the
-verifier forces the exact JSON boolean `true` in the protected configuration
-that Comparator consumes. It also replaces the submitted Challenge module name
-with the canonical alias while leaving the Solution and declaration selection
-unchanged. Comparator's own Landrun domains remain in place.
-They are nested inside Palomar's outer sandbox, so they can narrow but not widen
-Palomar's filesystem or network policy. Palomar independently protects
-the Challenge module because Comparator assumes the supplied Challenge build is
-the intended statement.
+The judge is the submitted toolchain's `lake comparator` (Lean `v4.35.0-rc2`
+or later; the record carries the lean4 commit the release tag names and the
+sha256 of every binary that ran). Palomar invokes it with
+`--challenge-from-export` and `--solution-from-export`, so the reviewed path
+never resolves, builds or exports anything itself: it parses the two exports,
+checks the configured declarations and their dependency closures, enforces the
+permitted-axiom set, and runs the Solution export through the registered
+external kernels and Lean's own `leanchecker`, each inside a bubblewrap of its
+own. The submitted `enable_nanoda` compatibility field is non-authoritative
+and a submitted `external_kernels` is rejected: the verifier's protected
+configuration registers the toolchain's bundled `nanoda_bin` and `con-ron`,
+replaces the submitted Challenge module name with the canonical alias, and
+leaves the Solution and declaration selection unchanged. The comparator's
+nested sandboxes sit inside Palomar's outer judge policy, which binds no
+candidate tree, so they can narrow but not widen it. The from-export form does
+not check that the exports belong to the project; Palomar produced both, from
+the canonical Challenge and the verified checkout, which is why the Challenge
+module is independently protected and both export files are snapshotted before
+the judge reads them. The export target list (the configured declarations, the
+permitted axioms, the kernel's builtin constants and the quotient primitives)
+is read from the selected toolchain's own `Lake/CLI/Check.lean` rather than
+copied, and the preflight proves it on every run.
 
 ### Reviewer and policy
 
@@ -236,10 +254,10 @@ remains append-only for existing versioned record paths.
 - A project Palomar has already accepted is not thereby an allowed Challenge
   input. The allowlisted roots are the only statement dependencies, and a
   recursively reached source outside them remains forbidden.
-- GitHub-hosted runners, Linux namespaces, cgroups and Landlock, bubblewrap,
-  Git, Lean and its kernel,
-  Comparator, NanoDa, Landrun, `lean4export`, and the Palomar implementation remain in
-  the trusted computing base. This hardening is defense in depth around those
+- The runners, Linux namespaces, cgroups and seccomp, bubblewrap, Git, the
+  selected Lean toolchain with its kernel, `lake comparator`, `leanexport`,
+  `leanchecker` and bundled independent kernels, and the Palomar implementation
+  remain in the trusted computing base. This hardening is defense in depth around those
   components, not a proof that they are bug-free.
 
 Signed registry snapshots, a transparency log, a content-addressed certificate

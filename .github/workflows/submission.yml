@@ -211,71 +211,32 @@ jobs:
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        id: go
+      # The submitted toolchain judges the submission: its `lake comparator`,
+      # `leanexport`, `leanchecker` and bundled kernels. Nothing else is built.
+      - name: Install the submitted Lean toolchain
+        id: toolchain
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        with:
-          go-version: "1.24.0"
-
-      - name: Build pinned landrun
-        id: landrun
-        if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        run: |
-          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        env:
+          SUBMISSION_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
+        run: elan toolchain install "$SUBMISSION_TOOLCHAIN"
 
       - name: Build pinned bubblewrap
+        id: bwrap
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
           sudo apt-get update -qq >/dev/null
           sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
           echo "PALOMAR_BWRAP=$(pipeline/scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")" >> "$GITHUB_ENV"
 
-      - name: Build pinned Comparator
-        id: comparator
-        if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        run: |
-          python3 pipeline/scripts/trusted_git_fetch.py leanprover/comparator 575674928e239f5bc452aab72d1dd7b0f1326494 "$RUNNER_TEMP/comparator"
-          cd "$RUNNER_TEMP/comparator"
-          lake build comparator
-
-      - name: Build pinned NanoDa kernel
-        id: nanoda
-        if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        run: |
-          python3 pipeline/scripts/trusted_git_fetch.py robsimmons/nanoda_lib 68d5ca9db226849b41a6fff59d796ff19d0a8840 "$RUNNER_TEMP/nanoda"
-          cargo build --release --locked --manifest-path "$RUNNER_TEMP/nanoda/Cargo.toml"
-
-      - name: Build toolchain-matched lean4export
-        id: exporter
-        if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
-        env:
-          LEAN4EXPORT_COMMIT: ${{ steps.prepare.outputs.lean4export_commit }}
-          SUBMISSION_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
-        run: |
-          python3 pipeline/scripts/trusted_git_fetch.py leanprover/lean4export "$LEAN4EXPORT_COMMIT" "$RUNNER_TEMP/lean4export"
-          LEAN4EXPORT_TOOLCHAIN="$(tr -d '\r\n' < "$RUNNER_TEMP/lean4export/lean-toolchain")"
-          python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import compatible_lean4export_toolchain; raise SystemExit(not compatible_lean4export_toolchain(sys.argv[1], sys.argv[2]))' \
-            "$SUBMISSION_TOOLCHAIN" "$LEAN4EXPORT_TOOLCHAIN"
-          cd "$RUNNER_TEMP/lean4export"
-          ELAN_TOOLCHAIN="$SUBMISSION_TOOLCHAIN" lake build lean4export
-
-      - name: Run Comparator and challenge provenance audit
+      - name: Run lake comparator and challenge provenance audit
         id: execute
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
         run: |
           python pipeline/scripts/verify_submission.py execute \
             --work-dir "$RUNNER_TEMP/palomar" \
             --output "$RUNNER_TEMP/mechanical-report.json" \
-            --comparator "$RUNNER_TEMP/comparator/.lake/build/bin/comparator" \
-            --lean4export "$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" \
-            --landrun "$(go env GOPATH)/bin/landrun" \
             --bwrap "$PALOMAR_BWRAP" \
-            --nanoda "$RUNNER_TEMP/nanoda/target/release/nanoda_bin" \
-            --comparator-commit 575674928e239f5bc452aab72d1dd7b0f1326494 \
-            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
-            --nanoda-commit 68d5ca9db226849b41a6fff59d796ff19d0a8840 \
+            --bwrap-source-tag v0.12.0 \
             --execution-budget-seconds "${{ needs.profile.outputs.budget }}" \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 

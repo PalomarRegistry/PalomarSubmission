@@ -293,7 +293,7 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             for step in self.workflow["jobs"]["cold_build"]["steps"]
             if step.get("name") == "Prepare the checked multi-dependency fixture"
         )
-        self.assertIn("cp -R pipeline/tests/fixtures/cold-tauceti fixture", fixture_step["run"])
+        self.assertIn("cp -R pipeline/tests/fixtures/cold-cslib fixture", fixture_step["run"])
         self.assertIn("git -C fixture init --quiet", fixture_step["run"])
         self.assertIn("git -C fixture add --all", fixture_step["run"])
         self.assertIn("commit --quiet", fixture_step["run"])
@@ -304,8 +304,10 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             if step.get("name") == "Exercise the real configured-module renderer"
         )
         self.assertIn("scripts/smoke_render_module_identity.py", renderer_step["run"])
-        self.assertIn("--source pipeline/tests/fixtures/cold-tauceti", renderer_step["run"])
+        self.assertIn("--source pipeline/tests/fixtures/cold-cslib", renderer_step["run"])
         self.assertIn('--renderer-commit "${{ github.sha }}"', renderer_step["run"])
+        self.assertIn("--bwrap-source-tag v0.12.0", renderer_step["run"])
+        self.assertNotIn("landrun", renderer_step["run"])
 
         fixture = REPOSITORY_ROOT / "tests/fixtures/palomar-template-comparator.json"
         result = subprocess.run(
@@ -325,38 +327,33 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_checked_cold_fixture_reaches_the_exact_tauceti_closure(self):
-        fixture = REPOSITORY_ROOT / "tests/fixtures/cold-tauceti"
+    def test_checked_cold_fixture_reaches_the_exact_cslib_closure(self):
+        fixture = REPOSITORY_ROOT / "tests/fixtures/cold-cslib"
         toolchain = (fixture / "lean-toolchain").read_text().strip()
         for path in sorted(path for path in fixture.rglob("*") if path.is_file()):
             with self.subTest(classified_path=path.name):
                 relative = path.relative_to(REPOSITORY_ROOT).as_posix()
                 self.assertEqual(self.run_scope((relative,)), "cold_build=true")
-        self.assertEqual(
-            toolchain,
-            "leanprover/lean4:v4.31.0-rc2",
-        )
+        # The fixture sits exactly on the floor: the cold build proves the
+        # floor toolchain's own `lake comparator`, and nothing older is accepted.
+        floor = json.loads((REPOSITORY_ROOT / "toolchains.json").read_text())["minimum"]
+        self.assertEqual(toolchain, f"leanprover/lean4:{floor}")
+        self.assertEqual(toolchain, "leanprover/lean4:v4.35.0-rc2")
 
         allowlist = json.loads(
             (REPOSITORY_ROOT / "allowed-challenge-repositories.json").read_text()
         )
-        tauceti_policy = next(
-            root
-            for root in allowlist["roots"]
-            if root["repository"] == "TauCetiProject/TauCeti"
+        cslib_policy = next(
+            root for root in allowlist["roots"] if root["repository"] == "leanprover/cslib"
         )
-        self.assertEqual(tauceti_policy["repository_aliases"], ["FormalFrontier/TauCeti"])
-        self.assertEqual(len(tauceti_policy["accepted_revisions"]), 1)
-        tauceti_revision = tauceti_policy["accepted_revisions"][0]
+        self.assertEqual(cslib_policy["trust_level"], "qualified")
+        self.assertEqual(cslib_policy["official_ref"], "refs/heads/main")
 
         config = json.loads((fixture / "comparator.json").read_text())
         self.assertIs(config["enable_nanoda"], True)
         self.assertEqual(config["challenge_module"], "PalomarCold.Challenge")
         self.assertEqual(config["solution_module"], "PalomarCold.Solution")
-        self.assertEqual(
-            config["theorem_names"],
-            ["PalomarColdTauCetiFixture.dependencyClosure"],
-        )
+        self.assertEqual(config["theorem_names"], ["PalomarColdFixture.dependencyClosure"])
         challenge = fixture / "PalomarCold" / "Challenge.lean"
         solution = fixture / "PalomarCold" / "Solution.lean"
         self.assertTrue(challenge.is_file())
@@ -391,46 +388,40 @@ class ColdBuildWorkflowTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             {
-                "TauCeti": tauceti_revision,
-                "mathlib": "0be66d77ba290828a5260d883ace636f56bce89a",
-                "plausible": "744117af710b1c0400cd297c9ce91f8d0ad3a347",
-                "LeanSearchClient": "c5d5b8fe6e5158def25cd28eb94e4141ad97c843",
-                "importGraph": "99c763c8a96d3d44fb4994e96eaa51ca4568449d",
-                "proofwidgets": "b2da7698bdf22804095ea5b5007f23c09398f687",
-                "aesop": "7897ea6e5cfc6522d355083bdfa798377ab35e11",
-                "Qq": "94346b7b49c36ae871639d1434232f057c193d60",
-                "batteries": "c6f7103faab35720af56784a9553733832f17349",
-                "Cli": "baf3e62fbb3502305076ca077e004aea78157c63",
+                "cslib": "133d92d4b159304c99def4dae7b7e15a50ac4699",
+                "mathlib": "1cae91f0957ccf8847f22a6239fa0c032a9e28c6",
+                "plausible": "e50948299c4dc4a4c21b1c34b6a6a4fddc19f912",
+                "LeanSearchClient": "95e037bfdc31d3916ac615446847fb01960e2719",
+                "importGraph": "f8e94c24111148c9ad1b866212a6e1a0fabb5e76",
+                "proofwidgets": "4c70ac059693669e5756e32a7a94b57ee1e99dc5",
+                "aesop": "75d936c7af167cc93fac0d31237682fc2204591d",
+                "Qq": "786b7acdca7eb4e9c76c5d1d5bd810e7e5c56334",
+                "batteries": "167242e0621ba382fd6f7b2a7e932ce0811f9ab1",
+                "Cli": "2842b9871b04862f944c032e34052cb9448ccb71",
             },
         )
-        tauceti = next(
-            package for package in manifest["packages"] if package["name"] == "TauCeti"
+        cslib = next(
+            package for package in manifest["packages"] if package["name"] == "cslib"
         )
-        self.assertEqual(tauceti["url"], "https://github.com/FormalFrontier/TauCeti")
-        self.assertEqual(tauceti["inherited"], False)
-        lakefile = tomllib.loads((fixture / "lakefile.toml").read_text())
+        self.assertEqual(cslib["url"], "https://github.com/leanprover/cslib")
+        self.assertEqual(cslib["inherited"], False)
         self.assertEqual(
             lakefile["require"],
             [
                 {
-                    "name": "TauCeti",
-                    "git": "https://github.com/FormalFrontier/TauCeti",
-                    "rev": tauceti_revision,
+                    "name": "cslib",
+                    "git": "https://github.com/leanprover/cslib",
+                    "rev": revisions["cslib"],
                 }
             ],
         )
-        self.assertNotIn("import TauCeti", challenge.read_text())
+        self.assertNotIn("import Cslib", challenge.read_text())
         self.assertIn("import Mathlib", challenge.read_text())
-        self.assertIn("import TauCeti", solution.read_text())
+        self.assertIn("import Cslib", solution.read_text())
 
         cold_steps = self.workflow["jobs"]["cold_build"]["steps"]
         install_step = next(
-            step for step in cold_steps if step.get("name") == "Install pinned Landrun and Lean"
-        )
-        build_step = next(
-            step
-            for step in cold_steps
-            if step.get("name") == "Build pinned Comparator, lean4export, and NanoDa"
+            step for step in cold_steps if step.get("name") == "Install pinned Lean"
         )
         exercise_step = next(
             step
@@ -443,72 +434,15 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             if step.get("name") == "Prepare the checked multi-dependency fixture"
         )
         self.assertIn(f'fixture/lean-toolchain)" = "{toolchain}"', fixture_step["run"])
-        self.assertIn(
-            f"toolchain install {toolchain}", install_step["run"]
-        )
-        self.assertIn(
-            f'supported_toolchain("{toolchain}")',
-            build_step["run"],
-        )
-        self.assertIn(
-            "compatible_lean4export_toolchain",
-            build_step["run"],
-        )
-        self.assertIn(
-            "ELAN_TOOLCHAIN=leanprover/lean4:v4.33.1",
-            build_step["run"],
-        )
-        self.assertEqual(
-            exercise_step["env"]["ELAN_TOOLCHAIN"],
-            toolchain,
-        )
-        self.assertIn("--source fixture", exercise_step["run"])
-
-    def test_legacy_proofwidgets_fixture_runs_the_real_v428_renderer(self):
-        fixture = REPOSITORY_ROOT / "tests/fixtures/legacy-proofwidgets-render"
-        toolchain = (fixture / "lean-toolchain").read_text().strip()
-        self.assertEqual(toolchain, "leanprover/lean4:v4.28.0")
-        manifest = json.loads((fixture / "lake-manifest.json").read_text())
-        revisions = {
-            package["name"]: package["rev"] for package in manifest["packages"]
-        }
-        self.assertEqual(
-            revisions["mathlib"], "8f9d9cff6bd728b17a24e163c9402775d9e6a365"
-        )
-        self.assertEqual(
-            revisions["proofwidgets"], "be3b2e63b1bbf496c478cef98b86972a37c1417d"
-        )
-        self.assertFalse(
-            next(
-                package
-                for package in manifest["packages"]
-                if package["name"] == "mathlib"
-            )["inherited"]
-        )
-        self.assertTrue(
-            next(
-                package
-                for package in manifest["packages"]
-                if package["name"] == "proofwidgets"
-            )["inherited"]
-        )
-
-        cold_steps = self.workflow["jobs"]["cold_build"]["steps"]
-        install_step = next(
-            step for step in cold_steps if step.get("name") == "Install pinned Landrun and Lean"
-        )
-        renderer_step = next(
-            step
-            for step in cold_steps
-            if step.get("name") == "Exercise the legacy ProofWidgets renderer"
-        )
         self.assertIn(f"toolchain install {toolchain}", install_step["run"])
-        self.assertIn("scripts/smoke_render_module_identity.py", renderer_step["run"])
-        self.assertIn(
-            "--source pipeline/tests/fixtures/legacy-proofwidgets-render",
-            renderer_step["run"],
+        self.assertEqual(install_step["run"].count("toolchain install"), 1)
+        self.assertEqual(exercise_step["env"]["ELAN_TOOLCHAIN"], toolchain)
+        self.assertIn("--source fixture", exercise_step["run"])
+        self.assertIn('--bwrap "$PALOMAR_BWRAP"', exercise_step["run"])
+        self.assertNotIn("--comparator", exercise_step["run"])
+        self.assertFalse(
+            any(step.get("name") == "Exercise the legacy ProofWidgets renderer" for step in cold_steps)
         )
-        self.assertIn('--renderer-commit "${{ github.sha }}"', renderer_step["run"])
 
     def test_required_gate_passes_only_the_two_valid_outcomes(self):
         prose = self.run_gate("success", "false", "skipped")

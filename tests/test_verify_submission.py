@@ -34,7 +34,7 @@ from scripts.verify_submission import (
     allowed_roots,
     audit_challenge_sources,
     canonical_repository,
-    comparator_failure,
+    comparator_verdict,
     compile_canonical_challenge,
     detect_spdx_identifier,
     ensure_lake_manifest,
@@ -66,6 +66,29 @@ from scripts.verify_submission import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+# The shape of `primitiveTargets` in Lake/CLI/Check.lean at v4.35.0-rc2, with
+# a commented-out entry and a trailing comment, which the parser must skip.
+FAKE_CHECK_LEAN = """\
+def runKernels (exportPath : System.FilePath) : M Unit := do
+  pure ()
+
+def primitiveTargets : M (Array Lean.Name) := do
+  -- The challenge needs to have all the built-in constants of the kernel.
+  -- List from `git grep new_persistent_expr_const src/kernel/`
+  return #[
+    -- ``Nat.zero,
+    ``Nat.add,
+    ``Nat.sub, -- ``Nat.mul
+    ``String.mk,
+    ``outParam
+  ]
+
+def builtinTargets : M (Array Lean.Name) := do
+  let mut additional := #[]
+  if (← getLegalAxioms).contains ``Quot.sound then
+    additional := additional ++ #[``Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind]
+  return additional
+"""
 
 
 # Captured from `lean --deps-json` on a module-system and a plain source.
@@ -759,10 +782,8 @@ class VerifySubmissionTests(unittest.TestCase):
                 args = Namespace(
                     output=report_path,
                     work_dir=work,
-                    comparator_commit="a" * 40,
-                    landrun_commit="b" * 40,
                     bwrap=sys.executable,
-                    nanoda_commit="c" * 40,
+                    bwrap_source_tag="v0.12.0",
                     workflow_url="https://github.com/example/project/actions/runs/1",
                 )
 
@@ -780,22 +801,11 @@ class VerifySubmissionTests(unittest.TestCase):
             (root / "work" / "source" / ".git").mkdir()
             report_path = root / "report.json"
             report_path.write_text(json.dumps({"status": "pending", "errors": []}))
-            tools = []
-            for name in ("comparator", "lean4export", "landrun", "nanoda"):
-                tool = root / name
-                tool.touch()
-                tools.append(tool)
             args = Namespace(
                 output=report_path,
                 work_dir=root / "work",
-                comparator=tools[0],
-                lean4export=tools[1],
-                landrun=tools[2],
-                nanoda=tools[3],
-                comparator_commit="a" * 40,
-                landrun_commit="b" * 40,
                 bwrap=sys.executable,
-                nanoda_commit="c" * 40,
+                bwrap_source_tag="v0.12.0",
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
             with (
@@ -962,27 +972,27 @@ class VerifySubmissionTests(unittest.TestCase):
 
 
 
-    def test_every_workflow_builds_landrun_without_proc_enumerating_cgo(self):
-        expected = re.compile(
-            r"^\s*CGO_ENABLED=0 go install github\.com/zouuup/landrun/cmd/landrun@"
-            r"811cfff51ceaf3d9843708aa6d22e9b84ccac8b4\s*$"
-        )
+    def test_no_workflow_builds_a_retired_verifier_tool(self):
         workflows = REPOSITORY_ROOT / ".github" / "workflows"
-        installers = []
+        retired = ("landrun", "leanprover/comparator", "lean4export", "nanoda_lib", "setup-go")
         for path in [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]:
             text = path.read_text()
-            lines = [
-                line
-                for line in text.splitlines()
-                if "go install github.com/zouuup/landrun/cmd/landrun@" in line
-            ]
-            if lines:
-                installers.append(path.name)
-                for line in lines:
-                    self.assertRegex(line, expected, path.name)
+            for name in retired:
+                self.assertNotIn(name, text, f"{path.name} still names {name}")
+
+    def test_every_verifier_workflow_passes_the_installed_bubblewrap_release(self):
+        expected = verifier.bwrap_source_tag_from_installer()
+        self.assertEqual(expected, "v0.12.0")
+        workflows = REPOSITORY_ROOT / ".github" / "workflows"
+        passing = []
+        for path in [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]:
+            text = path.read_text()
+            tags = re.findall(r"--bwrap-source-tag (\S+)", text)
+            if tags:
+                passing.append(path.name)
+                self.assertEqual(set(tags), {expected}, path.name)
         self.assertEqual(
-            sorted(installers),
-            ["compatibility.yml", "qualify-namespace.yml", "render-challenge.yml", "submission.yml"],
+            sorted(passing), ["compatibility.yml", "render-challenge.yml", "submission.yml"]
         )
 
     def test_every_verifier_workflow_installs_hash_pinned_dependencies(self):
@@ -1145,16 +1155,18 @@ class VerifySubmissionTests(unittest.TestCase):
             }
             path.write_text(json.dumps(config, indent=2) + "\n")
             self.assertEqual(load_comparator_config(path)["theorem_names"], ["headline"])
+            kernels = {"nanoda": ["/toolchain/bin/nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron"]}
 
             protected = Path(directory) / "protected.json"
             with mock.patch(
                 "scripts.verify_submission.secrets.token_hex",
                 return_value="ab" * 12,
             ) as nonce:
-                protected_comparator_config(path, protected)
+                protected_comparator_config(path, protected, kernels=kernels)
             nonce.assert_called_once_with(12)
             protected_values = json.loads(protected.read_text())
-            self.assertTrue(protected_values["enable_nanoda"])
+            self.assertNotIn("enable_nanoda", protected_values)
+            self.assertEqual(protected_values["external_kernels"], kernels)
             self.assertRegex(
                 protected_values["challenge_module"],
                 r"^PalomarCanonical[0-9a-f]{24}\.Challenge$",
@@ -1176,7 +1188,7 @@ class VerifySubmissionTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         VerificationError, f"duplicate keys: {key}"
                     ):
-                        protected_comparator_config(path, protected)
+                        protected_comparator_config(path, protected, kernels=kernels)
                     self.assertFalse(protected.exists())
 
             path.write_text("{")
@@ -1191,8 +1203,8 @@ class VerifySubmissionTests(unittest.TestCase):
                     config["enable_nanoda"] = value
                     path.write_text(json.dumps(config))
                     self.assertEqual(load_comparator_config(path)["enable_nanoda"], value)
-                    protected_comparator_config(path, protected)
-                    self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
+                    protected_comparator_config(path, protected, kernels=kernels)
+                    self.assertNotIn("enable_nanoda", json.loads(protected.read_text()))
 
             config["enable_nanoda"] = True
 
@@ -1205,8 +1217,8 @@ class VerifySubmissionTests(unittest.TestCase):
             config.pop("enable_nanoda")
             path.write_text(json.dumps(config))
             self.assertNotIn("enable_nanoda", load_comparator_config(path))
-            protected_comparator_config(path, protected)
-            self.assertTrue(json.loads(protected.read_text())["enable_nanoda"])
+            protected_comparator_config(path, protected, kernels=kernels)
+            self.assertNotIn("enable_nanoda", json.loads(protected.read_text()))
 
             config["challenge_module"] = "Audit.PeriodicGeneral.Challenge"
             config["solution_module"] = "Audit.PeriodicGeneral.Solution"
@@ -1222,7 +1234,7 @@ class VerifySubmissionTests(unittest.TestCase):
 
     def test_toolchain_policy_has_only_the_consumed_minimum(self):
         settings = json.loads((REPOSITORY_ROOT / "toolchains.json").read_text())
-        self.assertEqual(settings, {"schema_version": 2, "minimum": "v4.28.0"})
+        self.assertEqual(settings, {"schema_version": 2, "minimum": "v4.35.0-rc2"})
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1251,133 +1263,19 @@ class VerifySubmissionTests(unittest.TestCase):
                         with self.assertRaisesRegex(VerificationError, "schema version 2"):
                             verifier.supported_toolchain("leanprover/lean4:v4.32.0")
 
-    def test_lean4export_prefers_the_toolchains_exact_release(self):
+    def test_toolchain_commit_is_the_lean4_release_the_toolchain_names(self):
         with mock.patch(
             "scripts.verify_submission.resolve_release_commit",
             side_effect=lambda repo, tag: f"{repo}@{tag}",
         ) as resolve:
             self.assertEqual(
-                verifier.toolchain_lean4export_commit(
-                    "leanprover/lean4:v4.33.0-rc2"
-                ),
-                "leanprover/lean4export@v4.33.0-rc2",
+                verifier.toolchain_commit("leanprover/lean4:v4.35.0-rc2"),
+                "leanprover/lean4@v4.35.0-rc2",
             )
-        resolve.assert_called_once_with(
-            "leanprover/lean4export", "v4.33.0-rc2"
-        )
-
-    def test_lean4export_stable_patch_release_falls_back_to_patch_zero(self):
-        missing = VerificationError(
-            "leanprover/lean4export has published no v4.33.1 release",
-            code="palomar.toolchain_release_missing",
-            owner="palomar",
-        )
-        with mock.patch(
-            "scripts.verify_submission.resolve_release_commit",
-            side_effect=[missing, "3" * 40],
-        ) as resolve:
-            self.assertEqual(
-                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.33.1"),
-                "3" * 40,
-            )
-        self.assertEqual(
-            resolve.call_args_list,
-            [
-                mock.call("leanprover/lean4export", "v4.33.1"),
-                mock.call("leanprover/lean4export", "v4.33.0"),
-            ],
-        )
-
-    def test_lean4export_release_candidates_do_not_fall_back(self):
-        missing = VerificationError(
-            "leanprover/lean4export has published no v4.34.0-rc3 release",
-            code="palomar.toolchain_release_missing",
-            owner="palomar",
-        )
-        with mock.patch(
-            "scripts.verify_submission.resolve_release_commit",
-            side_effect=missing,
-        ) as resolve:
-            with self.assertRaises(VerificationError) as raised:
-                verifier.toolchain_lean4export_commit(
-                    "leanprover/lean4:v4.34.0-rc3"
-                )
-        self.assertIs(raised.exception, missing)
-        resolve.assert_called_once_with(
-            "leanprover/lean4export", "v4.34.0-rc3"
-        )
-
-    def test_missing_lean4export_release_line_reports_both_tags(self):
-        exact_missing = VerificationError(
-            "leanprover/lean4export has published no v4.35.2 release",
-            code="palomar.toolchain_release_missing",
-            owner="palomar",
-        )
-        base_missing = VerificationError(
-            "leanprover/lean4export has published no v4.35.0 release",
-            code="palomar.toolchain_release_missing",
-            owner="palomar",
-        )
-        with mock.patch(
-            "scripts.verify_submission.resolve_release_commit",
-            side_effect=[exact_missing, base_missing],
-        ):
-            with self.assertRaises(VerificationError) as raised:
-                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.35.2")
-        self.assertEqual(raised.exception.code, "palomar.toolchain_release_missing")
-        self.assertEqual(raised.exception.owner, "palomar")
-        self.assertIn("neither v4.35.2 nor v4.35.0", str(raised.exception))
-        self.assertTrue(raised.exception.__suppress_context__)
-
-    def test_lean4export_provider_failure_does_not_trigger_fallback(self):
-        unavailable = VerificationError(
-            "could not read leanprover/lean4export releases",
-            code="provider.release_lookup_failed",
-            owner="provider",
-            retryable=True,
-        )
-        with mock.patch(
-            "scripts.verify_submission.resolve_release_commit",
-            side_effect=unavailable,
-        ) as resolve:
-            with self.assertRaises(VerificationError) as raised:
-                verifier.toolchain_lean4export_commit("leanprover/lean4:v4.33.1")
-        self.assertIs(raised.exception, unavailable)
-        resolve.assert_called_once_with("leanprover/lean4export", "v4.33.1")
-
-    def test_lean4export_patch_zero_is_compatible_with_stable_patch_release(self):
-        self.assertTrue(
-            verifier.compatible_lean4export_toolchain(
-                "leanprover/lean4:v4.33.1",
-                "leanprover/lean4:v4.33.0",
-            )
-        )
-        self.assertTrue(
-            verifier.compatible_lean4export_toolchain(
-                "leanprover/lean4:v4.33.1",
-                "leanprover/lean4:v4.33.1",
-            )
-        )
-        self.assertTrue(
-            verifier.compatible_lean4export_toolchain(
-                "leanprover/lean4:v4.34.0-rc2",
-                "leanprover/lean4:v4.34.0-rc2",
-            )
-        )
-        for lean4export in (
-            "leanprover/lean4:v4.32.0",
-            "leanprover/lean4:v4.33.2",
-            "leanprover/lean4:v4.33.0-rc2",
-            "leanprover/lean4:v4.34.0",
-            "nightly-2026-08-01",
-            "",
-        ):
-            with self.subTest(lean4export=lean4export):
-                self.assertFalse(
-                    verifier.compatible_lean4export_toolchain(
-                        "leanprover/lean4:v4.33.1", lean4export
-                    )
-                )
+        resolve.assert_called_once_with("leanprover/lean4", "v4.35.0-rc2")
+        with self.assertRaises(VerificationError) as raised:
+            verifier.toolchain_commit("leanprover/lean4:v4.34.0")
+        self.assertEqual(raised.exception.code, "toolchain.unsupported")
 
     def test_module_resolution_uses_lake_source_roots_but_stays_in_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1893,7 +1791,7 @@ review:
             fixture = root / "fixture"
             fixture.mkdir()
             (fixture / "lakefile.toml").write_text('name = "Example"\n')
-            (fixture / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+            (fixture / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
             (fixture / "LICENSE").write_text("Apache License Version 2.0\n")
             (fixture / "formalization.yaml").write_text(
                 """\
@@ -2006,7 +1904,7 @@ review:
             fixture = root / "fixture"
             fixture.mkdir()
             (fixture / "lakefile.toml").write_text('name = "Example"\n')
-            (fixture / "lean-toolchain").write_text("leanprover/lean4:v4.32.0\n")
+            (fixture / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
             (fixture / "LICENSE").write_text("Apache License Version 2.0\n")
             (fixture / "formalization.yaml").write_text(
                 """\
@@ -2945,74 +2843,69 @@ review:
                     )
                 self.assertIn("--deps-json", sandbox.call_args.args[0])
 
-    def test_comparator_failure_quotes_the_lines_that_say_why(self):
+    def test_comparator_rejection_quotes_the_lines_that_say_why(self):
         log = "\n".join(
-            ["Building Challenge.Basic"]
+            ["Running nanoda kernel on solution"]
             + [f"\u2714 [{n}/2012] Built Something (1.4s)" for n in range(2011)]
-            + ["Challenge/Basic.lean:42:8: error: unknown identifier `foo`",
-               "uncaught exception: Challenge and solution theorem statement do not match: 'main'"]
+            + ["nanoda kernel accepts the solution",
+               "error: Challenge and solution theorem statement do not match: 'main'"]
         )
-        error = comparator_failure(
-            1,
-            log,
-            canonical_artifacts=(
-                Path("/work/canonical-challenge/PalomarCanonical123/Challenge.olean"),
-            ),
-        )
+        error = comparator_verdict(1, log)
         diagnostic = error.diagnostic("comparator")
         self.assertEqual(diagnostic["code"], "comparator.rejected")
         self.assertEqual(diagnostic["owner"], "submitter")
         self.assertIn("statement do not match", diagnostic["explanation"])
-        self.assertIn("unknown identifier", diagnostic["explanation"])
         self.assertNotIn("Built Something", diagnostic["explanation"])
         # The submitter is shown the explanation only where it says more.
         self.assertNotEqual(diagnostic["explanation"], diagnostic["summary"])
 
-    def test_unreadable_canonical_challenge_is_palomars(self):
-        canonical_root = Path("/work/canonical-challenge")
-        canonical_artifact = canonical_root / "PalomarCanonical123/Challenge.olean"
-        log = (
-            "Building Challenge.Basic\nBuild completed successfully (2012 jobs).\n"
-            f"uncaught exception: failed to open file "
-            f"'{canonical_artifact}.server': No such file or directory\n"
-            "uncaught exception: Child exited with 1"
-        )
-        error = comparator_failure(
-            1,
-            log,
-            canonical_artifacts=(
-                canonical_artifact,
-                Path(f"{canonical_artifact}.private"),
-                Path(f"{canonical_artifact}.server"),
-                canonical_artifact.with_suffix(".ir"),
-            ),
-        )
-        diagnostic = error.diagnostic("comparator")
-        self.assertEqual(diagnostic["code"], "palomar.canonical_challenge_unreadable")
-        self.assertEqual(diagnostic["owner"], "palomar")
-        self.assertTrue(diagnostic["retryable"])
-        self.assertIn("Challenge.olean.server", diagnostic["explanation"])
-        self.assertNotIn("new submission", diagnostic["next_action"])
+    def test_every_verdict_the_comparator_can_reach_is_a_rejection(self):
+        for line in (
+            "error: Const not found in challenge: 'Foo.bar'",
+            "error: Const not found in solution: 'Foo.bar'",
+            "error: Constant not found in solution 'Foo.bar'",
+            "error: Const does not match between challenge and target 'Foo.bar'",
+            "error: Challenge and solution constant kind don't match: 'Foo.bar'",
+            "error: Challenge constant is not a definition: 'Foo.bar'",
+            "error: Solution constant is not a definition: 'Foo.bar'",
+            "error: Solution constant is not a theorem: 'Foo.bar'",
+            "error: Illegal axiom detected: 'sorryAx'",
+            "con-ron kernel rejected the solution\nerror: con-ron exited with 1",
+        ):
+            with self.subTest(line=line):
+                error = comparator_verdict(1, "Running con-ron kernel on solution\n" + line)
+                self.assertEqual(error.code, "comparator.rejected")
+                self.assertEqual(error.owner, "submitter")
+                self.assertFalse(error.retryable)
 
-    def test_an_unrelated_file_under_the_canonical_root_is_not_palomars(self):
-        error = comparator_failure(
-            1,
-            "error: object file '/work/canonical-challenge/Other/Helper.olean' does not exist",
-            canonical_artifacts=(
-                Path("/work/canonical-challenge/PalomarCanonical123/Challenge.olean"),
-            ),
-        )
-        self.assertEqual(error.code, "comparator.rejected")
-        self.assertEqual(error.owner, "submitter")
-
-    def test_comparator_sandbox_failure_stays_palomars(self):
-        error = comparator_failure(
-            1,
-            "landrun adapter: could not apply the policy",
-            canonical_artifacts=(Path("/work/canonical-challenge/Challenge.olean"),),
-        )
-        self.assertEqual(error.code, "palomar.comparator_sandbox_failed")
+    def test_a_comparator_that_could_not_run_is_palomars(self):
+        error = comparator_verdict(2, "error: `con-ron` kernel `/toolchain/bin/con-ron` was not found")
+        self.assertEqual(error.code, "palomar.comparator_cannot_run")
         self.assertEqual(error.owner, "palomar")
+        self.assertTrue(error.retryable)
+        self.assertIn("was not found", error.detail)
+
+    def test_a_kernel_whose_nested_sandbox_failed_is_not_a_rejection(self):
+        for log in (
+            "bwrap: setting up uid map: Permission denied\n"
+            "nanoda kernel rejected the solution\nerror: nanoda exited with 1",
+            "Error while interacting with con-ron kernel\n"
+            "error: Error while interacting with con-ron kernel: no such file",
+        ):
+            with self.subTest(log=log[:30]):
+                error = comparator_verdict(1, log)
+                self.assertEqual(error.code, "palomar.comparator_sandbox_failed")
+                self.assertEqual(error.owner, "palomar")
+                self.assertTrue(error.retryable)
+
+    def test_an_unexplained_comparator_exit_is_not_a_rejection(self):
+        for returncode, log in ((1, "error: Expected JSON object"), (134, ""), (1, "")):
+            with self.subTest(returncode=returncode, log=log):
+                error = comparator_verdict(returncode, log)
+                self.assertEqual(error.code, "palomar.comparator_unclassified")
+                self.assertEqual(error.owner, "palomar")
+                self.assertTrue(error.retryable)
+        self.assertIsNone(comparator_verdict(0, "Your solution is okay!"))
 
     def test_a_diagnostic_without_detail_is_unchanged(self):
         diagnostic = VerificationError("plain failure").diagnostic("comparator")
@@ -3078,15 +2971,14 @@ review:
                     }
                 )
             )
-            tools = []
-            for name in ("comparator", "lean4export", "landrun", "nanoda"):
-                tool = root / name
-                tool.touch()
-                tools.append(tool)
             lean_prefix = root / "lean"
             (lean_prefix / "bin").mkdir(parents=True)
-            for name in ("lean", "lake"):
+            for name in verifier.TOOLCHAIN_TOOLS:
                 (lean_prefix / "bin" / name).touch()
+                (lean_prefix / "bin" / name).chmod(0o755)
+            check_source = lean_prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            check_source.parent.mkdir(parents=True)
+            check_source.write_text(FAKE_CHECK_LEAN)
             printenv = root / "printenv"
             touch = root / "touch"
             printenv.touch()
@@ -3100,14 +2992,8 @@ review:
             args = Namespace(
                 output=report_path,
                 work_dir=work,
-                comparator=tools[0],
-                lean4export=tools[1],
-                landrun=tools[2],
-                nanoda=tools[3],
-                comparator_commit="a" * 40,
-                landrun_commit="b" * 40,
                 bwrap=sys.executable,
-                nanoda_commit="c" * 40,
+                bwrap_source_tag="v0.12.0",
                 workflow_url="https://github.com/example/project/actions/runs/1",
             )
 
@@ -4701,28 +4587,264 @@ class DispatchWorkflowTests(unittest.TestCase):
             step for step in steps
             if step.get("name") in {
                 "Install pinned elan",
-                "Build pinned landrun",
-                "Build pinned Comparator",
-                "Build pinned NanoDa kernel",
-                "Build toolchain-matched lean4export",
-                "Run Comparator and challenge provenance audit",
+                "Install the submitted Lean toolchain",
+                "Build pinned bubblewrap",
+                "Run lake comparator and challenge provenance audit",
             }
         ]
         self.assertTrue(expensive)
         for step in expensive:
             self.assertIn("inputs.mode == 'full'", step["if"])
 
-    def test_lean4export_build_enforces_and_uses_the_selected_toolchain(self):
-        step = next(
-            step
-            for step in self.workflow()["jobs"]["verify"]["steps"]
-            if step.get("name") == "Build toolchain-matched lean4export"
+    def test_the_submitted_toolchain_is_installed_and_nothing_else_is_built(self):
+        steps = self.workflow()["jobs"]["verify"]["steps"]
+        install = next(
+            step for step in steps if step.get("name") == "Install the submitted Lean toolchain"
         )
-        self.assertIn("compatible_lean4export_toolchain", step["run"])
-        self.assertIn(
-            'ELAN_TOOLCHAIN="$SUBMISSION_TOOLCHAIN" lake build lean4export',
-            step["run"],
+        self.assertEqual(install["id"], "toolchain")
+        self.assertEqual(
+            install["env"]["SUBMISSION_TOOLCHAIN"], "${{ steps.prepare.outputs.lean_toolchain }}"
         )
+        self.assertIn('elan toolchain install "$SUBMISSION_TOOLCHAIN"', install["run"])
+        execute = next(step for step in steps if step.get("id") == "execute")
+        self.assertIn("--bwrap-source-tag v0.12.0", execute["run"])
+        self.assertNotIn("--comparator", execute["run"])
+        self.assertEqual(
+            [step.get("id") for step in steps if step.get("id") in {"toolchain", "bwrap", "execute"}],
+            ["toolchain", "bwrap", "execute"],
+        )
+
+
+class LakeComparatorTests(unittest.TestCase):
+    """What Palomar hands `lake comparator`, and what it reads back."""
+
+    def toolchain(self, root: Path) -> Path:
+        prefix = root / "toolchain"
+        (prefix / "bin").mkdir(parents=True)
+        for name in verifier.TOOLCHAIN_TOOLS:
+            (prefix / "bin" / name).write_text("#!/bin/sh\n")
+            (prefix / "bin" / name).chmod(0o755)
+        source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+        source.parent.mkdir(parents=True)
+        source.write_text(FAKE_CHECK_LEAN)
+        return prefix
+
+    def test_the_toolchain_must_bundle_every_tool_that_judges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            tools = verifier.toolchain_tools(prefix)
+            self.assertEqual(set(tools), set(verifier.TOOLCHAIN_TOOLS))
+            self.assertEqual(
+                verifier.protected_kernels(tools),
+                {
+                    "nanoda": [str(prefix / "bin" / "nanoda_bin")],
+                    "con-ron": [str(prefix / "bin" / "con-ron")],
+                },
+            )
+            (prefix / "bin" / "con-ron").unlink()
+            with self.assertRaises(VerificationError) as raised:
+                verifier.toolchain_tools(prefix)
+            self.assertEqual(raised.exception.code, "palomar.toolchain_incomplete")
+            self.assertEqual(raised.exception.owner, "palomar")
+            self.assertIn("con-ron", str(raised.exception))
+
+    def test_primitive_targets_are_read_from_the_toolchains_own_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            self.assertEqual(
+                verifier.primitive_targets(prefix),
+                ["Nat.add", "Nat.sub", "String.mk", "outParam"],
+            )
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            source.write_text("def somethingElse : M Unit := pure ()\n")
+            with self.assertRaises(VerificationError) as raised:
+                verifier.primitive_targets(prefix)
+            self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+            source.unlink()
+            with self.assertRaises(VerificationError) as raised:
+                verifier.primitive_targets(prefix)
+            self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LEAN"), "set PALOMAR_TEST_LEAN to read a real toolchain"
+    )
+    def test_the_installed_toolchain_has_the_expected_primitive_targets(self):
+        lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
+        primitives = verifier.primitive_targets(lean.parent.parent)
+        self.assertEqual(primitives[:3], ["Nat.add", "Nat.sub", "Nat.mul"])
+        self.assertIn("eagerReduce", primitives)
+        self.assertEqual(primitives[-1], "outParam")
+        self.assertNotIn("Nat.zero", primitives)
+
+    def test_export_targets_follow_the_comparators_order(self):
+        config = {
+            "theorem_names": ["Foo.main"],
+            "definition_names": ["Foo.hole"],
+            "permitted_axioms": ["propext", "Quot.sound"],
+        }
+        self.assertEqual(
+            verifier.comparator_export_targets(config, ["Nat.add", "outParam"]),
+            ["Quot", "Quot.mk", "Quot.lift", "Quot.ind", "Foo.main", "propext", "Quot.sound",
+             "Nat.add", "outParam", "Foo.hole"],
+        )
+        config["permitted_axioms"] = ["propext"]
+        del config["definition_names"]
+        self.assertEqual(
+            verifier.comparator_export_targets(config, ["Nat.add"]),
+            ["Foo.main", "propext", "Nat.add"],
+        )
+
+    def test_the_protected_configuration_registers_the_kernels_and_nothing_submitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "comparator.json"
+            source.write_text(json.dumps({
+                "challenge_module": "Challenge",
+                "solution_module": "Solution",
+                "theorem_names": ["main"],
+                "permitted_axioms": ["propext"],
+                "enable_nanoda": True,
+            }))
+            kernels = {"nanoda": ["/toolchain/bin/nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron"]}
+            written = verifier.protected_comparator_config(source, root / "protected.json", kernels=kernels)
+            config = json.loads(written.read_text())
+            self.assertEqual(
+                set(config),
+                {"challenge_module", "solution_module", "theorem_names", "definition_names",
+                 "permitted_axioms", "external_kernels"},
+            )
+            self.assertRegex(config["challenge_module"], r"^PalomarCanonical[0-9a-f]{24}\.Challenge$")
+            self.assertEqual(config["external_kernels"], kernels)
+            self.assertEqual(config["definition_names"], [])
+            self.assertNotIn("enable_nanoda", config)
+            self.assertEqual(
+                verifier.validate_protected_comparator_config(written, kernels=kernels), config
+            )
+            # The submitter's loader must keep refusing what only Palomar may write.
+            with self.assertRaises(VerificationError) as raised:
+                verifier.load_comparator_config(written)
+            self.assertEqual(raised.exception.code, "comparator.unknown_key")
+            for broken in (
+                {
+                    **config,
+                    "external_kernels": {
+                        "nanoda": ["nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron"],
+                    },
+                },
+                {**config, "external_kernels": {"nanoda": kernels["nanoda"]}},
+                {**config, "enable_nanoda": True},
+                {**config, "challenge_module": "Challenge"},
+                {**config, "permitted_axioms": ["sorryAx"]},
+            ):
+                with self.subTest(broken=sorted(set(broken) ^ set(config)) or "value"):
+                    written.write_text(json.dumps(broken))
+                    with self.assertRaises(VerificationError):
+                        verifier.validate_protected_comparator_config(written, kernels=kernels)
+
+    def test_the_installed_bubblewrap_release_is_the_one_the_workflows_name(self):
+        self.assertEqual(verifier.bwrap_source_tag_from_installer(), "v0.12.0")
+        self.assertTrue(verifier.BWRAP_SOURCE_TAG_RE.fullmatch("v0.12.0"))
+        self.assertFalse(verifier.BWRAP_SOURCE_TAG_RE.fullmatch("0.12.0"))
+
+    def test_an_export_must_start_with_the_exporters_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export = Path(directory) / "solution.export"
+            with self.assertRaisesRegex(VerificationError, "produced no file"):
+                verifier.verify_export(export)
+            export.write_text("error: something\n")
+            with self.assertRaisesRegex(VerificationError, "exporter's header"):
+                verifier.verify_export(export)
+            export.write_text('{"meta":{"exporter":{"name":"lean4export"}}}\n{"in":1}\n')
+            verifier.verify_export(export)
+
+    def test_exports_are_written_through_the_babysitter_not_the_log_capture(self):
+        with (
+            mock.patch("scripts.verify_submission.verify_tool_snapshot"),
+            mock.patch("scripts.verify_submission._BWRAP", Path("/opt/bwrap")),
+            mock.patch("scripts.verify_submission.supervisor_command", return_value=["supervise"]) as command,
+            mock.patch(
+                "scripts.verify_submission.run",
+                return_value=subprocess.CompletedProcess(["supervise"], 0, "", ""),
+            ),
+            mock.patch(
+                "scripts.verify_submission.supervisor_outcome",
+                return_value={"Result": "success", "memory_events": {"oom": 0, "oom_kill": 0}},
+            ),
+            mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            output = Path(directory) / "solution.export"
+            verifier.export_module(
+                "Solution", ["main", "Nat.add"], output=output, leanexport=Path("/toolchain/bin/leanexport"),
+                cwd=REPOSITORY_ROOT, environment={}, readable_paths=[], executable_paths=[], tools={},
+                timeout=60,
+            )
+            self.assertEqual(command.call_args.kwargs["stdout_path"], output)
+            inner = command.call_args.args[0]
+            # bubblewrap's own `--` precedes the command; the exporter's is the last.
+            separator = len(inner) - 1 - inner[::-1].index("--")
+            self.assertEqual(inner[separator + 1:], ["main", "Nat.add"])
+            self.assertEqual(
+                inner[separator - 2:separator], ["/toolchain/bin/leanexport", "Solution"]
+            )
+            output.write_text("x")
+            with self.assertRaisesRegex(VerificationError, "not fresh"):
+                verifier.export_module(
+                    "Solution", ["main"], output=output, leanexport=Path("/toolchain/bin/leanexport"),
+                    cwd=REPOSITORY_ROOT, environment={}, readable_paths=[], executable_paths=[],
+                    tools={}, timeout=60,
+                )
+
+    def test_the_judge_phase_binds_no_candidate_tree_and_nests_its_own_sandbox(self):
+        with (
+            mock.patch("scripts.verify_submission.verify_tool_snapshot"),
+            mock.patch("scripts.verify_submission._BWRAP", Path("/opt/bwrap")),
+            mock.patch("scripts.verify_submission.supervisor_command", return_value=["supervise"]) as command,
+            mock.patch(
+                "scripts.verify_submission.run",
+                return_value=subprocess.CompletedProcess(["supervise"], 0, "Your solution is okay!", ""),
+            ),
+            mock.patch(
+                "scripts.verify_submission.supervisor_outcome",
+                return_value={"Result": "success", "memory_events": {"oom": 0, "oom_kill": 0}},
+            ),
+            mock.patch("scripts.verify_submission._RESOURCE_METRICS_PATH", None),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            root = Path(directory)
+            exports = root / "exports"
+            exports.mkdir()
+            for name in ("challenge", "solution"):
+                (exports / f"{name}.export").write_text('{"meta":{}}\n')
+            config = root / "protected.json"
+            config.write_text("{}")
+            candidate = root / "candidate"
+            candidate.mkdir()
+            proc = verifier.judge_exports(
+                lake=Path("/toolchain/bin/lake"),
+                config=config,
+                challenge_export=exports / "challenge.export",
+                solution_export=exports / "solution.export",
+                scratch=root / "judge",
+                bwrap=Path("/opt/bwrap"),
+                lean_prefix=Path("/toolchain"),
+                environment={"PATH": "/toolchain/bin:/usr/bin", "LEAN_PATH": str(candidate)},
+                tools={},
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0)
+            confined = command.call_args.args[0]
+            self.assertIn("--challenge-from-export", confined)
+            self.assertNotIn("--inadvisably-no-sandbox", confined)
+            self.assertNotIn("--disable-userns", confined)
+            self.assertIn("--unshare-user", confined)
+            joined = " ".join(confined)
+            self.assertNotIn(str(candidate), joined)
+            self.assertIn(f"--ro-bind {exports} {exports}", joined)
+            self.assertIn(f"--bind {root / 'judge'} {root / 'judge'}", joined)
+            self.assertIn("--setenv COMPARATOR_BWRAP /opt/bwrap", joined)
+            self.assertNotIn("LEAN_PATH", joined)
+            self.assertTrue((root / "judge" / "project").is_dir())
 
 
 class MetadataShapeTests(unittest.TestCase):
