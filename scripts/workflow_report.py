@@ -24,11 +24,8 @@ SETUP_STEPS = (
     "disk",
     "capacity",
     "elan",
-    "go",
-    "landrun",
-    "comparator",
-    "nanoda",
-    "exporter",
+    "toolchain",
+    "bwrap",
     "execute",
 )
 
@@ -45,7 +42,9 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
         raise ValueError("invalid workflow request identifier")
     bound = (
         isinstance(report, dict)
-        and report.get("schema_version") == 1
+        # 1 until the verifier starts, 2 once it has (a correction report is
+        # 2 throughout); the finalizer binds either.
+        and report.get("schema_version") in {1, 2}
         and isinstance(report.get("source"), dict)
         and isinstance(report.get("submission"), dict)
         and report.get("source", {}).get("repository") == repository

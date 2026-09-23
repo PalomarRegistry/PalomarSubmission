@@ -8,11 +8,11 @@ compile and render it as `PalomarCold.Challenge`, because Lean's generated name
 for `modulePrivate` is sensitive to that module identity.
 -/
 
-namespace PalomarColdTauCetiFixture
+namespace PalomarColdFixture
 
 private theorem modulePrivate : True := by
   trivial
 
 theorem dependencyClosure : True := modulePrivate
 
-end PalomarColdTauCetiFixture
+end PalomarColdFixture

@@ -102,18 +102,19 @@ def load_profile(identifier: str | None = None) -> dict[str, Any]:
         raise VerificationProfileError("memory_high_percent must be below memory_max_percent")
     if limits["execution_budget_seconds"] > limits["job_timeout_minutes"] * 60:
         raise VerificationProfileError("execution budget exceeds the job timeout")
+    # What judges a submission is the submitted toolchain itself (at or above
+    # the floor) and the bubblewrap release the trusted phase builds; the
+    # profile names both so the record's provenance and the policy agree.
     tools = value["trusted_tools"]
-    expected_tools = {"comparator_commit", "landrun_commit", "nanoda_commit", "lean4export"}
+    expected_tools = {"toolchain_floor", "bwrap_source_tag"}
     if not isinstance(tools, dict) or set(tools) != expected_tools:
         raise VerificationProfileError("verification profile trusted tools are invalid")
-    for name in ("comparator_commit", "landrun_commit", "nanoda_commit"):
-        commit = tools[name]
-        if (
-            not isinstance(commit, str)
-            or len(commit) != 40
-            or any(character not in "0123456789abcdef" for character in commit)
-        ):
-            raise VerificationProfileError(f"verification profile {name} is not a commit")
+    if not all(isinstance(tools[name], str) for name in expected_tools):
+        raise VerificationProfileError("verification profile trusted tools must be strings")
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?", tools["toolchain_floor"]):
+        raise VerificationProfileError("verification profile toolchain_floor is not a release tag")
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tools["bwrap_source_tag"]):
+        raise VerificationProfileError("verification profile bwrap_source_tag is not a release tag")
     if identifier != HOSTED_PROFILE:
         catalogue = load_catalogue()
         selected = catalogue["profiles"].get(identifier)

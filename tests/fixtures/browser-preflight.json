@@ -18,37 +18,59 @@
     {
       "id": "duplicate-yaml-key",
       "formalization": "project:\n  name: First\n  name: Second\n",
-      "expected_codes": ["formalization.invalid_yaml"]
+      "expected_codes": [
+        "formalization.invalid_yaml"
+      ]
     },
     {
       "id": "yaml-merge-key",
       "formalization": "defaults: &defaults\n  name: Example\nproject:\n  <<: *defaults\n",
-      "expected_codes": ["formalization.invalid_yaml"]
+      "expected_codes": [
+        "formalization.invalid_yaml"
+      ]
     },
     {
       "id": "duplicate-json-key",
       "comparator": "{\"challenge_module\":\"A\",\"challenge_module\":\"B\"}",
-      "expected_codes": ["comparator.duplicate_key"]
+      "expected_codes": [
+        "comparator.duplicate_key"
+      ]
     },
     {
       "id": "old-toolchain",
-      "toolchain": "leanprover/lean4:v4.27.0",
-      "expected_codes": ["toolchain.unsupported"]
+      "toolchain": "leanprover/lean4:v4.34.0",
+      "expected_codes": [
+        "toolchain.unsupported"
+      ]
     },
     {
-      "id": "minimum-release-candidate",
-      "toolchain": "leanprover/lean4:v4.28.0-rc1",
-      "expected_codes": ["toolchain.unsupported"]
+      "id": "release-candidate-below-the-floor",
+      "toolchain": "leanprover/lean4:v4.35.0-rc1",
+      "expected_codes": [
+        "toolchain.unsupported"
+      ]
+    },
+    {
+      "id": "floor-release-candidate",
+      "toolchain": "leanprover/lean4:v4.35.0-rc2",
+      "expected_codes": []
+    },
+    {
+      "id": "floor-release",
+      "toolchain": "leanprover/lean4:v4.35.0",
+      "expected_codes": []
     },
     {
       "id": "newer-release-candidate",
-      "toolchain": "leanprover/lean4:v4.29.0-rc1",
+      "toolchain": "leanprover/lean4:v4.36.0-rc1",
       "expected_codes": []
     },
     {
       "id": "malformed-toolchain",
       "toolchain": "leanprover/lean4:nightly",
-      "expected_codes": ["toolchain.invalid"]
+      "expected_codes": [
+        "toolchain.invalid"
+      ]
     }
   ]
 }

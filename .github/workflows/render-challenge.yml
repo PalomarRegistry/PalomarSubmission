@@ -165,16 +165,6 @@ jobs:
           LEAN_TOOLCHAIN: ${{ steps.prepare.outputs.lean_toolchain }}
         run: elan toolchain install "$LEAN_TOOLCHAIN"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: steps.prepare.outputs.ready == 'true'
-        with:
-          go-version: "1.24.0"
-
-      - name: Build pinned Landrun
-        if: steps.prepare.outputs.ready == 'true'
-        run: |
-          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
-
       - name: Build pinned bubblewrap
         if: steps.prepare.outputs.ready == 'true'
         run: |
@@ -189,10 +179,9 @@ jobs:
           python -m scripts.render_challenge execute \
             --work-dir "$RUNNER_TEMP/palomar-render" \
             --output "$RUNNER_TEMP/palomar-render/report.json" \
-            --landrun "$(go env GOPATH)/bin/landrun" \
             --bwrap "$PALOMAR_BWRAP" \
             --renderer-commit "${{ github.sha }}" \
-            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --bwrap-source-tag v0.12.0 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload bounded render result

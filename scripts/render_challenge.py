@@ -35,11 +35,13 @@ from scripts.render_report import (  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
+    BWRAP_SOURCE_TAG_RE,
     DIAGNOSTICS_SCHEMA_VERSION,
     MAX_DIAGNOSTICS,
     MAX_SOURCE_BYTES,
     TOOLCHAIN_RE,
     LeanHeader,
+    bwrap_source_tag_from_installer,
     clone_commit,
     configure_bwrap,
     ensure_lake_manifest,
@@ -1159,7 +1161,7 @@ def prepare_workspace(
     finally:
         shutil.rmtree(verso_probe, ignore_errors=True)
     # Preserve hostile symlinks rather than dereferencing them in the trusted
-    # process. Landrun then mediates any attempt to follow them during a build.
+    # process. The sandbox then has nothing to offer an attempt to follow them.
     shutil.copytree(
         source,
         workspace,
@@ -2829,14 +2831,20 @@ def execute(args: argparse.Namespace) -> int:
             "status": "error",
             "stage": "workspace",
             "renderer_commit": args.renderer_commit,
-            "landrun_commit": args.landrun_commit,
+            "bwrap_source_tag": args.bwrap_source_tag,
             "workflow_url": args.workflow_url,
         }
     )
     tools: dict[Path, str] = {}
     try:
-        if not SHA_RE.fullmatch(args.renderer_commit) or not SHA_RE.fullmatch(args.landrun_commit):
-            raise VerificationError("renderer and Landrun commits must be immutable SHAs")
+        if not SHA_RE.fullmatch(args.renderer_commit):
+            raise VerificationError("renderer commit must be an immutable SHA")
+        if not BWRAP_SOURCE_TAG_RE.fullmatch(args.bwrap_source_tag):
+            raise VerificationError("bubblewrap source tag must be a release tag")
+        if args.bwrap_source_tag != bwrap_source_tag_from_installer():
+            raise VerificationError(
+                "bubblewrap source tag does not match the release scripts/install_bwrap.sh builds"
+            )
         source = work / "source"
         challenge_relative = normalized_repository_path(
             prepared.source.paths.challenge_path,
@@ -2857,7 +2865,6 @@ def execute(args: argparse.Namespace) -> int:
         )
         workspace = render_workspace.project
 
-        landrun = Path(args.landrun).resolve(strict=True)
         bwrap = configure_bwrap(Path(args.bwrap))
         renderer = Path(__file__).resolve(strict=True)
         env = os.environ.copy()
@@ -2905,12 +2912,11 @@ def execute(args: argparse.Namespace) -> int:
         env["TMPDIR"] = str(sandbox_tmp.resolve())
         allowed_exec = executable_paths(
             lean_prefix,
-            [landrun, renderer, lake, lean, python, printenv, touch, curl, git, env_tool],
+            [renderer, lake, lean, python, printenv, touch, curl, git, env_tool],
         )
         require_protected_paths(
             [
                 output,
-                landrun,
                 bwrap,
                 renderer,
                 lake,
@@ -2926,7 +2932,7 @@ def execute(args: argparse.Namespace) -> int:
             writable_directories,
         )
         tools = tool_snapshot(
-            [landrun, bwrap, renderer, lake, lean, python, printenv, touch, curl, git, env_tool]
+            [bwrap, renderer, lake, lean, python, printenv, touch, curl, git, env_tool]
         )
         # The render build is where untrusted compile-time Lean runs, so it
         # gets the verifier's whole probe set rather than a write-only subset.
@@ -3196,10 +3202,9 @@ def parser() -> argparse.ArgumentParser:
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
     execute_parser.add_argument("--output", required=True)
-    execute_parser.add_argument("--landrun", required=True)
     execute_parser.add_argument("--bwrap", required=True)
     execute_parser.add_argument("--renderer-commit", required=True)
-    execute_parser.add_argument("--landrun-commit", required=True)
+    execute_parser.add_argument("--bwrap-source-tag", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.set_defaults(func=execute)
     sanitize_parser = commands.add_parser("sanitize")

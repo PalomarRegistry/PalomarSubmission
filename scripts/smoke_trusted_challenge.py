@@ -19,10 +19,15 @@ from scripts.verify_submission import (  # noqa: E402
     EXECUTION_BUDGET_SECONDS,
     audit_challenge_sources,
     build_allowlisted_roots,
+    comparator_export_targets,
+    comparator_preflight,
+    comparator_verdict,
     compile_canonical_challenge,
     configure_bwrap,
+    export_module,
     get_mathlib_cache,
     install_execution_deadline,
+    judge_exports,
     lake_environment_value,
     load_comparator_config,
     manifest_packages,
@@ -31,15 +36,21 @@ from scripts.verify_submission import (  # noqa: E402
     package_allowlist,
     package_checkout,
     package_lake_directories,
+    primitive_targets,
     protected_comparator_config,
+    protected_kernels,
     protected_lean_path,
     reject_untrusted_package_artifacts,
     require_protected_paths,
     run,
     sandboxed_run,
+    sha256,
     system_readable_paths,
     tool_snapshot,
+    toolchain_tools,
     trusted_lake_directories,
+    validate_protected_comparator_config,
+    verify_export,
     verify_sandbox_confinement,
 )
 
@@ -47,12 +58,7 @@ from scripts.verify_submission import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--landrun", type=Path, required=True)
     parser.add_argument("--bwrap", type=Path, required=True)
-    parser.add_argument("--comparator", type=Path, required=True)
-    parser.add_argument("--lean4export", type=Path, required=True)
-    parser.add_argument("--nanoda", type=Path, required=True)
-    parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
     install_execution_deadline(
@@ -61,12 +67,7 @@ def main() -> int:
     )
 
     source = args.source.resolve(strict=True)
-    landrun = args.landrun.resolve(strict=True)
-    configure_bwrap(args.bwrap)
-    comparator = args.comparator.resolve(strict=True)
-    lean4export = args.lean4export.resolve(strict=True)
-    nanoda = args.nanoda.resolve(strict=True)
-    adapter = args.adapter.resolve(strict=True)
+    bwrap = configure_bwrap(args.bwrap)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
@@ -88,6 +89,10 @@ def main() -> int:
         raise VerificationError("required system tools are unavailable")
     printenv = Path(printenv_command).absolute()
     touch = Path(touch_command).absolute()
+    bundled = toolchain_tools(lean_prefix)
+    leanexport = bundled["leanexport"]
+    kernels = protected_kernels(bundled)
+    primitives = primitive_targets(lean_prefix)
 
     writable_directories = materialize_packages(
         source, checkout=source, base_env=environment
@@ -98,14 +103,10 @@ def main() -> int:
     temporary.mkdir()
     environment.update(
         {
-            "COMPARATOR_LANDRUN": str(adapter),
-            "COMPARATOR_LEAN4EXPORT": str(lean4export),
-            "COMPARATOR_NANODA": str(nanoda),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
             "HOME": str(home.resolve()),
-            "PALOMAR_LANDRUN_REAL": str(landrun),
             "TMPDIR": str(temporary.resolve()),
             "LEAN_ABORT_ON_PANIC": "1",
         }
@@ -119,11 +120,6 @@ def main() -> int:
         python,
         printenv,
         touch,
-        landrun,
-        comparator,
-        lean4export,
-        nanoda,
-        adapter,
     ]
     for raw in ("/usr", "/bin", "/lib", "/lib64", "/run/current-system/sw", "/nix/store"):
         path = Path(raw)
@@ -145,25 +141,21 @@ def main() -> int:
         if path.is_symlink() or not path.is_file():
             raise VerificationError(f"cold-build configured {field} source is missing")
     comparator_config = protected_comparator_config(
-        source_comparator, work / "protected-comparator.json"
+        source_comparator, work / "protected-comparator.json", kernels=kernels
     )
-    protected_challenge = load_comparator_config(comparator_config)["challenge_module"]
+    protected_config = validate_protected_comparator_config(comparator_config, kernels=kernels)
+    protected_challenge = protected_config["challenge_module"]
     environment["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
     readable_paths = sorted({source, comparator_config, *system_readable_paths()})
     tools = tool_snapshot(
         [
             Path(__file__).resolve(),
-            lean,
-            lake,
+            *bundled.values(),
             python,
             printenv,
             touch,
-            landrun,
-            comparator,
-            lean4export,
-            nanoda,
+            bwrap,
             comparator_config,
-            adapter,
         ]
     )
 
@@ -179,6 +171,20 @@ def main() -> int:
         readable_paths=readable_paths,
         executable_paths=executable_paths,
         tools=tools,
+    )
+    comparator_preflight(
+        work,
+        lean=lean,
+        leanexport=leanexport,
+        lake=lake,
+        lean_prefix=lean_prefix,
+        bwrap=bwrap,
+        kernels=kernels,
+        primitives=primitives,
+        environment=environment,
+        executable_paths=executable_paths,
+        tools=tools,
+        timeout=7200,
     )
 
     packages = manifest_packages(source)
@@ -288,17 +294,12 @@ def main() -> int:
     require_protected_paths(
         [
             Path(__file__).resolve(),
-            lean,
-            lake,
+            *bundled.values(),
             python,
             printenv,
             touch,
-            landrun,
-            comparator,
-            lean4export,
-            nanoda,
+            bwrap,
             comparator_config,
-            adapter,
         ],
         candidate_writable,
     )
@@ -381,7 +382,7 @@ def main() -> int:
     )
     # These builds exercise arbitrary proof-dependency compatibility. Lake may
     # put workspace directories before the inherited path while building; the
-    # protected LEAN_PATH is reapplied above and carried into Comparator below.
+    # protected LEAN_PATH is reapplied above and carried into the exports below.
     for target in ("Challenge", "Solution"):
         sandboxed_run(
             [str(lake), "build", target],
@@ -394,20 +395,46 @@ def main() -> int:
             timeout=7200,
         )
 
-    comparison = sandboxed_run(
-        [str(comparator), str(comparator_config)],
-        cwd=source,
+    exports = work / "exports"
+    exports.mkdir()
+    require_protected_paths([exports], candidate_writable)
+    targets = comparator_export_targets(protected_config, primitives)
+    for module, name in ((protected_challenge, "challenge"), (config["solution_module"], "solution")):
+        exported = export_module(
+            module,
+            targets,
+            output=exports / f"{name}.export",
+            leanexport=leanexport,
+            cwd=source,
+            environment=environment,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=7200,
+        )
+        if exported.returncode:
+            raise VerificationError(
+                f"cold-build {name} export failed: {exported.stderr.strip()[-4000:]}"
+            )
+        verify_export(exports / f"{name}.export")
+        tools[(exports / f"{name}.export").resolve()] = sha256(exports / f"{name}.export")
+
+    comparison = judge_exports(
+        lake=lake,
+        config=comparator_config,
+        challenge_export=exports / "challenge.export",
+        solution_export=exports / "solution.export",
+        scratch=work / "judge",
+        bwrap=bwrap,
+        lean_prefix=lean_prefix,
         environment=environment,
-        writable_directories=candidate_writable,
-        readable_paths=readable_paths,
-        executable_paths=executable_paths,
         tools=tools,
         timeout=7200,
-        check=False,
     )
-    if comparison.returncode:
-        detail = (comparison.stdout + "\n" + comparison.stderr).strip()[-4000:]
-        raise VerificationError(f"cold-build Comparator integration failed: {detail}")
+    log = (comparison.stdout + "\n" + comparison.stderr).strip()
+    verdict = comparator_verdict(comparison.returncode, log)
+    if verdict is not None or "Your solution is okay!" not in log:
+        raise VerificationError(f"cold-build lake comparator integration failed: {log[-4000:]}")
 
     print(
         json.dumps(

@@ -82,12 +82,11 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "${{ fromJSON(needs.profile.outputs.labels) }}")
         self.assertEqual(WORKFLOW["jobs"]["profile"]["runs-on"], profile["runner"]["label"])
         self.assertEqual(job["timeout-minutes"], "${{ fromJSON(needs.profile.outputs.timeout) }}")
-        for commit in (
-            profile["trusted_tools"]["comparator_commit"],
-            profile["trusted_tools"]["landrun_commit"],
-            profile["trusted_tools"]["nanoda_commit"],
-        ):
-            self.assertIn(commit, WORKFLOW_TEXT)
+        floor = json.loads((ROOT / "toolchains.json").read_text())["minimum"]
+        self.assertEqual(profile["trusted_tools"]["toolchain_floor"], floor)
+        self.assertIn(
+            f"--bwrap-source-tag {profile['trusted_tools']['bwrap_source_tag']}", WORKFLOW_TEXT
+        )
         self.assertIn("`palomar-standard-v1`", SECURITY)
 
     def test_the_only_output_is_the_bounded_report_artifact(self):

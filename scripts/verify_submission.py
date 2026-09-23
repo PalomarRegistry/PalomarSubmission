@@ -58,6 +58,40 @@ MAX_CHALLENGE_LINES = 1000
 MAX_CONFIGURATION_BYTES = 1024 * 1024
 MAX_CORRECTION_BASELINE_BYTES = 2 * 1024 * 1024
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
+# The checkers `lake comparator` runs besides Lean's own kernel: the name the
+# protected configuration registers each under, and the binary the selected
+# toolchain bundles for it. They are the binaries `--paranoid` would run;
+# Palomar makes no kernel version choice of its own.
+PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
+# The toolchain binaries a verification runs, each digested into the record.
+TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")
+BWRAP_SOURCE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+# `lake comparator` exits 2 when it could not run at all and 1 both when it has
+# found against the submission and when a step of its own failed. What it
+# prints tells the two apart (Lake/Check/Compare.lean, Axioms.lean and
+# CLI/Check.lean at v4.35.0-rc2). No candidate code runs in the judge phase,
+# but the transcript quotes declaration names the submitter chose, so every
+# marker is anchored to the start of its line and the names are kept free of
+# control characters: a name cannot begin a line of its own.
+COMPARATOR_VERDICT_RE = re.compile(
+    r"^error: (?:"
+    r"Const not found in challenge|Const not found in solution|Constant not found in solution"
+    r"|Const does not match between challenge and target"
+    r"|Challenge and solution constant kind don't match"
+    r"|Challenge and solution theorem statement do not match"
+    r"|Challenge constant is not a definition|Solution constant is not a definition"
+    r"|Solution constant is not a theorem|Illegal axiom detected)",
+    re.MULTILINE,
+)
+# `runExternalKernel` says "rejected" for every nonzero kernel exit, a crash
+# included, so a kernel's word alone is not a verdict. Lean's own kernel runs
+# last and is the arbiter: its rejection is the submission's; an independent
+# kernel failing while Lean's accepts is Palomar's to look at.
+COMPARATOR_KERNEL_REJECTED_RE = re.compile(r"^(?P<kernel>[^\n]+) kernel rejected the solution$", re.MULTILINE)
+COMPARATOR_LEAN_KERNEL = "Lean default"
+COMPARATOR_INFRASTRUCTURE_RE = re.compile(
+    r"^(?:bwrap: |Error while interacting with |error: Error while interacting with )", re.MULTILINE
+)
 COMPARATOR_REQUIRED_KEYS = {
     "challenge_module",
     "solution_module",
@@ -214,64 +248,15 @@ def resolve_release_commit(repository: str, tag: str) -> str:
     return commit
 
 
-def toolchain_lean4export_commit(toolchain: str) -> str:
-    """The compatible lean4export release for this toolchain, as a commit.
+def toolchain_commit(toolchain: str) -> str:
+    """The lean4 commit the submitted toolchain's release tag names.
 
-    Prefer an exact tag. Stable Lean patch releases may fall back to the
-    release line's patch-zero lean4export tag, whose source is then rebuilt
-    with the submission's exact toolchain. Release candidates remain exact.
-    The resolved commit is recorded in the mechanical report.
+    Every tool that judges the submission (`lake comparator`, `leanexport`,
+    `leanchecker` and the bundled kernels) ships in that release, so this one
+    commit is the provenance of all of them; the record carries it together
+    with the digests of the installed binaries.
     """
-    repository = "leanprover/lean4export"
-    tag = supported_toolchain(toolchain)
-    try:
-        return resolve_release_commit(repository, tag)
-    except VerificationError as error:
-        if error.code != "palomar.toolchain_release_missing":
-            raise
-        match = TOOLCHAIN_RE.fullmatch(toolchain.strip())
-        if match is None or match.group("rc") is not None or int(match.group("patch")) == 0:
-            raise
-        release_line_tag = f"v{match.group('major')}.{match.group('minor')}.0"
-        try:
-            return resolve_release_commit(repository, release_line_tag)
-        except VerificationError as fallback_error:
-            if fallback_error.code != "palomar.toolchain_release_missing":
-                raise
-            raise VerificationError(
-                f"{repository} has published neither {tag} nor {release_line_tag} "
-                "for this Lean release line",
-                code="palomar.toolchain_release_missing",
-                owner="palomar",
-                next_action=(
-                    "Do not change the repository. Palomar must add support for this Lean release."
-                ),
-            ) from None
-
-
-def compatible_lean4export_toolchain(
-    submission_toolchain: str, lean4export_toolchain: str
-) -> bool:
-    """Whether selected lean4export source may build with the submission Lean.
-
-    Exact toolchains always match. The sole relaxation is from a stable
-    positive patch release to patch zero on the same major/minor release line;
-    it deliberately does not cross release lines or prerelease boundaries.
-    """
-    submission = TOOLCHAIN_RE.fullmatch(submission_toolchain.strip())
-    lean4export = TOOLCHAIN_RE.fullmatch(lean4export_toolchain.strip())
-    if submission is None or lean4export is None:
-        return False
-    if submission_toolchain.strip() == lean4export_toolchain.strip():
-        return True
-    return (
-        submission.group("rc") is None
-        and lean4export.group("rc") is None
-        and submission.group("major") == lean4export.group("major")
-        and submission.group("minor") == lean4export.group("minor")
-        and int(submission.group("patch")) > 0
-        and int(lean4export.group("patch")) == 0
-    )
+    return resolve_release_commit("leanprover/lean4", supported_toolchain(toolchain))
 
 
 LICENSE_FILE_RE = re.compile(
@@ -295,10 +280,7 @@ SANDBOX_ENVIRONMENT = (
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
-    "COMPARATOR_LANDRUN",
-    "COMPARATOR_LEAN4EXPORT",
-    "COMPARATOR_NANODA",
-    "PALOMAR_LANDRUN_REAL",
+    "COMPARATOR_BWRAP",
     "PALOMAR_PROTECTED_CHALLENGE_MODULE",
 )
 
@@ -362,6 +344,8 @@ PALOMAR_OWNED_STAGES = frozenset(
         "confinement-final",
         "trusted-cache",
         "trusted-roots",
+        "comparator-preflight",
+        "challenge-export",
         "resource-exhausted",
     }
 )
@@ -1088,6 +1072,8 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         raise VerificationError("comparator theorem_names must be a nonempty array")
     if not all(isinstance(item, str) and item for item in theorem_names + definition_names):
         raise VerificationError("comparator declaration names must be nonempty strings")
+    if any(re.search(r"[\x00-\x1f\x7f]", item) for item in theorem_names + definition_names):
+        raise VerificationError("comparator declaration names must not contain control characters")
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError(
@@ -1103,22 +1089,71 @@ def protected_challenge_module(config: dict[str, Any]) -> str:
     return f"PalomarCanonical{secrets.token_hex(12)}.Challenge"
 
 
-def protected_comparator_config(source: Path, destination: Path) -> Path:
-    """Write Palomar's trusted config with its canonical Challenge alias."""
+def protected_comparator_config(
+    source: Path, destination: Path, *, kernels: dict[str, list[str]]
+) -> Path:
+    """Write Palomar's trusted config: the canonical Challenge alias and its kernels.
+
+    The submitted file supplies the modules, declarations and axioms. Palomar
+    replaces the Challenge module name with the per-run alias, drops the
+    submitter's `enable_nanoda` (a switch whose value never mattered here) and
+    registers the two bundled external kernels itself.
+    """
     config = load_comparator_config(source)
     challenge_module = protected_challenge_module(config)
-    config["challenge_module"] = challenge_module
-    config["enable_nanoda"] = True
-    write_json(destination, config)
-    # Validate the bytes Comparator will actually consume, not only the
-    # earlier submitted object. The explicit assertion is defense in depth
-    # against a future serializer or loader change weakening the invariant.
-    protected = load_comparator_config(destination)
-    if protected.get("enable_nanoda") is not True:
-        raise VerificationError("protected Comparator configuration did not enable NanoDa")
-    if protected.get("challenge_module") != challenge_module:
+    protected = {
+        "challenge_module": challenge_module,
+        "solution_module": config["solution_module"],
+        "theorem_names": list(config["theorem_names"]),
+        "definition_names": list(config.get("definition_names", [])),
+        "permitted_axioms": list(config["permitted_axioms"]),
+        "external_kernels": {name: list(argv) for name, argv in kernels.items()},
+    }
+    write_json(destination, protected)
+    # Validate the bytes `lake comparator` will actually consume, not only the
+    # object serialized above.
+    validate_protected_comparator_config(destination, kernels=kernels)
+    written = json.loads(destination.read_text(encoding="utf-8"))
+    if written["challenge_module"] != challenge_module:
         raise VerificationError("protected Comparator configuration lost its Challenge alias")
     return destination.resolve(strict=True)
+
+
+def validate_protected_comparator_config(path: Path, *, kernels: dict[str, list[str]]) -> dict[str, Any]:
+    """Require exactly the shape `protected_comparator_config` writes.
+
+    The submitter's loader rejects `external_kernels`, which is right for a
+    submitted file and wrong for Palomar's own, so the protected copy has its
+    own check: the six keys, the alias namespace, and the kernel commands as
+    absolute paths under the selected toolchain.
+    """
+    if path.is_symlink() or not path.is_file():
+        raise VerificationError("protected Comparator configuration is not a regular file")
+    config = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_comparator_object)
+    expected_keys = {
+        "challenge_module", "solution_module", "theorem_names", "definition_names",
+        "permitted_axioms", "external_kernels",
+    }
+    if not isinstance(config, dict) or set(config) != expected_keys:
+        raise VerificationError("protected Comparator configuration has the wrong keys")
+    if not re.fullmatch(r"PalomarCanonical[0-9a-f]{24}\.Challenge", str(config["challenge_module"])):
+        raise VerificationError("protected Comparator configuration lost its Challenge alias")
+    module_source_suffix(config["solution_module"])
+    names = [*config["theorem_names"], *config["definition_names"]]
+    if not config["theorem_names"] or not all(isinstance(item, str) and item for item in names):
+        raise VerificationError("protected Comparator configuration names invalid declarations")
+    if not set(config["permitted_axioms"]) <= STANDARD_AXIOMS:
+        raise VerificationError("protected Comparator configuration permits a non-standard axiom")
+    if config["external_kernels"] != {name: list(argv) for name, argv in kernels.items()}:
+        raise VerificationError("protected Comparator configuration names the wrong kernels")
+    for name, argv in config["external_kernels"].items():
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name):
+            raise VerificationError(f"protected Comparator kernel name is invalid: {name}")
+        if not argv or not all(isinstance(item, str) and item for item in argv):
+            raise VerificationError(f"protected Comparator kernel {name} has an invalid command")
+        if not Path(argv[0]).is_absolute():
+            raise VerificationError(f"protected Comparator kernel {name} is not an absolute path")
+    return config
 
 
 def prepare(args: argparse.Namespace) -> int:
@@ -1369,7 +1404,7 @@ def prepare(args: argparse.Namespace) -> int:
 
         toolchain_path: Path | None = None
         toolchain: str | None = None
-        export_commit: str | None = None
+        lean4_commit: str | None = None
         try:
             project_toolchain = project / "lean-toolchain"
             root_toolchain = source / "lean-toolchain"
@@ -1385,7 +1420,7 @@ def prepare(args: argparse.Namespace) -> int:
                     ),
                 )
             toolchain = toolchain_path.read_text(encoding="utf-8").strip()
-            export_commit = toolchain_lean4export_commit(toolchain)
+            lean4_commit = toolchain_commit(toolchain)
         except Exception as error:  # independent preflight group
             add_issue("toolchain", error)
 
@@ -1445,13 +1480,13 @@ def prepare(args: argparse.Namespace) -> int:
             if license_record is not None:
                 report["license"] = license_record
             write_json(output, report)
-            workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+            workflow_output(ready="false", lean_toolchain="")
             return 0
 
         assert formalization is not None and provenance is not None
         assert orcid_validation is not None
         assert license_record is not None
-        assert toolchain_path is not None and toolchain is not None and export_commit is not None
+        assert toolchain_path is not None and toolchain is not None and lean4_commit is not None
         assert config_relative is not None and config_path is not None and config is not None
         correction_evidence = (
             correction_source_evidence(
@@ -1470,7 +1505,7 @@ def prepare(args: argparse.Namespace) -> int:
             {
                 "lean_toolchain": toolchain,
                 "lean_toolchain_path": toolchain_relative,
-                "lean4export_commit": export_commit,
+                "toolchain_commit": lean4_commit,
                 "challenge": {
                     "module": config["challenge_module"],
                     **(correction_evidence["challenge"] if correction_evidence else {}),
@@ -1534,7 +1569,6 @@ def prepare(args: argparse.Namespace) -> int:
         write_json(output, report)
         workflow_output(
             ready="false" if correction is not None else "true",
-            lean4export_commit=export_commit,
             lean_toolchain=toolchain,
         )
     except LicenseValidationError as error:
@@ -1543,20 +1577,20 @@ def prepare(args: argparse.Namespace) -> int:
         report["errors"].append(str(error))
         report_diagnostic(report, error, stage="license")
         write_json(output, report)
-        workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+        workflow_output(ready="false", lean_toolchain="")
     except FormalizationValidationError as error:
         report["status"] = "fail"
         report["stage"] = "formalization"
         report["errors"].extend(str(issue) for issue in error.issues)
         report_diagnostic(report, error, stage="formalization")
         write_json(output, report)
-        workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+        workflow_output(ready="false", lean_toolchain="")
     except Exception as error:  # noqa: BLE001 -- all intake failures become a bounded report
         report["errors"].append(str(error))
         report["status"] = "fail" if isinstance(error, VerificationError) else "error"
         report_diagnostic(report, error)
         write_json(output, report)
-        workflow_output(ready="false", lean4export_commit="", lean_toolchain="")
+        workflow_output(ready="false", lean_toolchain="")
     finally:
         _EXECUTION_DEADLINE = previous_deadline
     return 0
@@ -2625,8 +2659,14 @@ def supervisor_command(
     liveness_path: Path,
     sandbox_status_fd: int | None = None,
     pass_files: dict[int, Path] | None = None,
+    stdout_path: Path | None = None,
 ) -> list[str]:
-    """Wrap one phase in the babysitter, itself started inside a delegated cgroup."""
+    """Wrap one phase in the babysitter, itself started inside a delegated cgroup.
+
+    `stdout_path` is opened by the babysitter, outside the sandbox, and handed
+    to the workload as its standard output: that is how an export of any size
+    lands in a verifier-owned file the sandbox cannot otherwise reach.
+    """
     if not re.fullmatch(r"palomar-[a-f0-9]{24}", unit_name):
         raise VerificationError("invalid verifier-owned phase cgroup name")
     limits = translate_resource_properties(resource_properties)
@@ -2647,6 +2687,8 @@ def supervisor_command(
     ]
     if sandbox_status_fd is not None:
         result.extend(["--sandbox-status-fd", str(sandbox_status_fd)])
+    if stdout_path is not None:
+        result.extend(["--stdout", str(stdout_path)])
     for descriptor, path in sorted((pass_files or {}).items()):
         result.extend(["--pass-file", f"{descriptor}={path}"])
     for key, value in limits.cgroup.items():
@@ -2928,6 +2970,7 @@ def sandboxed_run(
     unrestricted_network: bool = False,
     resource_properties: tuple[str, ...] = (),
     nested_sandbox: bool = False,
+    stdout_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     timeout = _deadline_timeout(timeout, command)
     verify_tool_snapshot(tools)
@@ -2974,7 +3017,7 @@ def sandboxed_run(
     return _cgroup_supervised_run(
         command, confined, cwd=cwd, environment=environment, timeout=timeout, check=check,
         resource_properties=properties, unit_name=unit_name, phase=phase, tools=tools,
-        unrestricted_network=unrestricted_network,
+        unrestricted_network=unrestricted_network, stdout_path=stdout_path,
     )
 
 
@@ -3024,6 +3067,7 @@ def _cgroup_supervised_run(
     phase: str,
     tools: dict[Path, str],
     unrestricted_network: bool = False,
+    stdout_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # The status file, liveness FIFO and seccomp filter live in a verifier-owned
     # directory the payload cannot see: bwrap gives it a private /tmp and binds
@@ -3048,6 +3092,7 @@ def _cgroup_supervised_run(
             liveness_path=liveness_path,
             sandbox_status_fd=SANDBOX_STATUS_FD,
             pass_files={SECCOMP_FD: filter_path},
+            stdout_path=stdout_path,
         )
         # O_RDWR never blocks on a FIFO; holding it keeps a writer present until
         # this process exits, which is precisely what the babysitter watches for.
@@ -4680,11 +4725,17 @@ def resolve_module_source(
     raise VerificationError(f"configured module {module!r} has no source file in Lake's source path")
 
 
-COMPARATOR_FAILURE_MARKERS = ("uncaught exception", "error:", "error]", "failed")
+COMPARATOR_FAILURE_MARKERS = (
+    "uncaught exception", "error:", "error]", "failed", "rejected the solution", "exited with",
+)
+RETRY_SAME_COMMIT = (
+    "Do not change the repository. Retry the same commit later; report the "
+    "workflow URL if the problem recurs."
+)
 
 
 def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
-    """The lines of a Comparator log that say why it stopped.
+    """The lines of a build or judge log that say why it stopped.
 
     A submitter should not have to read a build log of several thousand lines
     to find the one line that matters, so the lines that name a failure are
@@ -4699,53 +4750,508 @@ def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
     return "\n".join(line[:400] for line in chosen)
 
 
-def comparator_failure(
-    returncode: int,
-    log: str,
-    *,
-    canonical_artifacts: tuple[Path, ...],
-) -> VerificationError:
-    """Say what a nonzero Comparator exit means, and whose problem it is.
+def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
+    """Say what a `lake comparator` exit means, and whose problem it is.
 
-    Comparator judges a submission, but it can also fail without judging one.
-    The protected Challenge module is Palomar's own artifact, so a run that
-    could not read it has established nothing about the submission and must not
-    be reported as a rejection of it.
+    Only a run that has judged the submission and found against it, in the
+    comparator's own words, is a rejection. A comparator that could not start
+    (exit 2), whose nested sandbox or kernel failed to run, or that stopped for
+    a reason it does not name has established nothing about the submission.
     """
+    if returncode == 0:
+        return None
     excerpt = comparator_failure_excerpt(log)
-    if "landrun adapter:" in log:
+    if returncode == 2:
         return VerificationError(
-            "Comparator sandbox adapter failed",
+            "lake comparator could not run",
+            code="palomar.comparator_cannot_run",
+            owner="palomar",
+            detail=excerpt,
+            next_action=RETRY_SAME_COMMIT,
+            retryable=True,
+        )
+    if COMPARATOR_INFRASTRUCTURE_RE.search(log):
+        return VerificationError(
+            "lake comparator's nested sandbox or one of its kernels failed to run",
             code="palomar.comparator_sandbox_failed",
             owner="palomar",
             detail=excerpt,
-            next_action=(
-                "Do not change the repository. Retry the same commit later; report the "
-                "workflow URL if the problem recurs."
-            ),
+            next_action=RETRY_SAME_COMMIT,
             retryable=True,
         )
-    if any(str(artifact) in log for artifact in canonical_artifacts):
+    rejecting_kernels = COMPARATOR_KERNEL_REJECTED_RE.findall(log)
+    if returncode == 1 and (
+        COMPARATOR_VERDICT_RE.search(log) or COMPARATOR_LEAN_KERNEL in rejecting_kernels
+    ):
         return VerificationError(
-            "Comparator could not read the Challenge module that Palomar compiled",
-            code="palomar.canonical_challenge_unreadable",
+            "lake comparator rejected the project",
+            code="comparator.rejected",
+            detail=excerpt,
+            next_action=(
+                "Correct the Comparator failure quoted above, commit it, and make "
+                "a new submission."
+            ),
+        )
+    if rejecting_kernels:
+        return VerificationError(
+            "an independent kernel failed or rejected the proof that Lean's kernel accepted: "
+            + ", ".join(sorted(set(rejecting_kernels))),
+            code="palomar.kernel_disagreement",
             owner="palomar",
             detail=excerpt,
             next_action=(
-                "Do not change the repository. This is Palomar's to fix; the same commit "
-                "can be verified again once it is."
+                "Do not change the repository. Palomar must examine this run; report the "
+                "workflow URL."
             ),
             retryable=True,
         )
     return VerificationError(
-        f"Comparator rejected the project (exit {returncode})",
-        code="comparator.rejected",
+        f"lake comparator stopped without a verdict (exit {returncode})",
+        code="palomar.comparator_unclassified",
+        owner="palomar",
+        detail=excerpt,
+        next_action=RETRY_SAME_COMMIT,
+        retryable=True,
+    )
+
+
+def bwrap_source_tag_from_installer() -> str:
+    """The bubblewrap release `scripts/install_bwrap.sh` builds, as its tag."""
+    text = (ROOT / "scripts" / "install_bwrap.sh").read_text(encoding="utf-8")
+    match = re.search(r'^BWRAP_VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$', text, re.MULTILINE)
+    if match is None:
+        raise VerificationError(
+            "scripts/install_bwrap.sh does not pin a bubblewrap release",
+            code="palomar.tool_policy_invalid",
+            owner="palomar",
+            next_action="Do not change the repository; Palomar must repair its tool policy.",
+        )
+    return f"v{match.group(1)}"
+
+
+def toolchain_tools(lean_prefix: Path) -> dict[str, Path]:
+    """The bundled binaries a verification runs, or a refusal naming the missing ones."""
+    tools = {name: lean_prefix / "bin" / name for name in TOOLCHAIN_TOOLS}
+    missing = [
+        name for name, path in tools.items()
+        if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK)
+    ]
+    if missing:
+        raise VerificationError(
+            f"the selected Lean toolchain does not bundle: {', '.join(missing)}",
+            code="palomar.toolchain_incomplete",
+            owner="palomar",
+            next_action=(
+                "Do not change the repository. Palomar must add support for this Lean release."
+            ),
+        )
+    return {name: path.resolve(strict=True) for name, path in tools.items()}
+
+
+def tool_digests(tools: dict[str, Path], bwrap: Path) -> dict[str, str]:
+    """The sha256 of every binary that judged the submission, by name."""
+    return {**{name: sha256(path) for name, path in tools.items()}, "bwrap": sha256(bwrap)}
+
+
+def protected_kernels(tools: dict[str, Path]) -> dict[str, list[str]]:
+    """The external kernels the protected configuration registers, by name."""
+    return {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
+
+
+def primitive_targets(lean_prefix: Path) -> list[str]:
+    """The kernel-builtin constants `lake comparator` exports beside the declarations.
+
+    `compareAt` seeds its walk with them, and an export that lacks one fails a
+    valid proof, so the list is read from the selected toolchain's own copy of
+    `Lake/CLI/Check.lean` rather than duplicated here, where it would drift. A
+    toolchain whose copy does not have the expected shape is refused.
+    """
+    source = lean_prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+    refusal = VerificationError(
+        "the selected Lean toolchain's lake comparator has an unrecognised export target list",
+        code="palomar.toolchain_unrecognised",
+        owner="palomar",
+        next_action="Do not change the repository. Palomar must add support for this Lean release.",
+    )
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as error:
+        raise refusal from error
+    match = re.search(
+        r"^def primitiveTargets[^\n]*\n(?P<body>.*?)^def ", text, re.MULTILINE | re.DOTALL
+    )
+    if match is None:
+        raise refusal
+    # Strip comments (`-- ``Nat.zero,` is a commented-out entry, not an entry),
+    # then accept exactly one literal array of quoted names and nothing else:
+    # a list assembled any other way would be read only in part.
+    body = re.sub(r"/-.*?-/", "", match.group("body"), flags=re.DOTALL)
+    body = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+    literal = re.fullmatch(r"\s*return\s*#\[(?P<items>[^\[\]]*)\]\s*", body)
+    if literal is None:
+        raise refusal
+    names: list[str] = []
+    for item in literal.group("items").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name = re.fullmatch(r"``([A-Za-z_][A-Za-z0-9_'.]*)", item)
+        if name is None:
+            raise refusal
+        names.append(name.group(1))
+    if not names or len(set(names)) != len(names):
+        raise refusal
+    return names
+
+
+def comparator_export_targets(config: dict[str, Any], primitives: list[str]) -> list[str]:
+    """The declarations both exports carry, in the order `compareIt` asks for them."""
+    axioms = list(config["permitted_axioms"])
+    builtin = ["Quot", "Quot.mk", "Quot.lift", "Quot.ind"] if "Quot.sound" in axioms else []
+    return [
+        *builtin,
+        *config["theorem_names"],
+        *axioms,
+        *primitives,
+        *config.get("definition_names", []),
+    ]
+
+
+def export_module(
+    module: str,
+    targets: list[str],
+    *,
+    output: Path,
+    leanexport: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Export one module's declaration closure to a verifier-owned file.
+
+    The exporter writes to its standard output, which the babysitter has opened
+    outside the sandbox: nothing inside can reach the file, its size is not
+    capped by the log capture, and a later phase cannot swap it.
+    """
+    if output.exists() or output.is_symlink():
+        raise VerificationError(f"export path is not fresh: {output}")
+    return sandboxed_run(
+        [str(leanexport), module, "--", *targets],
+        cwd=cwd,
+        environment=environment,
+        writable_directories=[],
+        readable_paths=readable_paths,
+        executable_paths=executable_paths,
+        tools=tools,
+        timeout=timeout,
+        check=False,
+        stdout_path=output,
+    )
+
+
+def export_failure(
+    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool
+) -> VerificationError:
+    """Say what a failed export means.
+
+    The exporter panics on a declaration the module does not define, and the
+    declarations it is asked for are the ones `comparator.json` names, so that
+    is the submitter's configuration to fix, whichever module it was. Any
+    other failure of the Challenge export is Palomar's, because Palomar
+    compiled that module; any other failure of the Solution export is the
+    candidate build's.
+    """
+    excerpt = comparator_failure_excerpt(proc.stderr)
+    if "not found in environment" in proc.stderr:
+        return VerificationError(
+            f"comparator.json names a declaration that {module} does not define",
+            code="comparator.declaration_missing",
+            detail=excerpt,
+            next_action=(
+                "Name in comparator.json only declarations the Challenge and Solution "
+                "modules define, commit the correction, and make a new submission."
+            ),
+        )
+    if palomar_owned:
+        return VerificationError(
+            f"exporting the Challenge that Palomar compiled failed (exit {proc.returncode})",
+            code="palomar.challenge_export_failed",
+            owner="palomar",
+            detail=excerpt,
+            next_action=RETRY_SAME_COMMIT,
+            retryable=True,
+        )
+    return VerificationError(
+        f"exporting the Solution failed (exit {proc.returncode})",
+        code="solution.export_failed",
         detail=excerpt,
         next_action=(
-            "Correct the Lean or Comparator failure quoted above, commit it, and make "
-            "a new submission."
+            "Correct the failure quoted above, commit it, and make a new submission."
         ),
     )
+
+
+def ill_typed_export(source: Path, theorem: str) -> bytes:
+    """A copy of an export in which `theorem`'s proof is its own statement.
+
+    The export is NDJSON: a name table, an expression table and one record per
+    declaration referring into them. Replacing the theorem's `value` by its
+    `type` keeps every record well-formed and makes the proof ill-typed, which
+    is exactly what a kernel, and nothing before it, must refuse.
+    """
+    lines = source.read_bytes().split(b"\n")
+    records = [json.loads(line) for line in lines if line.strip()]
+    name_index = next(
+        (
+            record["in"]
+            for record in records
+            if "in" in record and record.get("str", {}).get("str") == theorem
+        ),
+        None,
+    )
+    if name_index is None:
+        raise VerificationError(f"export does not name {theorem}")
+    for position, record in enumerate(records):
+        declaration = record.get("thm")
+        if isinstance(declaration, dict) and declaration.get("name") == name_index:
+            declaration["value"] = declaration["type"]
+            records[position] = {"thm": declaration}
+            break
+    else:
+        raise VerificationError(f"export carries no theorem record for {theorem}")
+    return b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
+
+
+def verify_export(output: Path) -> None:
+    """Require the file an export phase left behind to be one the exporter wrote."""
+    if output.is_symlink() or not output.is_file():
+        raise VerificationError(f"export produced no file: {output.name}")
+    with output.open("rb") as handle:
+        head = handle.readline(4096)
+    if not head.startswith(b'{"meta":'):
+        raise VerificationError(f"export does not start with the exporter's header: {output.name}")
+
+
+def judge_exports(
+    *,
+    lake: Path,
+    config: Path,
+    challenge_export: Path,
+    solution_export: Path,
+    scratch: Path,
+    bwrap: Path,
+    lean_prefix: Path,
+    environment: dict[str, str],
+    tools: dict[Path, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run `lake comparator` over two exports under the judge-only policy.
+
+    Nothing of the candidate is bound in: the two exports, the protected
+    configuration, the toolchain, the system directories and a fresh scratch
+    directory for the comparator's own temporary files. The comparator nests
+    its own bubblewrap around each kernel, so this is the one phase that keeps
+    user namespaces, and `COMPARATOR_BWRAP` points it at the same bubblewrap
+    build the outer sandbox uses.
+    """
+    project = scratch / "project"
+    home = scratch / "home"
+    temporary = scratch / "tmp"
+    for directory in (project, home, temporary):
+        directory.mkdir(parents=True)
+    system_executables = [
+        path.resolve()
+        for path in (
+            Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"),
+            Path("/run/current-system/sw"), Path("/nix/store"),
+        )
+        if path.exists()
+    ]
+    # The comparator resolves `which`, `git`, `env` and the kernel paths on
+    # PATH. It gets the toolchain and the bound system directories, not the
+    # runner's PATH, so the judge sees the same search path everywhere.
+    search_path = [str(lean_prefix / "bin")]
+    for directory in (*(path / "bin" for path in system_executables), Path("/usr/bin"), Path("/bin")):
+        if directory.is_dir() and str(directory) not in search_path:
+            search_path.append(str(directory))
+    env = {name: value for name, value in environment.items() if name in {"LANG", "LC_ALL"}}
+    env.update(
+        {
+            "PATH": os.pathsep.join(search_path),
+            "HOME": str(home.resolve()),
+            "TMPDIR": str(temporary.resolve()),
+            "LEAN_ABORT_ON_PANIC": "1",
+            "COMPARATOR_BWRAP": str(bwrap),
+        }
+    )
+    return sandboxed_run(
+        [
+            str(lake), "comparator", "--config", str(config),
+            "--challenge-from-export", str(challenge_export),
+            "--solution-from-export", str(solution_export),
+        ],
+        cwd=project,
+        environment=env,
+        writable_directories=[scratch.resolve()],
+        readable_paths=sorted({
+            config.resolve(), challenge_export.resolve(), solution_export.resolve(),
+            *system_readable_paths(),
+        }),
+        executable_paths=sorted({lean_prefix, bwrap, *system_executables}),
+        tools=tools,
+        timeout=timeout,
+        check=False,
+        nested_sandbox=True,
+    )
+
+
+def comparator_preflight(
+    work: Path,
+    *,
+    lean: Path,
+    leanexport: Path,
+    lake: Path,
+    lean_prefix: Path,
+    bwrap: Path,
+    kernels: dict[str, list[str]],
+    primitives: list[str],
+    environment: dict[str, str],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+    timeout: int,
+) -> None:
+    """Prove the judge pipeline on this runner before any candidate code runs.
+
+    Three one-line modules compiled against Init alone are exported and judged
+    exactly as the submission will be: a matching pair must pass, and a pair
+    whose statements differ must be found against in the comparator's own
+    words. A failure here is Palomar's or the runner's (a kernel binary that
+    will not start, a nested sandbox the runner refuses, an export target list
+    the toolchain no longer expects), never the submitter's.
+    """
+    root = work / "comparator-preflight"
+    if root.exists() or root.is_symlink():
+        raise VerificationError(f"comparator preflight path is not fresh: {root}")
+    source = root / "src"
+    library = root / "lib"
+    exports = root / "exports"
+    home = root / "home"
+    temporary = root / "tmp"
+    for directory in (source, library, exports, home, temporary):
+        directory.mkdir(parents=True)
+    modules = {
+        "PalomarPreflightChallenge": "theorem palomar_preflight : True := trivial\n",
+        "PalomarPreflightSolution": "theorem palomar_preflight : True := trivial\n",
+        "PalomarPreflightWrong": "theorem palomar_preflight : True ∧ True := ⟨trivial, trivial⟩\n",
+    }
+    config = {
+        "challenge_module": "PalomarPreflightChallenge",
+        "solution_module": "PalomarPreflightSolution",
+        "theorem_names": ["palomar_preflight"],
+        "definition_names": [],
+        "permitted_axioms": sorted(STANDARD_AXIOMS),
+        "external_kernels": kernels,
+    }
+    config_path = root / "comparator.json"
+    write_json(config_path, config)
+    targets = comparator_export_targets(config, primitives)
+    env = environment.copy()
+    env.update(
+        {
+            "HOME": str(home.resolve()),
+            "TMPDIR": str(temporary.resolve()),
+            "LEAN_PATH": os.pathsep.join([str(library.resolve()), str(lean_prefix / "lib" / "lean")]),
+            "LEAN_ABORT_ON_PANIC": "1",
+        }
+    )
+    readable_paths = sorted({root.resolve(), *system_readable_paths()})
+
+    def failure(message: str, detail: str = "") -> VerificationError:
+        return VerificationError(
+            f"comparator preflight failed: {message}",
+            code="palomar.comparator_preflight_failed",
+            owner="palomar",
+            detail=detail[-1_500:],
+            next_action=RETRY_SAME_COMMIT,
+            retryable=True,
+        )
+
+    try:
+        for module, text in modules.items():
+            (source / f"{module}.lean").write_text(text, encoding="utf-8")
+            sandboxed_run(
+                [str(lean), "-o", str(library / f"{module}.olean"), str(source / f"{module}.lean")],
+                cwd=root,
+                environment=env,
+                writable_directories=[library.resolve(), home.resolve(), temporary.resolve()],
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                tools=tools,
+                timeout=timeout,
+            )
+            proc = export_module(
+                module,
+                targets,
+                output=exports / f"{module}.export",
+                leanexport=leanexport,
+                cwd=root,
+                environment=env,
+                readable_paths=readable_paths,
+                executable_paths=executable_paths,
+                tools=tools,
+                timeout=timeout,
+            )
+            if proc.returncode:
+                raise failure(f"exporting {module} failed (exit {proc.returncode})", proc.stderr)
+            verify_export(exports / f"{module}.export")
+    except VerificationError as error:
+        if error.code == "palomar.comparator_preflight_failed":
+            raise
+        raise failure(str(error), error.detail or "") from error
+
+    # The mismatched pair is refused before any kernel runs. A copy of the
+    # matching Solution export whose proof is replaced by its own statement
+    # is well-formed and ill-typed: only the kernels can refuse it, and Lean's
+    # must, in the words the verdict reader expects.
+    tampered = exports / "PalomarPreflightIllTyped.export"
+    tampered.write_bytes(
+        ill_typed_export(exports / "PalomarPreflightSolution.export", "palomar_preflight")
+    )
+    for solution, expected in (
+        ("PalomarPreflightSolution", 0),
+        ("PalomarPreflightWrong", 1),
+        ("PalomarPreflightIllTyped", 1),
+    ):
+        scratch = root / f"judge-{solution}"
+        proc = judge_exports(
+            lake=lake,
+            config=config_path,
+            challenge_export=exports / "PalomarPreflightChallenge.export",
+            solution_export=exports / f"{solution}.export",
+            scratch=scratch,
+            bwrap=bwrap,
+            lean_prefix=lean_prefix,
+            environment=env,
+            tools=tools,
+            timeout=timeout,
+        )
+        log = (proc.stdout + "\n" + proc.stderr).strip()
+        verdict = comparator_verdict(proc.returncode, log)
+        if expected == 0 and (verdict is not None or "Your solution is okay!" not in log):
+            raise failure("a matching export pair was not accepted", log)
+        if expected == 1 and (verdict is None or verdict.code != "comparator.rejected"):
+            raise failure(f"{solution} was not found against", log)
+        if solution == "PalomarPreflightWrong" and (
+            "Challenge and solution theorem statement do not match" not in log
+        ):
+            raise failure("a mismatched export pair was not found against by comparison", log)
+        if solution == "PalomarPreflightIllTyped" and (
+            COMPARATOR_LEAN_KERNEL not in COMPARATOR_KERNEL_REJECTED_RE.findall(log)
+        ):
+            raise failure("an ill-typed proof was not refused by Lean's kernel", log)
 
 
 def protected_lean_path(
@@ -4972,12 +5478,15 @@ def execute(args: argparse.Namespace) -> int:
     metrics_path = work / "resource-metrics.jsonl"
     report.update(
         {
+            # Schema 2: the record of what judged the submission is the Lean
+            # toolchain's commit, the digests of the binaries it bundles, the
+            # kernels the protected configuration named, and the bubblewrap
+            # release, instead of four separately pinned tool commits.
+            "schema_version": 2,
             "status": "error",
             "stage": "setup",
             "phase": "verification",
-            "comparator_commit": args.comparator_commit,
-            "landrun_commit": args.landrun_commit,
-            "nanoda_commit": args.nanoda_commit,
+            "bwrap_source_tag": args.bwrap_source_tag,
             "workflow_url": args.workflow_url,
         }
     )
@@ -5015,31 +5524,29 @@ def execute(args: argparse.Namespace) -> int:
             os.environ.get("PALOMAR_JOB_STARTED_AT"),
             getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
         )
-        comparator = Path(args.comparator).resolve()
-        lean4export = Path(args.lean4export).resolve()
-        landrun = Path(args.landrun).resolve()
-        nanoda = Path(args.nanoda).resolve()
         bwrap = configure_bwrap(Path(args.bwrap))
-        adapter = (ROOT / "scripts" / "landrun_passthrough.py").resolve()
+        if not BWRAP_SOURCE_TAG_RE.fullmatch(args.bwrap_source_tag):
+            raise VerificationError("bubblewrap source tag must be a release tag")
+        if args.bwrap_source_tag != bwrap_source_tag_from_installer():
+            raise VerificationError(
+                "bubblewrap source tag does not match the release scripts/install_bwrap.sh builds",
+                code="palomar.tool_policy_invalid",
+                owner="palomar",
+            )
         metrics_wrapper = (ROOT / "scripts" / "measure_resources.py").resolve()
         babysitter = (ROOT / "scripts" / "supervise_cgroup.py").resolve()
         delegate = (ROOT / "scripts" / "cgroup_delegate.py").resolve()
         verifier = Path(__file__).resolve()
-        for tool in (comparator, lean4export, landrun, nanoda, bwrap, adapter, metrics_wrapper,
-                     babysitter, delegate, verifier):
+        for tool in (bwrap, metrics_wrapper, babysitter, delegate, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
         env = os.environ.copy()
         env.pop("LAKE_PKG_URL_MAP", None)
         env.update(
             {
-                "COMPARATOR_LANDRUN": str(adapter),
-                "COMPARATOR_LEAN4EXPORT": str(lean4export),
-                "COMPARATOR_NANODA": str(nanoda),
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
-                "PALOMAR_LANDRUN_REAL": str(landrun),
                 "LEAN_ABORT_ON_PANIC": "1",
             }
         )
@@ -5066,6 +5573,14 @@ def execute(args: argparse.Namespace) -> int:
             lake.relative_to(lean_prefix)
         except ValueError as error:
             raise VerificationError("Lake executable is outside the selected Lean toolchain") from error
+        bundled = toolchain_tools(lean_prefix)
+        if bundled["lean"] != lean or bundled["lake"] != lake:
+            raise VerificationError("the Lean and Lake on PATH are not the selected toolchain's")
+        leanexport = bundled["leanexport"]
+        kernels = protected_kernels(bundled)
+        primitives = primitive_targets(lean_prefix)
+        report["tool_digests"] = tool_digests(bundled, bwrap)
+        report["kernels"] = [{"name": name, "argv": argv} for name, argv in kernels.items()]
 
         report["stage"] = "candidate-setup"
         guarded_write()
@@ -5085,11 +5600,6 @@ def execute(args: argparse.Namespace) -> int:
         executable_paths = [
             lean_prefix,
             python_prefix,
-            comparator,
-            lean4export,
-            landrun,
-            nanoda,
-            adapter,
             metrics_wrapper,
             lake,
             lean,
@@ -5127,11 +5637,16 @@ def execute(args: argparse.Namespace) -> int:
             kind="file",
         )
         comparator_config = protected_comparator_config(
-            comparator_path, work / "protected-comparator.json"
+            comparator_path, work / "protected-comparator.json", kernels=kernels
         )
-        protected_config = load_comparator_config(comparator_config)
+        protected_config = validate_protected_comparator_config(comparator_config, kernels=kernels)
         protected_challenge = protected_config["challenge_module"]
         env["PALOMAR_PROTECTED_CHALLENGE_MODULE"] = protected_challenge
+        # The configuration the judge consumes travels with the report, which
+        # the evidence bundle archives: the file's exact text, so the record's
+        # digest is checked against the bytes and not a description of them.
+        report["protected_config_sha256"] = sha256(comparator_config)
+        report["protected_config"] = comparator_config.read_text(encoding="utf-8")
         report["stage"] = "setup"
         guarded_write()
         readable_paths = sorted(
@@ -5141,16 +5656,10 @@ def execute(args: argparse.Namespace) -> int:
             [
                 output,
                 comparator_config,
-                comparator,
-                lean4export,
-                landrun,
-                nanoda,
+                *bundled.values(),
                 bwrap,
-                adapter,
                 metrics_wrapper,
                 verifier,
-                lake,
-                lean,
                 python,
                 printenv,
                 touch,
@@ -5160,19 +5669,13 @@ def execute(args: argparse.Namespace) -> int:
         )
         tools = tool_snapshot(
             [
-                comparator,
-                lean4export,
-                landrun,
-                nanoda,
+                *bundled.values(),
                 comparator_config,
                 bwrap,
-                adapter,
                 metrics_wrapper,
                 babysitter,
                 delegate,
                 verifier,
-                lake,
-                lean,
                 python,
                 printenv,
                 touch,
@@ -5195,6 +5698,22 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
+        )
+        report["stage"] = "comparator-preflight"
+        guarded_write()
+        comparator_preflight(
+            work,
+            lean=lean,
+            leanexport=leanexport,
+            lake=lake,
+            lean_prefix=lean_prefix,
+            bwrap=bwrap,
+            kernels=kernels,
+            primitives=primitives,
+            environment=env,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
         )
         report["stage"] = "module-resolution"
         guarded_write()
@@ -5418,10 +5937,51 @@ def execute(args: argparse.Namespace) -> int:
             env["LEAN_PATH"],
             protected_root=canonical_root,
         )
-        report["stage"] = "comparator"
+        def stop(error: VerificationError, stage: str) -> int:
+            report["status"] = "error" if error.owner != "submitter" else "fail"
+            report["errors"].append(str(error))
+            report_diagnostic(report, error, stage=stage)
+            report["stage"] = stage
+            guarded_write()
+            return 0
+
+        # Both exports go to a verifier-owned directory that no candidate
+        # phase can write to, and are snapshotted so the judge reads exactly
+        # what the exporter wrote. The Challenge export comes from the
+        # canonical module, first on the protected search path, so the
+        # candidate's own Challenge build output never supplies the statement.
+        exports = work / "exports"
+        exports.mkdir()
+        require_protected_paths([exports], candidate_writable)
+        targets = comparator_export_targets(protected_config, primitives)
+        report["stage"] = "challenge-export"
+        guarded_write()
+        challenge_export = exports / "challenge.export"
+        proc = export_module(
+            protected_challenge,
+            targets,
+            output=challenge_export,
+            leanexport=leanexport,
+            cwd=source,
+            environment=env,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        if proc.returncode:
+            return stop(
+                export_failure(proc, module="the Challenge", palomar_owned=True), "challenge-export"
+            )
+        verify_export(challenge_export)
+        tools[challenge_export.resolve()] = sha256(challenge_export)
+
+        # The candidate's Lake build, under the candidate policy. This is
+        # where the submitted code runs.
+        report["stage"] = "solution-build"
         guarded_write()
         proc = sandboxed_run(
-            [str(comparator), str(comparator_config)],
+            [str(lake), "build", report["comparator"]["solution_module"]],
             cwd=source,
             environment=env,
             writable_directories=candidate_writable,
@@ -5432,21 +5992,62 @@ def execute(args: argparse.Namespace) -> int:
             check=False,
         )
         log = (proc.stdout + "\n" + proc.stderr).strip()
-        report["comparator_log_tail"] = log[-20000:]
+        report["build_log_tail"] = log[-20000:]
         if proc.returncode:
-            error = comparator_failure(
-                proc.returncode,
-                log,
-                canonical_artifacts=canonical_challenge_artifacts(
-                    canonical_olean, module_system=True
+            return stop(
+                VerificationError(
+                    f"the Solution build failed (exit {proc.returncode})",
+                    code="solution.build_failed",
+                    detail=comparator_failure_excerpt(log),
+                    next_action=(
+                        "Correct the Lean failure quoted above, commit it, and make a new "
+                        "submission."
+                    ),
                 ),
+                "solution-build",
             )
-            report["status"] = "error" if error.owner == "palomar" else "fail"
-            report["errors"].append(str(error))
-            report_diagnostic(report, error, stage="comparator")
-            report["stage"] = "comparator"
-            guarded_write()
-            return 0
+
+        report["stage"] = "solution-export"
+        guarded_write()
+        solution_export = exports / "solution.export"
+        proc = export_module(
+            report["comparator"]["solution_module"],
+            targets,
+            output=solution_export,
+            leanexport=leanexport,
+            cwd=source,
+            environment=env,
+            readable_paths=readable_paths,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        if proc.returncode:
+            return stop(
+                export_failure(proc, module="the Solution", palomar_owned=False), "solution-export"
+            )
+        verify_export(solution_export)
+        tools[solution_export.resolve()] = sha256(solution_export)
+
+        report["stage"] = "comparator"
+        guarded_write()
+        proc = judge_exports(
+            lake=lake,
+            config=comparator_config,
+            challenge_export=challenge_export,
+            solution_export=solution_export,
+            scratch=work / "judge",
+            bwrap=bwrap,
+            lean_prefix=lean_prefix,
+            environment=env,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+        )
+        log = (proc.stdout + "\n" + proc.stderr).strip()
+        report["comparator_log_tail"] = log[-20000:]
+        verdict = comparator_verdict(proc.returncode, log)
+        if verdict is not None:
+            return stop(verdict, "comparator")
 
         report["status"] = "pass"
         report["stage"] = "complete"
@@ -5530,14 +6131,8 @@ def parser() -> argparse.ArgumentParser:
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
     execute_parser.add_argument("--output", required=True)
-    execute_parser.add_argument("--comparator", required=True)
-    execute_parser.add_argument("--lean4export", required=True)
-    execute_parser.add_argument("--landrun", required=True)
     execute_parser.add_argument("--bwrap", required=True)
-    execute_parser.add_argument("--nanoda", required=True)
-    execute_parser.add_argument("--comparator-commit", required=True)
-    execute_parser.add_argument("--landrun-commit", required=True)
-    execute_parser.add_argument("--nanoda-commit", required=True)
+    execute_parser.add_argument("--bwrap-source-tag", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.add_argument(
         "--execution-budget-seconds",

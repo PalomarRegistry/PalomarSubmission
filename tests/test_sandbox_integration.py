@@ -10,12 +10,19 @@ from pathlib import Path
 from scripts.render_challenge import CORE_NOTATION_AUDIT_SOURCE
 from scripts.render_challenge import executable_paths as renderer_executable_paths
 from scripts.verify_submission import (
+    comparator_export_targets,
+    comparator_preflight,
+    comparator_verdict,
     compile_canonical_challenge,
+    judge_exports,
+    primitive_targets,
+    protected_kernels,
     protected_lean_path,
     remove_untrusted_lake_state,
     sandboxed_run,
     system_readable_paths,
     tool_snapshot,
+    toolchain_tools,
     verify_sandbox_confinement,
 )
 
@@ -314,6 +321,106 @@ supportInterpreter = true
                 tools=tool_snapshot([python]),
             )
             self.assertIn("--input-dir", result.stdout)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),
+        "set PALOMAR_BWRAP and PALOMAR_TEST_LEAN for the real lake comparator",
+    )
+    def test_real_lake_comparator_judges_exports_under_the_nested_policy(self):
+        """The whole judge pipeline, for real: export, preflight, verdicts.
+
+        The preflight is the positive and the negative control in one; on top
+        of it, a Solution that proves the Challenge's statement from a
+        different module is accepted, a corrupt export is not a rejection, and
+        the argv never disables the comparator's own sandbox.
+        """
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            work = Path(directory).resolve()
+            lean = Path(os.environ["PALOMAR_TEST_LEAN"]).resolve(strict=True)
+            lean_prefix = lean.parent.parent
+            bwrap = Path(os.environ["PALOMAR_BWRAP"]).resolve(strict=True)
+            bundled = toolchain_tools(lean_prefix)
+            kernels = protected_kernels(bundled)
+            primitives = primitive_targets(lean_prefix)
+            python = Path(sys.executable).resolve(strict=True)
+            executable_paths = [lean_prefix, python.parent.parent, bwrap]
+            for raw in ("/usr", "/bin", "/lib", "/lib64", "/run/current-system/sw", "/nix/store"):
+                path = Path(raw)
+                if path.exists():
+                    executable_paths.append(path.resolve())
+            executable_paths = sorted(set(executable_paths))
+            environment = {
+                "PATH": f"{lean_prefix / 'bin'}:{os.environ['PATH']}",
+                "LEAN_ABORT_ON_PANIC": "1",
+            }
+            tools = tool_snapshot([*bundled.values(), bwrap])
+            comparator_preflight(
+                work,
+                lean=lean,
+                leanexport=bundled["leanexport"],
+                lake=bundled["lake"],
+                lean_prefix=lean_prefix,
+                bwrap=bwrap,
+                kernels=kernels,
+                primitives=primitives,
+                environment=environment,
+                executable_paths=executable_paths,
+                tools=tools,
+                timeout=600,
+            )
+            preflight = work / "comparator-preflight"
+            self.assertTrue((preflight / "exports" / "PalomarPreflightWrong.export").is_file())
+            for scratch in ("judge-PalomarPreflightSolution", "judge-PalomarPreflightWrong"):
+                self.assertTrue((preflight / scratch / "project").is_dir())
+
+            config = json.loads((preflight / "comparator.json").read_text())
+            exports = preflight / "exports"
+            # A corrupt Solution export: the comparator cannot parse it, which
+            # is not a verdict about the submission.
+            corrupt = work / "corrupt.export"
+            corrupt.write_text('{"meta":{}}\nnot json\n')
+            proc = judge_exports(
+                lake=bundled["lake"],
+                config=preflight / "comparator.json",
+                challenge_export=exports / "PalomarPreflightChallenge.export",
+                solution_export=corrupt,
+                scratch=work / "judge-corrupt",
+                bwrap=bwrap,
+                lean_prefix=lean_prefix,
+                environment=environment,
+                tools=tools,
+                timeout=600,
+            )
+            verdict = comparator_verdict(proc.returncode, proc.stdout + "\n" + proc.stderr)
+            self.assertIsNotNone(verdict)
+            self.assertEqual(verdict.owner, "palomar", proc.stderr)
+            # A missing kernel binary is a run that could not start, not a rejection.
+            broken = work / "broken-kernels.json"
+            broken.write_text(json.dumps({
+                **config,
+                "external_kernels": {"nanoda": [str(work / "absent-nanoda")], **{
+                    name: argv for name, argv in kernels.items() if name != "nanoda"
+                }},
+            }))
+            proc = judge_exports(
+                lake=bundled["lake"],
+                config=broken,
+                challenge_export=exports / "PalomarPreflightChallenge.export",
+                solution_export=exports / "PalomarPreflightSolution.export",
+                scratch=work / "judge-broken",
+                bwrap=bwrap,
+                lean_prefix=lean_prefix,
+                environment=environment,
+                tools=tools,
+                timeout=600,
+            )
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            verdict = comparator_verdict(proc.returncode, proc.stdout + "\n" + proc.stderr)
+            self.assertEqual(verdict.code, "palomar.comparator_cannot_run")
+            # The exports carry exactly the comparator's target list, in its order.
+            targets = comparator_export_targets(config, primitives)
+            self.assertEqual(targets[:5], ["Quot", "Quot.mk", "Quot.lift", "Quot.ind", "palomar_preflight"])
+            self.assertEqual(targets[-1:], [primitives[-1]])
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),

@@ -22,7 +22,7 @@ hostile:
   artifacts.
 
 The attacker may try to change the meaning of the challenge, obtain credentials,
-modify Comparator or another verifier tool, overwrite the mechanical report,
+modify the toolchain or another verifier tool, overwrite the mechanical report,
 write outside the build tree, use the network, inject shell syntax, or consume
 excessive resources. A project need not contain an obviously malicious Lean
 declaration to be dangerous: loading a dependency's Lake configuration can run
@@ -175,16 +175,16 @@ build directories are then frozen read/execute-only. The verifier compiles `Chal
 directly with trusted Lean against only the frozen allowlisted dependencies, outside the
 candidate's Lake plan, records the resulting `Challenge.olean` digest, and
 copies only its exact module artifact set into a fresh protected directory under
-an unpredictable per-run top-level alias. Comparator's
-`LEAN_PATH` resolves that directory, Lean core, and every frozen trusted build
-directory before all candidate build paths. Candidate Lake
+an unpredictable per-run top-level alias. The `LEAN_PATH` under which the
+Challenge is exported resolves that directory, Lean core, and every frozen
+trusted build directory before all candidate build paths. Candidate Lake
 configuration can still build arbitrary proof dependencies in its own fresh
 directories, but it cannot replace the statement module or a trusted dependency
 used to compile it. A nonstandard output layout fails closed.
 
 Every invocation that can load project Lake configuration runs under the same
 outer bubblewrap policy. This includes Mathlib cache retrieval, `lake env` used
-to discover Lean paths, and Comparator itself. The sandbox root is an empty
+to discover Lean paths, the Solution build and both exports. The sandbox root is an empty
 tmpfs: there is no blanket read rule for the runner filesystem, and a path that
 is not bound in does not exist. The policy binds read-only the submitted source
 tree, a small explicit set of certificate/name-service files (and the
@@ -198,9 +198,7 @@ namespace. Its PID, IPC, UTS, cgroup and user namespaces are unshared and
 nested user namespaces are disabled, so a candidate cannot build a second
 sandbox to escape the first. Sandboxed Git ignores system and global
 configuration and cannot prompt for credentials, preventing ambient runner
-configuration from rewriting authenticated remotes. The protected Landrun
-adapter injects the same fixed Git isolation into Comparator's nested challenge
-and solution build domains.
+configuration from rewriting authenticated remotes.
 
 Normal configuration and comparison run with the network namespace unshared,
 so there is no interface to reach rather than a filter to pass. The verified
@@ -211,18 +209,46 @@ temporary package links. The links are deleted immediately afterward, the
 trusted cache output is frozen, and candidate Lake configuration is not loaded
 while network access is available.
 
-Comparator continues to use its own Landrun domains for its separate challenge,
-solution, export, and NanoDa replay operations. The submitted `enable_nanoda`
-field is non-authoritative: the runner writes a protected configuration that
-always enables NanoDa and replaces only the Challenge module name with the
-per-run protected alias before executing candidate code. Comparator's redundant
-`lake build` of that exact alias is skipped by the trusted adapter because the
-verifier has already compiled it outside the candidate Lake plan.
-Those Landlock domains sit inside the outer mount namespace and compose with
-it by intersection: the inner policy cannot widen what the outer sandbox
-exposes, and on a kernel without Landlock the outer bubblewrap policy is the
-boundary on its own. The pinned Landrun binary is built without cgo so its
-pre-Landlock-v8 all-thread enforcement does not enumerate `/proc/$PID/task`.
+The judge is the submitted toolchain's own `lake comparator`, and it never
+builds anything. Palomar builds the Solution under the candidate policy,
+exports the canonical Challenge and the built Solution with the toolchain's
+`leanexport` (each export written by the babysitter to a verifier-owned file
+that no candidate phase can write to, then snapshotted), and runs
+`lake comparator --challenge-from-export --solution-from-export` over the two
+files. That form skips the comparator's own dependency resolution, which would
+otherwise evaluate the candidate's Lake configuration with the network enabled,
+and it means the comparator never checks that the exports match the project:
+Palomar produced both, from the canonical Challenge and the verified checkout,
+and that is where the trust sits. The judge phase runs under a policy of its
+own that binds no candidate tree at all: the two exports, the protected
+configuration, the toolchain, the system directories and a fresh scratch
+directory. It is the one phase that keeps user namespaces, because the
+comparator nests its own bubblewrap around each kernel run, with
+`COMPARATOR_BWRAP` pointing it at the same bubblewrap build as the outer
+sandbox.
+
+The submitted `enable_nanoda` field is non-authoritative and a submitted
+`external_kernels` is rejected: the runner writes a protected configuration
+that registers the toolchain's bundled `nanoda_bin` and `con-ron` as external
+kernels (two of the five checkers `lake comparator --paranoid` would add, at
+exactly the revisions the toolchain bundles, so Palomar makes no kernel
+version choice of its own) and replaces only the Challenge module name with
+the per-run protected alias. The comparator's exit code is read the way it is
+meant: 2 is a run that could not start, and 1 is a rejection only when the
+transcript carries one of the comparator's own comparison or axiom verdicts,
+or Lean's own kernel refused the proof. The comparator says "rejected" for
+every nonzero kernel exit, a crash included, so Lean's kernel is the arbiter:
+an independent kernel failing while Lean's accepts is recorded as a kernel
+disagreement for Palomar to examine, and a `bwrap:` failure of a nested
+sandbox or any other unexplained stop is Palomar's to retry, never the
+submitter's. Every marker is matched at the start of its own line, and
+declaration names may not carry control characters, because the transcript
+quotes names the submitter chose. Before any candidate code runs, the
+verifier exports and judges three one-line modules of its own: a matching
+pair must pass, a mismatched pair must be found against by the comparison,
+and a copy of the matching export whose proof is replaced by its statement
+must be refused by Lean's kernel, so a runner where the nested sandbox or a
+kernel binary does not work fails closed with a Palomar-owned diagnostic.
 
 The outer sandbox is bubblewrap 0.12.0, built from the pinned upstream release
 tarball by `scripts/install_bwrap.sh` in the trusted phase (the distribution
@@ -242,10 +268,8 @@ verification fails closed.
 
 bubblewrap also loads a small seccomp filter (`scripts/seccomp_filter.py`,
 hand-written BPF) into every phase. It refuses `ptrace` and
-`process_vm_readv`/`process_vm_writev`, because the standalone Comparator
-builds candidate code inside the same sandbox as its own process and its
-challenge export, and that separation must not depend on Landlock being
-present on the runner or on the kernel's Yama setting; it refuses `AF_UNIX`
+`process_vm_readv`/`process_vm_writev`, so no process in a phase can read
+another's memory whatever the kernel's Yama setting; it refuses `AF_UNIX`
 sockets, personality changes and the creation of setuid or setgid files, which
 are what the systemd unit's `RestrictAddressFamilies`, `LockPersonality` and
 `RestrictSUIDSGID` used to do; and it kills a process that uses a foreign
@@ -330,11 +354,11 @@ plausibly named definition. A reviewer still has to read the pinned source and
 the definitions it uses; the core-notation rendering closes notation and macro
 spoofing only.
 
-Comparator, `lean4export`, NanoDa, Landrun, bubblewrap, the Landrun adapter,
-the supervisor scripts, Lake, the
-protected Comparator configuration, and the verifier script are outside the
-writable allowlist. Their hashes are captured before any project configuration
-executes and checked before and after sandboxed phases.
+The toolchain's `lake`, `lean`, `leanexport`, `leanchecker`, `nanoda_bin` and
+`con-ron`, bubblewrap, the supervisor scripts, the protected Comparator
+configuration, both exports and the verifier script are outside the writable
+allowlist. Their hashes are captured before any project configuration executes
+and checked before and after sandboxed phases.
 The mechanical report is outside every sandbox-writable directory and is
 written only by the trusted verifier after the sandboxed process exits.
 
@@ -357,20 +381,28 @@ anywhere.
 
 ## Pins and trusted computing base
 
-GitHub Actions, Comparator, Landrun, NanoDa, bubblewrap, elan releases, and
-source-built verifier tools are pinned to immutable revisions or checksums. NanoDa uses the
-`robsimmons/nanoda_lib` fork deployed by Comparator Live at commit
-`68d5ca9db226849b41a6fff59d796ff19d0a8840`. A `lean4export` revision is resolved
-from the submitted toolchain's own release tag rather than from a table, because
-a table is a second place for the answer to be wrong and it kept being the wrong
-one. Pin changes require security review and an end-to-end comparison probe.
+GitHub Actions, bubblewrap, elan releases, and source-built verifier tools are
+pinned to immutable revisions or checksums. Everything that judges a submission
+ships in the submitted Lean toolchain: `lake comparator`, `leanexport`,
+`leanchecker` and the bundled NanoDa and con-ron kernels. The record therefore
+carries the lean4 commit the toolchain's release tag names, resolved from the
+tag rather than from a table (a table is a second place for the answer to be
+wrong, and it kept being the wrong one), together with the sha256 of each of
+those binaries as installed, the kernels the protected configuration
+registered, the configuration's own digest and text, and the bubblewrap
+release. The digests cover the entrypoints; the shared libraries they load
+(`lake comparator` itself lives in `libLake_shared.so`) are pinned by the
+release commit and the read-only toolchain binding rather than digested. The
+floor in `toolchains.json` is the oldest toolchain whose comparator Palomar
+has verified this way. Pin and floor changes require security review and an
+end-to-end comparison probe.
 
 This design still trusts the runner (the privileged Namespace container of the
 default execution profile, or the GitHub-hosted image of the hosted profile), the Linux kernel with
-its namespace, cgroup and Landlock implementations, bubblewrap, Git and its
-protocol parsers, the selected
-Lean toolchain and kernel, Comparator, `lean4export`, Landrun, the Palomar
-verifier/reporter, NanoDa's independent kernel, the governance of the canonical allowlisted repositories,
+its namespace, cgroup and seccomp implementations, bubblewrap, Git and its
+protocol parsers, the selected Lean toolchain with its kernel, `lake
+comparator`, `leanexport`, `leanchecker` and bundled independent kernels, the
+Palomar verifier/reporter, the governance of the canonical allowlisted repositories,
 the pinned Licensee SPDX detector and its locked Ruby dependencies,
 and the contents served by Mathlib's cache service. HTTPS authenticates the
 cache endpoint in transit, but the source-derived cache key is not a digest or
@@ -387,8 +419,8 @@ repository, commit and paths a run is given, it chooses the ref of this
 repository that the run executes, and it decides which submission the resulting
 report is filed against. What it does not do is take part in the verification:
 the job fetches the submitted commit without its help, and the report records
-the inputs the run resolved along with the Comparator, `lean4export`, NanoDa and
-Landrun revisions that ran. PalomarReviewer downloads the pinned artifact itself
+the inputs the run resolved along with the toolchain commit, the digests of the
+binaries that ran and the kernels it registered. PalomarReviewer downloads the pinned artifact itself
 and refuses one whose workflow revision is not in this repository's trusted
 history, so the server's choice of ref is checked rather than trusted.
 

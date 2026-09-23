@@ -1,8 +1,0 @@
-{
-  "challenge_module": "LegacyProofWidgets.Challenge",
-  "solution_module": "LegacyProofWidgets.Solution",
-  "theorem_names": ["LegacyProofWidgetsRenderFixture.dependencyClosure"],
-  "definition_names": [],
-  "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
-  "enable_nanoda": true
-}

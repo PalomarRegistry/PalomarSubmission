@@ -137,18 +137,14 @@ jobs:
           python-version: "3.11.10"
       - name: Install verifier dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.24.0"
       - name: Build pinned bubblewrap
         run: |
           sudo apt-get update -qq >/dev/null
           sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
           echo "PALOMAR_BWRAP=$(pipeline/scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")" >> "$GITHUB_ENV"
 
-      - name: Install pinned Landrun and Lean
+      - name: Install pinned Lean
         run: |
-          CGO_ENABLED=0 go install github.com/zouuup/landrun/cmd/landrun@811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
           curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$RUNNER_TEMP/elan.tar.gz" \
             https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
@@ -157,82 +153,35 @@ jobs:
           mkdir "$RUNNER_TEMP/elan"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
           "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.28.0
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.31.0-rc2
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.32.2
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.33.1
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.34.0-rc1
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.35.0-rc2
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Build pinned Comparator, lean4export, and NanoDa
-        run: |
-          git clone --filter=blob:none https://github.com/leanprover/comparator.git comparator
-          git -C comparator checkout 575674928e239f5bc452aab72d1dd7b0f1326494
-          test "$(tr -d '\r\n' < comparator/lean-toolchain)" = "leanprover/lean4:v4.34.0-rc1"
-          (cd comparator && lake build comparator)
-          git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export
-          LEAN4EXPORT_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import resolve_release_commit, supported_toolchain; print(resolve_release_commit("leanprover/lean4export", supported_toolchain("leanprover/lean4:v4.31.0-rc2")))')"
-          git -C lean4export checkout "$LEAN4EXPORT_COMMIT"
-          test "$(tr -d '\r\n' < lean4export/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
-          (cd lean4export && lake build lean4export)
-          git clone --filter=blob:none https://github.com/leanprover/lean4export.git lean4export-patch-fallback
-          git -C lean4export-patch-fallback checkout 15f6055e299ad5b89345e533cc2192f4cc00f659
-          test "$(tr -d '\r\n' < lean4export-patch-fallback/lean-toolchain)" = "leanprover/lean4:v4.33.0"
-          python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.verify_submission import compatible_lean4export_toolchain; raise SystemExit(not compatible_lean4export_toolchain("leanprover/lean4:v4.33.1", "leanprover/lean4:v4.33.0"))'
-          (cd lean4export-patch-fallback && ELAN_TOOLCHAIN=leanprover/lean4:v4.33.1 \
-            lake build lean4export)
-          git clone --filter=blob:none https://github.com/leanprover/verso.git verso-patch-fallback
-          VERSO_COMMIT="$(python -c 'import sys; sys.path.insert(0, "pipeline"); from scripts.render_challenge import toolchain_verso_commit; print(toolchain_verso_commit("leanprover/lean4:v4.32.2"))')"
-          git -C verso-patch-fallback checkout "$VERSO_COMMIT"
-          test "$(tr -d '\r\n' < verso-patch-fallback/lean-toolchain)" = "leanprover/lean4:v4.32.0"
-          (cd verso-patch-fallback && ELAN_TOOLCHAIN=leanprover/lean4:v4.32.2 \
-            lake build Verso VersoLiterate «verso-html»)
-          git clone --filter=blob:none https://github.com/robsimmons/nanoda_lib.git nanoda
-          git -C nanoda checkout 68d5ca9db226849b41a6fff59d796ff19d0a8840
-          cargo build --release --locked --manifest-path nanoda/Cargo.toml
       - name: Prepare the checked multi-dependency fixture
         run: |
-          cp -R pipeline/tests/fixtures/cold-tauceti fixture
+          cp -R pipeline/tests/fixtures/cold-cslib fixture
           git -C fixture init --quiet
           git -C fixture add --all
           git -C fixture \
             -c user.name='Palomar compatibility' \
             -c user.email='compatibility@palomar.invalid' \
             commit --quiet -m 'Materialize checked cold fixture'
-          test "$(tr -d '\r\n' < fixture/lean-toolchain)" = "leanprover/lean4:v4.31.0-rc2"
+          test "$(tr -d '\r\n' < fixture/lean-toolchain)" = "leanprover/lean4:v4.35.0-rc2"
       - name: Exercise cold trusted and candidate builds
         env:
-          ELAN_TOOLCHAIN: leanprover/lean4:v4.31.0-rc2
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.35.0-rc2
           PALOMAR_EXECUTION_BUDGET_SECONDS: ${{ needs.profile.outputs.budget }}
         run: |
           python pipeline/scripts/smoke_trusted_challenge.py \
             --source fixture \
-            --landrun "$(go env GOPATH)/bin/landrun" \
             --bwrap "$PALOMAR_BWRAP" \
-            --comparator "$PWD/comparator/.lake/build/bin/comparator" \
-            --lean4export "$PWD/lean4export/.lake/build/bin/lean4export" \
-            --nanoda "$PWD/nanoda/target/release/nanoda_bin" \
-            --adapter "$PWD/pipeline/scripts/landrun_passthrough.py" \
             --work-dir "$RUNNER_TEMP/palomar-compatibility"
       - name: Exercise the real configured-module renderer
         run: |
           python pipeline/scripts/smoke_render_module_identity.py \
-            --source pipeline/tests/fixtures/cold-tauceti \
-            --landrun "$(go env GOPATH)/bin/landrun" \
+            --source pipeline/tests/fixtures/cold-cslib \
             --bwrap "$PALOMAR_BWRAP" \
             --work-dir "$RUNNER_TEMP/palomar-render-module" \
             --renderer-commit "${{ github.sha }}" \
-            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
-            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      - name: Exercise the legacy ProofWidgets renderer
-        run: |
-          python pipeline/scripts/smoke_render_module_identity.py \
-            --source pipeline/tests/fixtures/legacy-proofwidgets-render \
-            --landrun "$(go env GOPATH)/bin/landrun" \
-            --bwrap "$PALOMAR_BWRAP" \
-            --work-dir "$RUNNER_TEMP/palomar-render-legacy-proofwidgets" \
-            --renderer-commit "${{ github.sha }}" \
-            --landrun-commit 811cfff51ceaf3d9843708aa6d22e9b84ccac8b4 \
+            --bwrap-source-tag v0.12.0 \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
   compatibility:

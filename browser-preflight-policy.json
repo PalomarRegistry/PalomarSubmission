@@ -8,7 +8,7 @@
   },
   "toolchain": {
     "pattern": "^leanprover/lean4:v([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-rc([0-9]+))?$",
-    "minimum": "v4.28.0",
+    "minimum": "v4.35.0-rc2",
     "normalization": "strip",
     "prerelease_ordering": "rc-before-release"
   },
