@@ -539,11 +539,13 @@ technical details can safely become public.
 ## Approved execution profiles and recovery
 
 The `profile` job maps an approved identifier to trusted runner labels. Inputs
-cannot supply runner labels or resource limits. `palomar-standard-v1` remains the
-default. `palomar-namespace-16x32-v1` remains disabled until the existing
-confinement and supervision tests pass on the actual Namespace runner. The
-`qualify-namespace.yml` workflow is a trusted synthetic probe and never accepts
-candidate source or enables production itself.
+cannot supply runner labels or resource limits. The catalogue's default,
+`palomar-namespace-16x32-v1`, is where verification and rendering run;
+`palomar-standard-v1` is the hosted profile an operator may still select.
+`ci.yml` proves the real bubblewrap, cgroup and `lake comparator` boundary on
+both runner types on every change, the Namespace leg with the root cgroup
+bootstrap that runner needs; that job is a trusted synthetic probe and never
+accepts candidate source.
 
 Memory ceilings use the minimum of host RAM and visible ancestor cgroup limits;
 CPU evidence uses affinity and ancestor quotas. Workload limits are absolute
