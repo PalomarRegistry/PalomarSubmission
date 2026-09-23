@@ -101,11 +101,14 @@ jobs:
           PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.35.0-rc2 "$HOME/.elan/bin/elan" which lean)" \
             python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
       - name: Refuse the comparator's sandbox-disabling flag anywhere in the pipeline
-        # `lake comparator --inadvisably-no-sandbox` is guarded upstream by a
-        # warning alone. It must never appear in the code or the workflows; the
-        # tests name it only to assert that it is absent from the judge's argv.
+        # `lake comparator` has a flag that switches its sandbox off, guarded
+        # upstream by a warning alone. It must never appear in the code or the
+        # workflows; the tests name it only to assert that it is absent from
+        # the judge's argv. The pattern is assembled so this step does not
+        # match itself.
         run: |
-          if grep -rn -- "--inadvisably-no-sandbox" scripts .github; then
+          flag="--inadvisably-no-""sandbox"
+          if grep -rn -e "$flag" scripts .github; then
             echo "::error::the comparator's sandbox-disabling flag must not appear in the pipeline"
             exit 1
           fi
