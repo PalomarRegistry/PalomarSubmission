@@ -1099,7 +1099,13 @@ def load_formalization_metadata(
             message = str(error)
             match = re.search(r"formalization\.yaml field ([^ ]+)", message)
             detected = match.group(1).rstrip(";:,.") if match else error.field
-            canonical = field or detected
+            # Provenance validation checks sources and related formalizations
+            # together. Only source errors can use the guided sources repair.
+            canonical = (
+                detected
+                if detected and detected.startswith("related_formalizations")
+                else field or detected
+            )
             if canonical and canonical.startswith("sources"):
                 canonical = "sources"
             elif canonical and canonical.startswith("automation.methods"):

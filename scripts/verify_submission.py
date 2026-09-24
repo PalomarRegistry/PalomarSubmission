@@ -1036,6 +1036,38 @@ def valid_export_target_name(name: object) -> bool:
     """
     if not isinstance(name, str) or not name:
         return False
+
+    def letterlike(character: str) -> bool:
+        # Lean Init/Meta/Defs.lean isLetterLike, shared by the supported floor
+        # toolchain and v4.35.0-rc2. Python's Unicode isalpha is much broader.
+        codepoint = ord(character)
+        return (
+            (0x3B1 <= codepoint <= 0x3C9 and codepoint != 0x3BB)
+            or (0x391 <= codepoint <= 0x3A9 and codepoint not in {0x3A0, 0x3A3})
+            or 0x3CA <= codepoint <= 0x3FB
+            or 0x1F00 <= codepoint <= 0x1FFE
+            or 0x2100 <= codepoint <= 0x214F
+            or 0x1D49C <= codepoint <= 0x1D59F
+            or (0xC0 <= codepoint <= 0xFF and codepoint not in {0xD7, 0xF7})
+            or 0x100 <= codepoint <= 0x17F
+        )
+
+    def ascii_letter(character: str) -> bool:
+        return "a" <= character <= "z" or "A" <= character <= "Z"
+
+    def identifier_rest(character: str) -> bool:
+        codepoint = ord(character)
+        return (
+            ascii_letter(character)
+            or "0" <= character <= "9"
+            or character in "_'!?"
+            or letterlike(character)
+            or 0x2080 <= codepoint <= 0x2089
+            or 0x2090 <= codepoint <= 0x209C
+            or 0x1D62 <= codepoint <= 0x1D6A
+            or codepoint == 0x2C7C
+        )
+
     for component in name.split("."):
         if not component:
             return False
@@ -1043,9 +1075,9 @@ def valid_export_target_name(name: object) -> bool:
             if len(component) > 1 and component.startswith("0"):
                 return False
             continue
-        if not (component[0].isalpha() or component[0] == "_"):
+        if not (ascii_letter(component[0]) or component[0] == "_" or letterlike(component[0])):
             return False
-        if not all(character.isalnum() or character in "_'!?" for character in component[1:]):
+        if not all(identifier_rest(character) for character in component[1:]):
             return False
     return True
 
@@ -1370,7 +1402,11 @@ def prepare(args: argparse.Namespace) -> int:
                     "substantive formalization source",
                 )
         except Exception as error:  # independent preflight group
-            if isinstance(error, FormalizationValidationError) and error.repair_draft is not None:
+            if (
+                isinstance(error, FormalizationValidationError)
+                and any(issue.repairable for issue in error.issues)
+                and error.repair_draft is not None
+            ):
                 report["formalization_repair_draft"] = error.repair_draft
             add_issue("formalization", error)
 

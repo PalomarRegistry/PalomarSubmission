@@ -4892,7 +4892,8 @@ class LakeComparatorTests(unittest.TestCase):
     def test_export_target_names_reject_undecodable_names_and_options(self):
         for name in (
             "Foo.my thm", "Foo.bar-baz", "Foo.", ".Foo", "--ignore-missing",
-            "--export-unsafe", "Foo.«bar»", "Foo.01",
+            "--export-unsafe", "Foo.«bar»", "Foo.01", "Foo.λ", "Foo.Ж",
+            "Foo.漢字", "Foo.ƒ", "Foo.x²", "Foo.Ⅻ", "Foo.٣",
         ):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "comparator.json"
@@ -5021,6 +5022,36 @@ class MetadataShapeTests(unittest.TestCase):
             path = Path(directory) / "formalization.yaml"
             path.write_text(text, encoding="utf-8")
             return load_formalization_metadata(path)
+
+    def test_related_formalization_error_is_not_a_sources_repair(self):
+        with self.assertRaises(FormalizationValidationError) as caught:
+            self.load(
+                "project:\n"
+                "  name: Example\n"
+                "  description: An example.\n"
+                "  authors: [Ada Lovelace]\n"
+                "  license: MIT\n"
+                "  responsible_maintainers: [Ada Lovelace]\n"
+                "classification:\n"
+                "  arxiv: [math.LO]\n"
+                "  msc2020: [03B35]\n"
+                "sources:\n"
+                "  - title: Source theorem\n"
+                "    relationship: formalizes\n"
+                "related_formalizations:\n"
+                "  - id: https://example.com/proof\n"
+                "    relationship: ''\n"
+                "automation:\n"
+                "  methods: [{method: manual}]\n"
+                "review:\n"
+                "  status: self-assessed\n"
+            )
+        matching = [issue for issue in caught.exception.issues
+                    if "related_formalizations[0].relationship" in str(issue)]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].field, "related_formalizations[0].relationship")
+        self.assertFalse(matching[0].repairable)
+        self.assertNotIn("guided metadata form", matching[0].next_action)
 
     def test_every_missing_section_is_named_together(self):
         # An old shape must produce the whole guided form in one preflight,
