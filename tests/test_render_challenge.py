@@ -1852,12 +1852,21 @@ end Audit.Task
             challenge_module="Audit.Task",
             challenge_source_root=PurePosixPath("src"),
         )
-        self.assertIn('name = "my-package"', lakefile)
+        self.assertIn(f'name = "{escaped}"', lakefile)
 
         merged = merge_renderer_manifest(source, {"packages": []}, "3" * 40)
         names = [package["name"] for package in merged["packages"]]
         # Lake rejects the unescaped spelling, so the merged manifest keeps it.
         self.assertIn(escaped, names)
+
+        literal_dotted = {**source["packages"][0], "name": "\u00aba.b\u00bb"}
+        dotted_lakefile = trusted_lakefile(
+            {"packages": [literal_dotted]},
+            "3" * 40,
+            challenge_module="Audit.Task",
+            challenge_source_root=PurePosixPath("src"),
+        )
+        self.assertIn('name = "\u00aba.b\u00bb"', dotted_lakefile)
 
     def test_static_html_gets_csp_and_runtime_sanitizer(self):
         html = """<!doctype html><html><head><base href="../">

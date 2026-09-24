@@ -3131,6 +3131,7 @@ review:
             packages = verifier.manifest_packages(source)
 
         self.assertEqual([package["name"] for package in packages], ["my-package"])
+        self.assertEqual([package["manifest_name"] for package in packages], ["\u00abmy-package\u00bb"])
 
     def test_escaped_unsafe_package_names_fail_before_materialization(self):
         for name in ("\u00ab..\u00bb", "\u00aba/b\u00bb", "\u00abx\u00bby"):
@@ -4250,6 +4251,8 @@ review:
             {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4"},
             {"name": "plausible", "url": "https://github.com/leanprover-community/plausible"},
         ]
+        for package in [*packages, *authoritative]:
+            package["manifest_name"] = package["name"]
         self.assertEqual(
             json.loads(trusted_package_url_map(packages, authoritative)),
             {
@@ -4273,6 +4276,22 @@ review:
             trusted_package_url_map(packages, authoritative[:1])
         with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
             trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])
+
+    def test_trusted_package_url_map_preserves_lake_name_identity(self):
+        escaped = "\u00abmy-package\u00bb"
+        package = {
+            "name": "my-package",
+            "manifest_name": escaped,
+            "url": "https://github.com/example/my-package",
+            "revision": "1" * 40,
+        }
+        self.assertEqual(
+            json.loads(trusted_package_url_map([package], [package])),
+            {escaped: "https://github.com/example/my-package"},
+        )
+        different_name = {**package, "manifest_name": "my-package"}
+        with self.assertRaisesRegex(VerificationError, "different Lake name"):
+            trusted_package_url_map([different_name], [package])
 
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")

@@ -972,7 +972,7 @@ def trusted_lakefile(
     direct = [
         package
         for package in packages
-        if not bool(package.get("inherited")) and package.get("name") != "verso"
+        if not bool(package.get("inherited")) and lake_package_name(package.get("name")) != "verso"
     ]
     lines = ['name = "PalomarChallengeRender"', 'defaultTargets = ["Challenge"]', ""]
     seen: set[str] = set()
@@ -990,7 +990,7 @@ def trusted_lakefile(
                 f"invalid or duplicate direct Lake package: {package.get('name')!r}"
             )
         seen.add(name)
-        lines.extend(["[[require]]", f"name = {toml_string(name)}"])
+        lines.extend(["[[require]]", f"name = {toml_string(package['name'])}"])
         if package.get("type") == "git":
             repository = github_repository(str(package.get("url") or ""))
             revision = str(package.get("rev") or "")
