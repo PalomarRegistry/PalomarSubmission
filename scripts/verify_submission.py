@@ -1028,6 +1028,28 @@ def unique_comparator_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def valid_export_target_name(name: object) -> bool:
+    """Accept the canonical name literals that leanexport can decode as targets.
+
+    Escaped components and punctuation are rejected here so a target cannot be
+    interpreted as an exporter option or panic during argument decoding.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    for component in name.split("."):
+        if not component:
+            return False
+        if component.isascii() and component.isdecimal():
+            if len(component) > 1 and component.startswith("0"):
+                return False
+            continue
+        if not (component[0].isalpha() or component[0] == "_"):
+            return False
+        if not all(character.isalnum() or character in "_'!?" for character in component[1:]):
+            return False
+    return True
+
+
 def load_comparator_config(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise VerificationError("Comparator configuration is not a regular file")
@@ -1070,10 +1092,17 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     definition_names = config.get("definition_names", [])
     if not isinstance(theorem_names, list) or not theorem_names:
         raise VerificationError("comparator theorem_names must be a nonempty array")
-    if not all(isinstance(item, str) and item for item in theorem_names + definition_names):
+    if not isinstance(definition_names, list) or not all(
+        isinstance(item, str) and item for item in theorem_names + definition_names
+    ):
         raise VerificationError("comparator declaration names must be nonempty strings")
     if any(re.search(r"[\x00-\x1f\x7f]", item) for item in theorem_names + definition_names):
         raise VerificationError("comparator declaration names must not contain control characters")
+    if not all(valid_export_target_name(item) for item in theorem_names + definition_names):
+        raise VerificationError(
+            "comparator declaration names must use canonical Lean identifier components",
+            code="comparator.invalid_declaration_name",
+        )
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError(
@@ -1140,7 +1169,7 @@ def validate_protected_comparator_config(path: Path, *, kernels: dict[str, list[
         raise VerificationError("protected Comparator configuration lost its Challenge alias")
     module_source_suffix(config["solution_module"])
     names = [*config["theorem_names"], *config["definition_names"]]
-    if not config["theorem_names"] or not all(isinstance(item, str) and item for item in names):
+    if not config["theorem_names"] or not all(valid_export_target_name(item) for item in names):
         raise VerificationError("protected Comparator configuration names invalid declarations")
     if not set(config["permitted_axioms"]) <= STANDARD_AXIOMS:
         raise VerificationError("protected Comparator configuration permits a non-standard axiom")

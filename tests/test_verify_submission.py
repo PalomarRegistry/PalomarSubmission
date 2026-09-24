@@ -4889,6 +4889,26 @@ class LakeComparatorTests(unittest.TestCase):
             with self.assertRaisesRegex(VerificationError, "control characters"):
                 verifier.load_comparator_config(path)
 
+    def test_export_target_names_reject_undecodable_names_and_options(self):
+        for name in (
+            "Foo.my thm", "Foo.bar-baz", "Foo.", ".Foo", "--ignore-missing",
+            "--export-unsafe", "Foo.«bar»", "Foo.01",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "comparator.json"
+                path.write_text(json.dumps({
+                    "challenge_module": "Challenge",
+                    "solution_module": "Solution",
+                    "theorem_names": [name],
+                    "permitted_axioms": ["propext"],
+                }))
+                with self.assertRaises(VerificationError) as raised:
+                    verifier.load_comparator_config(path)
+                self.assertEqual(raised.exception.code, "comparator.invalid_declaration_name")
+        for name in ("Foo.iUnion₂", "Real.sqrt_α", "List.get!", "Foo.12"):
+            with self.subTest(name=name):
+                self.assertTrue(verifier.valid_export_target_name(name))
+
     def test_an_export_must_start_with_the_exporters_header(self):
         with tempfile.TemporaryDirectory() as directory:
             export = Path(directory) / "solution.export"
