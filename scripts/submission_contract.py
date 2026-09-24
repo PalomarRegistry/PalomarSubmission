@@ -107,7 +107,9 @@ GITHUB_RE = re.compile(
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LAKE_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 LAKE_ESCAPED_NAME_RE = re.compile(r"^\u00ab([^\u00ab\u00bb]*)\u00bb$")
-LEAN_PLAIN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*(?:\.(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+))*$")
+LEAN_PLAIN_NAME_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+)(?:\.(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+))*$"
+)
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 GITHUB_LOGIN_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
@@ -155,7 +157,9 @@ def lake_package_name(raw: object) -> str | None:
         return None
     escaped = LAKE_ESCAPED_NAME_RE.fullmatch(raw)
     name = escaped.group(1) if escaped else raw
-    return name if LAKE_PACKAGE_NAME_RE.fullmatch(name) else None
+    # Checkout paths must remain ordinary child directories. This deliberately
+    # excludes leading-dot names and mixed escaped name components.
+    return name if name and not name.startswith(".") and LAKE_PACKAGE_NAME_RE.fullmatch(name) else None
 
 
 def lake_manifest_name(name: str) -> str:

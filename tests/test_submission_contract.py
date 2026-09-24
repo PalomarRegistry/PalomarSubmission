@@ -11,6 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SubmissionContractBoundaryTests(unittest.TestCase):
+    def test_lake_package_names_keep_paths_safe_and_numeric_names_stable(self):
+        self.assertIsNone(submission_contract.lake_package_name("\u00ab..\u00bb"))
+        self.assertIsNone(submission_contract.lake_package_name("\u00ab.git\u00bb"))
+        self.assertIsNone(submission_contract.lake_package_name("\u00ab.lake\u00bb"))
+        self.assertEqual(submission_contract.lake_manifest_name("1.2"), "1.2")
+        self.assertEqual(submission_contract.lake_manifest_name("my-package"), "\u00abmy-package\u00bb")
+
     def test_orchestrator_has_no_contract_compatibility_entry_points(self):
         self.assertTrue(set(submission_contract.__all__).isdisjoint(vars(verifier)))
 

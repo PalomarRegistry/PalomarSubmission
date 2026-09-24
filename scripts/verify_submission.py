@@ -2206,7 +2206,7 @@ def trusted_package_url_map(
                 f"trusted package {name!r} revision does not match its verified manifest"
             )
         if actual["manifest_name"] != expected["manifest_name"]:
-            raise VerificationError(f"trusted package {name!r} has a different Lake name")
+            raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
         urls[expected["manifest_name"]] = expected_url
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
@@ -3618,10 +3618,12 @@ def materialize_packages(
     boundary = checkout.resolve()
     packages = manifest_packages(source)
     # An escaped and a bare spelling of one name would share a checkout directory.
-    names = [package["name"] for package in packages]
-    for name in names:
-        if names.count(name) > 1:
+    seen_names: set[str] = set()
+    for package in packages:
+        name = package["name"]
+        if name in seen_names:
             raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
+        seen_names.add(name)
     path_directories: dict[str, Path] = {}
     for package in packages:
         if not package["url"].startswith("path:"):

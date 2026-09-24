@@ -3134,7 +3134,9 @@ review:
         self.assertEqual([package["manifest_name"] for package in packages], ["\u00abmy-package\u00bb"])
 
     def test_escaped_unsafe_package_names_fail_before_materialization(self):
-        for name in ("\u00ab..\u00bb", "\u00aba/b\u00bb", "\u00abx\u00bby"):
+        for name in (
+            "\u00ab..\u00bb", "\u00ab.git\u00bb", "\u00ab.lake\u00bb", "\u00aba/b\u00bb", "\u00abx\u00bby"
+        ):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 source = Path(directory)
                 (source / "lake-manifest.json").write_text(
@@ -3244,7 +3246,7 @@ review:
                     verifier.reset_trusted_lake_state(
                         source,
                         {name},
-                        packages=verifier.manifest_packages(source),
+                        packages=[{"name": name, "url": "https://github.com/example/package"}],
                         checkout=source,
                     )
 
@@ -4290,7 +4292,7 @@ review:
             {escaped: "https://github.com/example/my-package"},
         )
         different_name = {**package, "manifest_name": "my-package"}
-        with self.assertRaisesRegex(VerificationError, "different Lake name"):
+        with self.assertRaisesRegex(VerificationError, "different manifest spelling"):
             trusted_package_url_map([different_name], [package])
 
     def test_lake_environment_uses_final_absolute_path_line(self):
