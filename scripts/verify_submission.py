@@ -4953,21 +4953,25 @@ def export_module(
 
 
 def export_failure(
-    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool
+    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool,
+    configured_targets: set[str],
 ) -> VerificationError:
     """Say what a failed export means.
 
-    The exporter panics on a declaration the module does not define, and the
-    declarations it is asked for are the ones `comparator.json` names, so that
-    is the submitter's configuration to fix, whichever module it was. Any
-    other failure of the Challenge export is Palomar's, because Palomar
-    compiled that module; any other failure of the Solution export is the
-    candidate build's.
+    A missing declaration belongs to the submitter only when the exporter
+    names one of the declarations in comparator.json. Exporting a dependency
+    closure can also panic on an unrelated missing constant; a generic panic
+    must not be described as a missing configured declaration.
     """
     excerpt = comparator_failure_excerpt(proc.stderr)
-    if "not found in environment" in proc.stderr:
+    missing = set(re.findall(
+        r"\bConstant ([A-Za-z_][A-Za-z0-9_.']*) not found in environment\b",
+        proc.stderr,
+    ))
+    if missing and missing <= configured_targets:
+        missing_name = min(missing)
         return VerificationError(
-            f"comparator.json names a declaration that {module} does not define",
+            f"comparator.json names {missing_name}, which {module} does not define",
             code="comparator.declaration_missing",
             detail=excerpt,
             next_action=(
@@ -5971,7 +5975,12 @@ def execute(args: argparse.Namespace) -> int:
         )
         if proc.returncode:
             return stop(
-                export_failure(proc, module="the Challenge", palomar_owned=True), "challenge-export"
+                export_failure(
+                    proc, module="the Challenge", palomar_owned=True,
+                    configured_targets=set(comparator_config["theorem_names"])
+                    | set(comparator_config.get("definition_names", [])),
+                ),
+                "challenge-export",
             )
         verify_export(challenge_export)
         tools[challenge_export.resolve()] = sha256(challenge_export)
@@ -6024,7 +6033,12 @@ def execute(args: argparse.Namespace) -> int:
         )
         if proc.returncode:
             return stop(
-                export_failure(proc, module="the Solution", palomar_owned=False), "solution-export"
+                export_failure(
+                    proc, module="the Solution", palomar_owned=False,
+                    configured_targets=set(comparator_config["theorem_names"])
+                    | set(comparator_config.get("definition_names", [])),
+                ),
+                "solution-export",
             )
         verify_export(solution_export)
         tools[solution_export.resolve()] = sha256(solution_export)

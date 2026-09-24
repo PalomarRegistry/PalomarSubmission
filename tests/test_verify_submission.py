@@ -4728,17 +4728,32 @@ class LakeComparatorTests(unittest.TestCase):
         )
         for module, palomar_owned in (("the Challenge", True), ("the Solution", False)):
             with self.subTest(module=module):
-                error = verifier.export_failure(panic, module=module, palomar_owned=palomar_owned)
+                error = verifier.export_failure(
+                    panic, module=module, palomar_owned=palomar_owned,
+                    configured_targets={"Foo.mian"},
+                )
                 self.assertEqual(error.code, "comparator.declaration_missing")
                 self.assertEqual(error.owner, "submitter")
                 self.assertIn("Foo.mian", error.detail)
         crash = subprocess.CompletedProcess(["leanexport"], 139, "", "Segmentation fault\n")
-        error = verifier.export_failure(crash, module="the Challenge", palomar_owned=True)
+        error = verifier.export_failure(
+            crash, module="the Challenge", palomar_owned=True, configured_targets={"Foo.mian"}
+        )
         self.assertEqual(error.code, "palomar.challenge_export_failed")
         self.assertTrue(error.retryable)
-        error = verifier.export_failure(crash, module="the Solution", palomar_owned=False)
+        error = verifier.export_failure(
+            crash, module="the Solution", palomar_owned=False, configured_targets={"Foo.mian"}
+        )
         self.assertEqual(error.code, "solution.export_failed")
         self.assertEqual(error.owner, "submitter")
+
+        unrelated = verifier.export_failure(
+            panic, module="the Challenge", palomar_owned=True,
+            configured_targets={"Foo.actual"},
+        )
+        self.assertEqual(unrelated.code, "palomar.challenge_export_failed")
+        self.assertEqual(unrelated.owner, "palomar")
+        self.assertTrue(unrelated.retryable)
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LEAN"), "set PALOMAR_TEST_LEAN to read a real toolchain"
