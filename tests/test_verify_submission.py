@@ -4755,6 +4755,27 @@ class LakeComparatorTests(unittest.TestCase):
         self.assertEqual(unrelated.owner, "palomar")
         self.assertTrue(unrelated.retryable)
 
+        unicode_panic = subprocess.CompletedProcess(
+            ["leanexport"], 134, "",
+            "PANIC at LeanExport.dumpConstant\n"
+            "Constant Foo.iUnion₂ not found in environment.\n"
+            + "\n".join(f"backtrace frame {index}" for index in range(15)),
+        )
+        unicode_error = verifier.export_failure(
+            unicode_panic, module="the Challenge", palomar_owned=True,
+            configured_targets={"Foo.iUnion₂"},
+        )
+        self.assertEqual(unicode_error.code, "comparator.declaration_missing")
+        self.assertIn("Foo.iUnion₂", unicode_error.detail)
+        self.assertIn("PANIC at", unicode_error.detail)
+
+        report = {}
+        verifier.report_diagnostic(
+            report, unicode_error, stage="challenge-export", owner=unicode_error.owner,
+        )
+        self.assertEqual(report["diagnostics"][0]["owner"], "submitter")
+        self.assertFalse(report["diagnostics"][0]["retryable"])
+
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LEAN"), "set PALOMAR_TEST_LEAN to read a real toolchain"
     )

@@ -4726,7 +4726,8 @@ def resolve_module_source(
 
 
 COMPARATOR_FAILURE_MARKERS = (
-    "uncaught exception", "error:", "error]", "failed", "rejected the solution", "exited with",
+    "uncaught exception", "panic at", "not found in environment", "error:", "error]", "failed",
+    "rejected the solution", "exited with",
 )
 RETRY_SAME_COMMIT = (
     "Do not change the repository. Retry the same commit later; report the "
@@ -4964,12 +4965,12 @@ def export_failure(
     must not be described as a missing configured declaration.
     """
     excerpt = comparator_failure_excerpt(proc.stderr)
-    missing = set(re.findall(
-        r"\bConstant ([A-Za-z_][A-Za-z0-9_.']*) not found in environment\b",
-        proc.stderr,
-    ))
-    if missing and missing <= configured_targets:
-        missing_name = min(missing)
+    missing = sorted(
+        name for name in configured_targets
+        if f"Constant {name} not found in environment." in proc.stderr
+    )
+    if missing:
+        missing_name = missing[0]
         return VerificationError(
             f"comparator.json names {missing_name}, which {module} does not define",
             code="comparator.declaration_missing",
@@ -5944,7 +5945,10 @@ def execute(args: argparse.Namespace) -> int:
         def stop(error: VerificationError, stage: str) -> int:
             report["status"] = "error" if error.owner != "submitter" else "fail"
             report["errors"].append(str(error))
-            report_diagnostic(report, error, stage=stage)
+            report_diagnostic(
+                report, error, stage=stage,
+                owner=error.owner if error.code == "comparator.declaration_missing" else None,
+            )
             report["stage"] = stage
             guarded_write()
             return 0
@@ -5958,6 +5962,9 @@ def execute(args: argparse.Namespace) -> int:
         exports.mkdir()
         require_protected_paths([exports], candidate_writable)
         targets = comparator_export_targets(protected_config, primitives)
+        configured_targets = set(protected_config["theorem_names"]) | set(
+            protected_config.get("definition_names", [])
+        )
         report["stage"] = "challenge-export"
         guarded_write()
         challenge_export = exports / "challenge.export"
@@ -5977,8 +5984,7 @@ def execute(args: argparse.Namespace) -> int:
             return stop(
                 export_failure(
                     proc, module="the Challenge", palomar_owned=True,
-                    configured_targets=set(comparator_config["theorem_names"])
-                    | set(comparator_config.get("definition_names", [])),
+                    configured_targets=configured_targets,
                 ),
                 "challenge-export",
             )
@@ -6035,8 +6041,7 @@ def execute(args: argparse.Namespace) -> int:
             return stop(
                 export_failure(
                     proc, module="the Solution", palomar_owned=False,
-                    configured_targets=set(comparator_config["theorem_names"])
-                    | set(comparator_config.get("definition_names", [])),
+                    configured_targets=configured_targets,
                 ),
                 "solution-export",
             )
