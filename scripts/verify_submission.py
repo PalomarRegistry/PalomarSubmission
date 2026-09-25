@@ -864,6 +864,10 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
         "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "maintenance.auto=false",
         "-C",
         str(destination),
     ]
@@ -1696,11 +1700,15 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
     packages = []
+    seen_names: set[str] = set()
     for package in data.get("packages", []):
         manifest_name = package.get("name")
         name = submission_contract.lake_package_name(manifest_name)
         if name is None:
             raise VerificationError(f"unsafe package name in Lake manifest: {manifest_name!r}")
+        if name in seen_names:
+            raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
+        seen_names.add(name)
         package_type = package.get("type")
         url = package.get("url")
         if package_type == "git":
@@ -3628,13 +3636,6 @@ def materialize_packages(
     """
     boundary = checkout.resolve()
     packages = manifest_packages(source)
-    # An escaped and a bare spelling of one name would share a checkout directory.
-    seen_names: set[str] = set()
-    for package in packages:
-        name = package["name"]
-        if name in seen_names:
-            raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
-        seen_names.add(name)
     path_directories: dict[str, Path] = {}
     for package in packages:
         if not package["url"].startswith("path:"):
@@ -3687,6 +3688,10 @@ def materialize_packages(
             "core.hooksPath=/dev/null",
             "-c",
             "protocol.file.allow=never",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
             "-C",
             str(package_dir),
         ]

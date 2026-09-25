@@ -3239,6 +3239,8 @@ review:
             ):
                 materialize_packages(source, checkout=source, base_env={"PATH": "/usr/bin"})
             run.assert_not_called()
+            with self.assertRaisesRegex(VerificationError, "duplicate package name"):
+                verifier.manifest_packages(source)
 
     def test_dot_package_names_fail_before_materialization(self):
         for name in (".", ".."):
