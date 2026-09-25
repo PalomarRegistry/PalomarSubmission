@@ -52,6 +52,7 @@ from scripts.verification_profile import (  # noqa: E402
 )
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
+GIT_NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
 MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
@@ -864,10 +865,7 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
         "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
-        "-c",
-        "gc.auto=0",
-        "-c",
-        "maintenance.auto=false",
+        *GIT_NO_AUTO_MAINTENANCE,
         "-C",
         str(destination),
     ]
@@ -1700,6 +1698,7 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
     packages = []
+    # Escaped and bare spellings of one name share a Lake checkout directory.
     seen_names: set[str] = set()
     for package in data.get("packages", []):
         manifest_name = package.get("name")
@@ -2030,6 +2029,7 @@ def verify_official_revision(
         "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
+        *GIT_NO_AUTO_MAINTENANCE,
         "-C",
         str(package_dir),
     ]
@@ -3688,10 +3688,7 @@ def materialize_packages(
             "core.hooksPath=/dev/null",
             "-c",
             "protocol.file.allow=never",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
+            *GIT_NO_AUTO_MAINTENANCE,
             "-C",
             str(package_dir),
         ]
