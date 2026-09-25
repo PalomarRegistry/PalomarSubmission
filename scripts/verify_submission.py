@@ -1028,6 +1028,60 @@ def unique_comparator_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def valid_export_target_name(name: object) -> bool:
+    """Accept the canonical name literals that leanexport can decode as targets.
+
+    Escaped components and punctuation are rejected here so a target cannot be
+    interpreted as an exporter option or panic during argument decoding.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+
+    def letterlike(character: str) -> bool:
+        # Lean Init/Meta/Defs.lean isLetterLike, shared by the supported floor
+        # toolchain and v4.35.0-rc2. Python's Unicode isalpha is much broader.
+        codepoint = ord(character)
+        return (
+            (0x3B1 <= codepoint <= 0x3C9 and codepoint != 0x3BB)
+            or (0x391 <= codepoint <= 0x3A9 and codepoint not in {0x3A0, 0x3A3})
+            or 0x3CA <= codepoint <= 0x3FB
+            or 0x1F00 <= codepoint <= 0x1FFE
+            or 0x2100 <= codepoint <= 0x214F
+            or 0x1D49C <= codepoint <= 0x1D59F
+            or (0xC0 <= codepoint <= 0xFF and codepoint not in {0xD7, 0xF7})
+            or 0x100 <= codepoint <= 0x17F
+        )
+
+    def ascii_letter(character: str) -> bool:
+        return "a" <= character <= "z" or "A" <= character <= "Z"
+
+    def identifier_rest(character: str) -> bool:
+        codepoint = ord(character)
+        return (
+            ascii_letter(character)
+            or "0" <= character <= "9"
+            or character in "_'!?"
+            or letterlike(character)
+            or 0x2080 <= codepoint <= 0x2089
+            or 0x2090 <= codepoint <= 0x209C
+            or 0x1D62 <= codepoint <= 0x1D6A
+            or codepoint == 0x2C7C
+        )
+
+    for component in name.split("."):
+        if not component:
+            return False
+        if component.isascii() and component.isdecimal():
+            if len(component) > 1 and component.startswith("0"):
+                return False
+            continue
+        if not (ascii_letter(component[0]) or component[0] == "_" or letterlike(component[0])):
+            return False
+        if not all(identifier_rest(character) for character in component[1:]):
+            return False
+    return True
+
+
 def load_comparator_config(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise VerificationError("Comparator configuration is not a regular file")
@@ -1070,10 +1124,17 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
     definition_names = config.get("definition_names", [])
     if not isinstance(theorem_names, list) or not theorem_names:
         raise VerificationError("comparator theorem_names must be a nonempty array")
-    if not all(isinstance(item, str) and item for item in theorem_names + definition_names):
+    if not isinstance(definition_names, list) or not all(
+        isinstance(item, str) and item for item in theorem_names + definition_names
+    ):
         raise VerificationError("comparator declaration names must be nonempty strings")
     if any(re.search(r"[\x00-\x1f\x7f]", item) for item in theorem_names + definition_names):
         raise VerificationError("comparator declaration names must not contain control characters")
+    if not all(valid_export_target_name(item) for item in theorem_names + definition_names):
+        raise VerificationError(
+            "comparator declaration names must use canonical Lean identifier components",
+            code="comparator.invalid_declaration_name",
+        )
     axioms = config["permitted_axioms"]
     if not isinstance(axioms, list) or not set(axioms) <= STANDARD_AXIOMS:
         raise VerificationError(
@@ -1140,7 +1201,7 @@ def validate_protected_comparator_config(path: Path, *, kernels: dict[str, list[
         raise VerificationError("protected Comparator configuration lost its Challenge alias")
     module_source_suffix(config["solution_module"])
     names = [*config["theorem_names"], *config["definition_names"]]
-    if not config["theorem_names"] or not all(isinstance(item, str) and item for item in names):
+    if not config["theorem_names"] or not all(valid_export_target_name(item) for item in names):
         raise VerificationError("protected Comparator configuration names invalid declarations")
     if not set(config["permitted_axioms"]) <= STANDARD_AXIOMS:
         raise VerificationError("protected Comparator configuration permits a non-standard axiom")
@@ -1341,7 +1402,11 @@ def prepare(args: argparse.Namespace) -> int:
                     "substantive formalization source",
                 )
         except Exception as error:  # independent preflight group
-            if isinstance(error, FormalizationValidationError) and error.repair_draft is not None:
+            if (
+                isinstance(error, FormalizationValidationError)
+                and any(issue.repairable for issue in error.issues)
+                and error.repair_draft is not None
+            ):
                 report["formalization_repair_draft"] = error.repair_draft
             add_issue("formalization", error)
 
@@ -4726,7 +4791,8 @@ def resolve_module_source(
 
 
 COMPARATOR_FAILURE_MARKERS = (
-    "uncaught exception", "error:", "error]", "failed", "rejected the solution", "exited with",
+    "uncaught exception", "panic at", "not found in environment", "error:", "error]", "failed",
+    "rejected the solution", "exited with",
 )
 RETRY_SAME_COMMIT = (
     "Do not change the repository. Retry the same commit later; report the "
@@ -4953,21 +5019,25 @@ def export_module(
 
 
 def export_failure(
-    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool
+    proc: subprocess.CompletedProcess[str], *, module: str, palomar_owned: bool,
+    configured_targets: set[str],
 ) -> VerificationError:
     """Say what a failed export means.
 
-    The exporter panics on a declaration the module does not define, and the
-    declarations it is asked for are the ones `comparator.json` names, so that
-    is the submitter's configuration to fix, whichever module it was. Any
-    other failure of the Challenge export is Palomar's, because Palomar
-    compiled that module; any other failure of the Solution export is the
-    candidate build's.
+    A missing declaration belongs to the submitter only when the exporter
+    names one of the declarations in comparator.json. Exporting a dependency
+    closure can also panic on an unrelated missing constant; a generic panic
+    must not be described as a missing configured declaration.
     """
     excerpt = comparator_failure_excerpt(proc.stderr)
-    if "not found in environment" in proc.stderr:
+    missing = sorted(
+        name for name in configured_targets
+        if f"Constant {name} not found in environment." in proc.stderr
+    )
+    if missing:
+        missing_name = missing[0]
         return VerificationError(
-            f"comparator.json names a declaration that {module} does not define",
+            f"comparator.json names {missing_name}, which {module} does not define",
             code="comparator.declaration_missing",
             detail=excerpt,
             next_action=(
@@ -5940,7 +6010,10 @@ def execute(args: argparse.Namespace) -> int:
         def stop(error: VerificationError, stage: str) -> int:
             report["status"] = "error" if error.owner != "submitter" else "fail"
             report["errors"].append(str(error))
-            report_diagnostic(report, error, stage=stage)
+            report_diagnostic(
+                report, error, stage=stage,
+                owner=error.owner if error.code == "comparator.declaration_missing" else None,
+            )
             report["stage"] = stage
             guarded_write()
             return 0
@@ -5954,6 +6027,9 @@ def execute(args: argparse.Namespace) -> int:
         exports.mkdir()
         require_protected_paths([exports], candidate_writable)
         targets = comparator_export_targets(protected_config, primitives)
+        configured_targets = set(protected_config["theorem_names"]) | set(
+            protected_config.get("definition_names", [])
+        )
         report["stage"] = "challenge-export"
         guarded_write()
         challenge_export = exports / "challenge.export"
@@ -5971,7 +6047,11 @@ def execute(args: argparse.Namespace) -> int:
         )
         if proc.returncode:
             return stop(
-                export_failure(proc, module="the Challenge", palomar_owned=True), "challenge-export"
+                export_failure(
+                    proc, module="the Challenge", palomar_owned=True,
+                    configured_targets=configured_targets,
+                ),
+                "challenge-export",
             )
         verify_export(challenge_export)
         tools[challenge_export.resolve()] = sha256(challenge_export)
@@ -6024,7 +6104,11 @@ def execute(args: argparse.Namespace) -> int:
         )
         if proc.returncode:
             return stop(
-                export_failure(proc, module="the Solution", palomar_owned=False), "solution-export"
+                export_failure(
+                    proc, module="the Solution", palomar_owned=False,
+                    configured_targets=configured_targets,
+                ),
+                "solution-export",
             )
         verify_export(solution_export)
         tools[solution_export.resolve()] = sha256(solution_export)

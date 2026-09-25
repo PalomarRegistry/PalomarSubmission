@@ -4728,17 +4728,53 @@ class LakeComparatorTests(unittest.TestCase):
         )
         for module, palomar_owned in (("the Challenge", True), ("the Solution", False)):
             with self.subTest(module=module):
-                error = verifier.export_failure(panic, module=module, palomar_owned=palomar_owned)
+                error = verifier.export_failure(
+                    panic, module=module, palomar_owned=palomar_owned,
+                    configured_targets={"Foo.mian"},
+                )
                 self.assertEqual(error.code, "comparator.declaration_missing")
                 self.assertEqual(error.owner, "submitter")
                 self.assertIn("Foo.mian", error.detail)
         crash = subprocess.CompletedProcess(["leanexport"], 139, "", "Segmentation fault\n")
-        error = verifier.export_failure(crash, module="the Challenge", palomar_owned=True)
+        error = verifier.export_failure(
+            crash, module="the Challenge", palomar_owned=True, configured_targets={"Foo.mian"}
+        )
         self.assertEqual(error.code, "palomar.challenge_export_failed")
         self.assertTrue(error.retryable)
-        error = verifier.export_failure(crash, module="the Solution", palomar_owned=False)
+        error = verifier.export_failure(
+            crash, module="the Solution", palomar_owned=False, configured_targets={"Foo.mian"}
+        )
         self.assertEqual(error.code, "solution.export_failed")
         self.assertEqual(error.owner, "submitter")
+
+        unrelated = verifier.export_failure(
+            panic, module="the Challenge", palomar_owned=True,
+            configured_targets={"Foo.actual"},
+        )
+        self.assertEqual(unrelated.code, "palomar.challenge_export_failed")
+        self.assertEqual(unrelated.owner, "palomar")
+        self.assertTrue(unrelated.retryable)
+
+        unicode_panic = subprocess.CompletedProcess(
+            ["leanexport"], 134, "",
+            "PANIC at LeanExport.dumpConstant\n"
+            "Constant Foo.iUnion₂ not found in environment.\n"
+            + "\n".join(f"backtrace frame {index}" for index in range(15)),
+        )
+        unicode_error = verifier.export_failure(
+            unicode_panic, module="the Challenge", palomar_owned=True,
+            configured_targets={"Foo.iUnion₂"},
+        )
+        self.assertEqual(unicode_error.code, "comparator.declaration_missing")
+        self.assertIn("Foo.iUnion₂", unicode_error.detail)
+        self.assertIn("PANIC at", unicode_error.detail)
+
+        report = {}
+        verifier.report_diagnostic(
+            report, unicode_error, stage="challenge-export", owner=unicode_error.owner,
+        )
+        self.assertEqual(report["diagnostics"][0]["owner"], "submitter")
+        self.assertFalse(report["diagnostics"][0]["retryable"])
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_TEST_LEAN"), "set PALOMAR_TEST_LEAN to read a real toolchain"
@@ -4853,6 +4889,27 @@ class LakeComparatorTests(unittest.TestCase):
             with self.assertRaisesRegex(VerificationError, "control characters"):
                 verifier.load_comparator_config(path)
 
+    def test_export_target_names_reject_undecodable_names_and_options(self):
+        for name in (
+            "Foo.my thm", "Foo.bar-baz", "Foo.", ".Foo", "--ignore-missing",
+            "--export-unsafe", "Foo.«bar»", "Foo.01", "Foo.λ", "Foo.Ж",
+            "Foo.漢字", "Foo.ƒ", "Foo.x²", "Foo.Ⅻ", "Foo.٣",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "comparator.json"
+                path.write_text(json.dumps({
+                    "challenge_module": "Challenge",
+                    "solution_module": "Solution",
+                    "theorem_names": [name],
+                    "permitted_axioms": ["propext"],
+                }))
+                with self.assertRaises(VerificationError) as raised:
+                    verifier.load_comparator_config(path)
+                self.assertEqual(raised.exception.code, "comparator.invalid_declaration_name")
+        for name in ("Foo.iUnion₂", "Real.sqrt_α", "List.get!", "Foo.12"):
+            with self.subTest(name=name):
+                self.assertTrue(verifier.valid_export_target_name(name))
+
     def test_an_export_must_start_with_the_exporters_header(self):
         with tempfile.TemporaryDirectory() as directory:
             export = Path(directory) / "solution.export"
@@ -4965,6 +5022,36 @@ class MetadataShapeTests(unittest.TestCase):
             path = Path(directory) / "formalization.yaml"
             path.write_text(text, encoding="utf-8")
             return load_formalization_metadata(path)
+
+    def test_related_formalization_error_is_not_a_sources_repair(self):
+        with self.assertRaises(FormalizationValidationError) as caught:
+            self.load(
+                "project:\n"
+                "  name: Example\n"
+                "  description: An example.\n"
+                "  authors: [Ada Lovelace]\n"
+                "  license: MIT\n"
+                "  responsible_maintainers: [Ada Lovelace]\n"
+                "classification:\n"
+                "  arxiv: [math.LO]\n"
+                "  msc2020: [03B35]\n"
+                "sources:\n"
+                "  - title: Source theorem\n"
+                "    relationship: formalizes\n"
+                "related_formalizations:\n"
+                "  - id: https://example.com/proof\n"
+                "    relationship: ''\n"
+                "automation:\n"
+                "  methods: [{method: manual}]\n"
+                "review:\n"
+                "  status: self-assessed\n"
+            )
+        matching = [issue for issue in caught.exception.issues
+                    if "related_formalizations[0].relationship" in str(issue)]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].field, "related_formalizations[0].relationship")
+        self.assertFalse(matching[0].repairable)
+        self.assertNotIn("guided metadata form", matching[0].next_action)
 
     def test_every_missing_section_is_named_together(self):
         # An old shape must produce the whole guided form in one preflight,
