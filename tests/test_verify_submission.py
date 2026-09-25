@@ -256,6 +256,30 @@ class RegistryCorrectionContractTests(unittest.TestCase):
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_tree_size_never_walks_git_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "source").mkdir()
+            (root / "source" / "Main.lean").write_bytes(b"theorem")
+            (root / ".git" / "objects" / "99").mkdir(parents=True)
+            (root / ".git" / "objects" / "99" / "object").write_bytes(b"ignored")
+            (root / "source" / ".git").mkdir()
+            (root / "source" / ".git" / "object").write_bytes(b"ignored")
+            (root / "linked").symlink_to(root / ".git", target_is_directory=True)
+
+            scandir = os.scandir
+            visited_git_metadata = []
+
+            def reject_git_metadata(path):
+                if ".git" in Path(path).parts:
+                    visited_git_metadata.append(path)
+                    raise FileNotFoundError(path)
+                return scandir(path)
+
+            with mock.patch("scripts.verify_submission.os.scandir", side_effect=reject_git_metadata):
+                self.assertEqual(verifier.tree_size(root), len(b"theorem"))
+            self.assertEqual(visited_git_metadata, [])
+
     def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
         self.assertTrue(verifier.mathlib_cache_availability("\rDownloaded: 42 file(s)"))
         self.assertFalse(verifier.mathlib_cache_availability(

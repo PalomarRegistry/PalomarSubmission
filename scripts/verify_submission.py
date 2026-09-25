@@ -938,12 +938,23 @@ def validate_preservable_git_checkout(
 
 def tree_size(root: Path) -> int:
     total = 0
-    for path in root.rglob("*"):
-        if ".git" in path.parts or path.is_symlink() or not path.is_file():
-            continue
-        total += path.stat().st_size
-        if total > MAX_SOURCE_BYTES:
-            break
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        # Prune before descending: a Git operation can remove a loose-object
+        # directory while a recursive glob is walking the checkout's .git.
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name != ".git" and not (Path(directory) / name).is_symlink()
+        ]
+        for name in filenames:
+            if name == ".git":
+                continue
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            total += path.stat().st_size
+            if total > MAX_SOURCE_BYTES:
+                return total
     return total
 
 
