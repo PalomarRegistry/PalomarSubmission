@@ -52,6 +52,7 @@ from scripts.verification_profile import (  # noqa: E402
 )
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
+GIT_NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
 MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
@@ -864,6 +865,7 @@ def clone_commit(url: str, commit: str, destination: Path) -> None:
         "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
+        *GIT_NO_AUTO_MAINTENANCE,
         "-C",
         str(destination),
     ]
@@ -938,12 +940,23 @@ def validate_preservable_git_checkout(
 
 def tree_size(root: Path) -> int:
     total = 0
-    for path in root.rglob("*"):
-        if ".git" in path.parts or path.is_symlink() or not path.is_file():
-            continue
-        total += path.stat().st_size
-        if total > MAX_SOURCE_BYTES:
-            break
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        # Prune before descending: a Git operation can remove a loose-object
+        # directory while a recursive glob is walking the checkout's .git.
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name != ".git" and not (Path(directory) / name).is_symlink()
+        ]
+        for name in filenames:
+            if name == ".git":
+                continue
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            total += path.stat().st_size
+            if total > MAX_SOURCE_BYTES:
+                return total
     return total
 
 
@@ -1685,7 +1698,16 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
     packages = []
+    # Escaped and bare spellings of one name share a Lake checkout directory.
+    seen_names: set[str] = set()
     for package in data.get("packages", []):
+        manifest_name = package.get("name")
+        name = submission_contract.lake_package_name(manifest_name)
+        if name is None:
+            raise VerificationError(f"unsafe package name in Lake manifest: {manifest_name!r}")
+        if name in seen_names:
+            raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
+        seen_names.add(name)
         package_type = package.get("type")
         url = package.get("url")
         if package_type == "git":
@@ -1710,7 +1732,8 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
             revision = str(package.get("rev") or package.get("inputRev") or "unknown")
         packages.append(
             {
-                "name": str(package.get("name") or ""),
+                "name": name,
+                "manifest_name": manifest_name,
                 "repository": repository,
                 "url": url,
                 "revision": revision,
@@ -1794,9 +1817,9 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
     packages_directories: set[Path] = set()
 
     def add(package: dict[str, Any], *, inherited: bool) -> None:
-        name = package.get("name")
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-            raise VerificationError(f"invalid Lake package name: {name!r}")
+        name = submission_contract.lake_package_name(package.get("name"))
+        if name is None:
+            raise VerificationError(f"invalid Lake package name: {package.get('name')!r}")
         if name in seen_names:
             raise VerificationError(f"duplicate Lake package name: {name!r}")
         seen_names.add(name)
@@ -1807,10 +1830,11 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
     for requirement in requirements:
         if not isinstance(requirement, dict):
             raise VerificationError("lakefile.toml require entries must be objects")
-        name = requirement.get("name")
+        manifest_name = requirement.get("name")
+        name = submission_contract.lake_package_name(manifest_name)
         raw_path = requirement.get("path")
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-            raise VerificationError(f"invalid direct Lake package name: {name!r}")
+        if name is None:
+            raise VerificationError(f"invalid direct Lake package name: {manifest_name!r}")
         if not isinstance(raw_path, str):
             raise VerificationError(
                 "a TOML project without lake-manifest.json may use only contained path "
@@ -1842,7 +1866,10 @@ def ensure_lake_manifest(project: Path, checkout: Path) -> bool:
             {
                 "type": "path",
                 "scope": "",
-                "name": name,
+                "name": (
+                    manifest_name if manifest_name.startswith("\u00ab")
+                    else submission_contract.lake_manifest_name(name)
+                ),
                 "manifestFile": "lake-manifest.json",
                 "dir": raw_path,
                 "configFile": target_lakefiles[0].name,
@@ -2002,6 +2029,7 @@ def verify_official_revision(
         "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
+        *GIT_NO_AUTO_MAINTENANCE,
         "-C",
         str(package_dir),
     ]
@@ -2196,7 +2224,9 @@ def trusted_package_url_map(
             raise VerificationError(
                 f"trusted package {name!r} revision does not match its verified manifest"
             )
-        urls[name] = expected_url
+        if actual["manifest_name"] != expected["manifest_name"]:
+            raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
+        urls[expected["manifest_name"]] = expected_url
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
 
@@ -3658,6 +3688,7 @@ def materialize_packages(
             "core.hooksPath=/dev/null",
             "-c",
             "protocol.file.allow=never",
+            *GIT_NO_AUTO_MAINTENANCE,
             "-C",
             str(package_dir),
         ]
@@ -3886,7 +3917,7 @@ def stage_trusted_closure(
             raise VerificationError(f"staged trusted package has no real Git metadata: {name!r}")
         manifest.append(
             {
-                "name": name,
+                "name": package["manifest_name"],
                 "type": "git",
                 "url": package["url"],
                 "rev": package["revision"],
@@ -4263,7 +4294,7 @@ def create_trusted_replay_workspace(
         "subDir": None,
         "scope": "",
         "rev": root_package["revision"],
-        "name": root_name,
+        "name": root_package["manifest_name"],
         "manifestFile": "lake-manifest.json",
         "inputRev": root_package["revision"],
         "inherited": False,

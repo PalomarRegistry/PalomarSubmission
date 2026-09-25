@@ -105,6 +105,11 @@ GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+LAKE_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+LAKE_ESCAPED_NAME_RE = re.compile(r"^\u00ab([^\u00ab\u00bb]*)\u00bb$")
+LEAN_PLAIN_NAME_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+)(?:\.(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+))*$"
+)
 PALOMAR_ID_RE = re.compile(r"^PALOMAR-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$")
 GITHUB_LOGIN_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
@@ -138,6 +143,28 @@ REGISTRY_CORRECTION_FIELDS = (
     "provenance.related_formalizations",
 )
 _CORRECTION_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def lake_package_name(raw: object) -> str | None:
+    """Return the safe bare name behind a manifest package name, or ``None``.
+
+    Lake stores a package name as a Lean ``Name``, so a name that is not a plain
+    identifier appears in ``lake-manifest.json`` between guillemets, and Lake
+    refuses the unescaped spelling there. The checkout directory and
+    ``lakefile.toml`` use the bare name.
+    """
+    if not isinstance(raw, str):
+        return None
+    escaped = LAKE_ESCAPED_NAME_RE.fullmatch(raw)
+    name = escaped.group(1) if escaped else raw
+    # Checkout paths must remain ordinary child directories. This deliberately
+    # excludes leading-dot names and mixed escaped name components.
+    return name if name and not name.startswith(".") and LAKE_PACKAGE_NAME_RE.fullmatch(name) else None
+
+
+def lake_manifest_name(name: str) -> str:
+    """Spell a bare package name the way Lake writes it to ``lake-manifest.json``."""
+    return name if LEAN_PLAIN_NAME_RE.fullmatch(name) else f"\u00ab{name}\u00bb"
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):

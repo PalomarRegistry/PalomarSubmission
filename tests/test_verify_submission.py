@@ -256,6 +256,30 @@ class RegistryCorrectionContractTests(unittest.TestCase):
 
 
 class VerifySubmissionTests(unittest.TestCase):
+    def test_tree_size_never_walks_git_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "source").mkdir()
+            (root / "source" / "Main.lean").write_bytes(b"theorem")
+            (root / ".git" / "objects" / "99").mkdir(parents=True)
+            (root / ".git" / "objects" / "99" / "object").write_bytes(b"ignored")
+            (root / "source" / ".git").mkdir()
+            (root / "source" / ".git" / "object").write_bytes(b"ignored")
+            (root / "linked").symlink_to(root / ".git", target_is_directory=True)
+
+            scandir = os.scandir
+            visited_git_metadata = []
+
+            def reject_git_metadata(path):
+                if ".git" in Path(path).parts:
+                    visited_git_metadata.append(path)
+                    raise FileNotFoundError(path)
+                return scandir(path)
+
+            with mock.patch("scripts.verify_submission.os.scandir", side_effect=reject_git_metadata):
+                self.assertEqual(verifier.tree_size(root), len(b"theorem"))
+            self.assertEqual(visited_git_metadata, [])
+
     def test_mathlib_cache_summary_distinguishes_complete_missing_and_unknown(self):
         self.assertTrue(verifier.mathlib_cache_availability("\rDownloaded: 42 file(s)"))
         self.assertFalse(verifier.mathlib_cache_availability(
@@ -3110,6 +3134,114 @@ review:
 
             self.assertEqual(protected.read_text(), "protected")
 
+    def test_manifest_packages_reads_lake_escaped_package_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": "\u00abmy-package\u00bb",
+                                "type": "git",
+                                "url": "https://github.com/example/my-package",
+                                "rev": "1" * 40,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            packages = verifier.manifest_packages(source)
+
+        self.assertEqual([package["name"] for package in packages], ["my-package"])
+        self.assertEqual([package["manifest_name"] for package in packages], ["\u00abmy-package\u00bb"])
+
+    def test_escaped_unsafe_package_names_fail_before_materialization(self):
+        for name in (
+            "\u00ab..\u00bb", "\u00ab.git\u00bb", "\u00ab.lake\u00bb", "\u00aba/b\u00bb", "\u00abx\u00bby"
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                (source / "lake-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "packages": [
+                                {
+                                    "name": name,
+                                    "type": "git",
+                                    "url": "https://github.com/example/package",
+                                    "rev": "1" * 40,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(VerificationError, "unsafe package name"):
+                    materialize_packages(
+                        source,
+                        checkout=source,
+                        base_env={"PATH": "/usr/bin"},
+                    )
+
+    def test_synthesized_manifest_spells_hyphenated_path_package_as_lake_does(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "lakefile.toml").write_text(
+                'name = "root"\n\n[[require]]\nname = "my-package"\npath = "dep"\n'
+            )
+            dependency = project / "dep"
+            dependency.mkdir()
+            (dependency / "lakefile.toml").write_text('name = "my-package"\n')
+            (dependency / "lake-manifest.json").write_text(
+                json.dumps({"version": "1.1.0", "packagesDir": ".lake/packages", "packages": []})
+            )
+
+            self.assertTrue(ensure_lake_manifest(project, project))
+
+            generated = json.loads((project / "lake-manifest.json").read_text(encoding="utf-8"))
+            # Lake refuses a bare hyphenated name here: "expected a `Name`".
+            self.assertEqual(
+                [package["name"] for package in generated["packages"]],
+                ["\u00abmy-package\u00bb"],
+            )
+            self.assertEqual(
+                [package["name"] for package in verifier.manifest_packages(project)],
+                ["my-package"],
+            )
+
+    def test_escaped_and_bare_spellings_of_one_name_fail_before_materialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lake-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "packages": [
+                            {
+                                "name": name,
+                                "type": "git",
+                                "url": f"https://github.com/example/{repository}",
+                                "rev": "1" * 40,
+                            }
+                            for name, repository in (
+                                ("mathlib", "official"),
+                                ("\u00abmathlib\u00bb", "substitute"),
+                            )
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch("scripts.verify_submission.run") as run,
+                self.assertRaisesRegex(VerificationError, "duplicate package name"),
+            ):
+                materialize_packages(source, checkout=source, base_env={"PATH": "/usr/bin"})
+            run.assert_not_called()
+            with self.assertRaisesRegex(VerificationError, "duplicate package name"):
+                verifier.manifest_packages(source)
+
     def test_dot_package_names_fail_before_materialization(self):
         for name in (".", ".."):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -3140,7 +3272,7 @@ review:
                     verifier.reset_trusted_lake_state(
                         source,
                         {name},
-                        packages=verifier.manifest_packages(source),
+                        packages=[{"name": name, "url": "https://github.com/example/package"}],
                         checkout=source,
                     )
 
@@ -4147,6 +4279,8 @@ review:
             {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4"},
             {"name": "plausible", "url": "https://github.com/leanprover-community/plausible"},
         ]
+        for package in [*packages, *authoritative]:
+            package["manifest_name"] = package["name"]
         self.assertEqual(
             json.loads(trusted_package_url_map(packages, authoritative)),
             {
@@ -4170,6 +4304,22 @@ review:
             trusted_package_url_map(packages, authoritative[:1])
         with self.assertRaisesRegex(VerificationError, "absent from the manifest"):
             trusted_package_url_map(packages, [{"name": "missing", "url": "https://example.com"}])
+
+    def test_trusted_package_url_map_preserves_lake_name_identity(self):
+        escaped = "\u00abmy-package\u00bb"
+        package = {
+            "name": "my-package",
+            "manifest_name": escaped,
+            "url": "https://github.com/example/my-package",
+            "revision": "1" * 40,
+        }
+        self.assertEqual(
+            json.loads(trusted_package_url_map([package], [package])),
+            {escaped: "https://github.com/example/my-package"},
+        )
+        different_name = {**package, "manifest_name": "my-package"}
+        with self.assertRaisesRegex(VerificationError, "different manifest spelling"):
+            trusted_package_url_map([different_name], [package])
 
     def test_lake_environment_uses_final_absolute_path_line(self):
         proc = mock.Mock(stdout="untrusted Lake diagnostic\n/first:/second\n")
