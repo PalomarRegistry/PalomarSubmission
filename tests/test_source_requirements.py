@@ -120,7 +120,9 @@ class SourceRequirementsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name, text in [("A.lean", "module\npublic theorem t : True := trivial\n"),
-                               ("B.lean", "/-/- x -/\nmodule\n")]:
+                               ("B.lean", "/-/- x -/\nmodule\n"),
+                               ("D.lean", "module#check Nat\n"),
+                               ("E.lean", "module@[simp] public theorem t : True := trivial\n")]:
                 (root / name).write_text(text)
             # Only header parsing runs; no candidate imports or elaboration.
             with mock.patch.object(verifier, "sandboxed_run", side_effect=
