@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from scripts import submission_contract, verify_submission
+from scripts import source_requirements, submission_contract, verify_submission
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = ROOT / "browser-preflight-policy.json"
@@ -36,6 +36,7 @@ DEFERRED_CHECKS = (
     "release-tag",
     "substantive-repository",
     "trusted-hashes",
+    "lean-source-requirements",
 )
 
 
@@ -49,6 +50,12 @@ def browser_preflight_policy() -> dict[str, Any]:
             "source_bytes": verify_submission.MAX_SOURCE_BYTES,
             "configuration_bytes": verify_submission.MAX_CONFIGURATION_BYTES,
             "formalization_bytes": submission_contract.MAX_FORMALIZATION_BYTES,
+            "lean_source_lines": source_requirements.MAX_LEAN_SOURCE_LINES,
+        },
+        "lean_sources": {
+            "module_required": True,
+            "excluded_directories": [".git", ".lake"],
+            "excluded_filenames": ["lakefile.lean"],
         },
         "toolchain": {
             "pattern": NAMED_GROUP_RE.sub("", verify_submission.TOOLCHAIN_RE.pattern),

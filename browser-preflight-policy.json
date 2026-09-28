@@ -4,7 +4,18 @@
   "limits": {
     "source_bytes": 524288000,
     "configuration_bytes": 1048576,
-    "formalization_bytes": 262144
+    "formalization_bytes": 262144,
+    "lean_source_lines": 10000
+  },
+  "lean_sources": {
+    "module_required": true,
+    "excluded_directories": [
+      ".git",
+      ".lake"
+    ],
+    "excluded_filenames": [
+      "lakefile.lean"
+    ]
   },
   "toolchain": {
     "pattern": "^leanprover/lean4:v([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-rc([0-9]+))?$",
@@ -63,6 +74,7 @@
     "licensee",
     "release-tag",
     "substantive-repository",
-    "trusted-hashes"
+    "trusted-hashes",
+    "lean-source-requirements"
   ]
 }

@@ -1,4 +1,8 @@
+module
+
 import Cslib
+
+public section
 
 namespace PalomarColdFixture
 

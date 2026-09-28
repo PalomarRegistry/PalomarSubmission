@@ -38,6 +38,7 @@ from scripts import (  # noqa: E402
     submission_contract,
 )
 from scripts.orcid_validation import validate_records as validate_orcid_records  # noqa: E402
+from scripts.source_requirements import inspect_lean_sources, lean_source_files  # noqa: E402
 from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
     VerificationError,
@@ -961,8 +962,8 @@ def tree_size(root: Path) -> int:
 
 
 def validate_preservable_remote_source(
-    work: Path, source: dict[str, str], label: str
-) -> None:
+    work: Path, source: dict[str, str], label: str, *, check_lean_sources: bool = False
+) -> dict[str, Any] | None:
     """Fetch and inspect a recorded source that is not part of the proof build."""
     with tempfile.TemporaryDirectory(prefix="palomar-preservation-", dir=work) as directory:
         checkout = Path(directory) / "source"
@@ -970,6 +971,19 @@ def validate_preservable_remote_source(
         validate_preservable_git_checkout(checkout, label)
         if tree_size(checkout) > MAX_SOURCE_BYTES:
             raise VerificationError(f"{label} exceeds the 500 MiB cap")
+        if check_lean_sources:
+            evidence, issues = inspect_lean_sources(checkout)
+            if issues:
+                remote_issues = [VerificationError(
+                    f"{label}: {source['repository_url']} at {source['commit']}: {issue}",
+                    code=issue.code,
+                    detail=f"File in the separately pinned substantive source: {issue.path}",
+                    next_action=("Correct the substantive source, commit it, update the wrapper's "
+                                 "substantive source pin, and submit the new wrapper commit."),
+                ) for issue in issues]
+                raise FormalizationValidationError(remote_issues)
+            return evidence
+    return None
 
 
 def strip_lean_comments(text: str) -> str:
@@ -1396,6 +1410,10 @@ def prepare(args: argparse.Namespace) -> int:
             else:
                 preflight_issues.append((stage, error))
 
+        if correction is None:
+            report["source_requirements"], source_issues = inspect_lean_sources(source)
+            preflight_issues.extend(("source-requirements", issue) for issue in source_issues)
+
         formalization: dict[str, Any] | None = None
         provenance: dict[str, Any] | None = None
         try:
@@ -1409,11 +1427,14 @@ def prepare(args: argparse.Namespace) -> int:
             )
             substantive = provenance.get("substantive_formalization")
             if isinstance(substantive, dict):
-                validate_preservable_remote_source(
+                substantive_sources = validate_preservable_remote_source(
                     work,
                     substantive,
                     "substantive formalization source",
+                    check_lean_sources=correction is None,
                 )
+                if substantive_sources is not None:
+                    report["source_requirements"]["substantive_formalization"] = substantive_sources
         except Exception as error:  # independent preflight group
             if (
                 isinstance(error, FormalizationValidationError)
@@ -4664,6 +4685,49 @@ def lean_header(
     return parse_lean_header(proc.stdout)
 
 
+def confirm_source_modules(
+    checkout: Path, *, source: Path, lean: Path, environment: dict[str, str],
+    writable_directories: list[Path], readable_paths: list[Path],
+    executable_paths: list[Path], tools: dict[Path, str],
+) -> None:
+    """Confirm every submitted header with Lean, before candidate Lake code runs.
+
+    --deps-json only parses headers, including unused sources; it never imports
+    or elaborates the candidate. Batch requests bound argv size and avoid a
+    separate sandbox setup per file.
+    """
+    files = lean_source_files(checkout)
+    for start in range(0, len(files), 64):
+        batch = files[start:start + 64]
+        proc = sandboxed_run(
+            [str(lean), "--deps-json", *(str(path) for path in batch)],
+            cwd=source, environment=environment, writable_directories=writable_directories,
+            readable_paths=readable_paths, executable_paths=executable_paths, tools=tools,
+        )
+        try:
+            entries = json.loads(proc.stdout.strip())["imports"]
+            if not isinstance(entries, list) or len(entries) != len(batch):
+                raise ValueError("header count differs from source count")
+        except (ValueError, KeyError, TypeError) as error:
+            raise VerificationError(
+                "Lean did not return the requested source headers",
+                code="palomar.source_header_unavailable", owner="palomar", retryable=True,
+            ) from error
+        for path, entry in zip(batch, entries, strict=True):
+            relative = path.relative_to(checkout).as_posix()
+            try:
+                header = parse_lean_header(json.dumps({"imports": [entry]}))
+            except VerificationError as error:
+                raise VerificationError(
+                    f"{relative}: {error}", code="source.invalid_header", path=relative,
+                ) from error
+            if not header.is_module:
+                raise VerificationError(
+                    f"{relative} does not use Lean's module system",
+                    code="source.module_required", path=relative, line=1,
+                )
+
+
 def lean_source_dependencies(
     source: Path,
     *,
@@ -5625,6 +5689,11 @@ def execute(args: argparse.Namespace) -> int:
             os.environ.get("PALOMAR_JOB_STARTED_AT"),
             getattr(args, "execution_budget_seconds", EXECUTION_BUDGET_SECONDS),
         )
+        report["stage"] = "source-requirements"
+        source_evidence, source_issues = inspect_lean_sources(checkout)
+        report.setdefault("source_requirements", {}).update(source_evidence)
+        if source_issues:
+            raise source_issues[0]
         bwrap = configure_bwrap(Path(args.bwrap))
         if not BWRAP_SOURCE_TAG_RE.fullmatch(args.bwrap_source_tag):
             raise VerificationError("bubblewrap source tag must be a release tag")
@@ -5800,6 +5869,14 @@ def execute(args: argparse.Namespace) -> int:
             executable_paths=executable_paths,
             tools=tools,
         )
+        report["stage"] = "source-requirements"
+        guarded_write()
+        confirm_source_modules(
+            checkout, source=source, lean=lean, environment=env,
+            writable_directories=writable_directories, readable_paths=readable_paths,
+            executable_paths=executable_paths, tools=tools,
+        )
+        report["source_requirements"]["header_parser"] = "lean --deps-json"
         report["stage"] = "comparator-preflight"
         guarded_write()
         comparator_preflight(

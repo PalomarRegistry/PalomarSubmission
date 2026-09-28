@@ -1,4 +1,8 @@
+module
+
 import Mathlib
+
+public section
 
 /-!
 # Module-identity cold regression
