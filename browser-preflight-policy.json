@@ -13,9 +13,10 @@
       ".git",
       ".lake"
     ],
-    "excluded_filenames": [
+    "module_exempt_filenames": [
       "lakefile.lean"
-    ]
+    ],
+    "symlinks_allowed": false
   },
   "toolchain": {
     "pattern": "^leanprover/lean4:v([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-rc([0-9]+))?$",

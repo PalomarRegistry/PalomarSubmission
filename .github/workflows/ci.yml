@@ -99,7 +99,7 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.35.0-rc2
           PALOMAR_BWRAP="$PALOMAR_BWRAP" \
           PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.35.0-rc2 "$HOME/.elan/bin/elan" which lean)" \
-            python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
+            python -m unittest tests.test_sandbox_integration tests.test_resource_supervision tests.test_source_requirements -v
       - name: Refuse the comparator's sandbox-disabling flag anywhere in the pipeline
         # `lake comparator` has a flag that switches its sandbox off, guarded
         # upstream by a warning alone. It must never appear in the code or the
@@ -222,7 +222,7 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.35.0-rc2
           PALOMAR_BWRAP="$PALOMAR_BWRAP" \
           PALOMAR_TEST_LEAN="$(ELAN_TOOLCHAIN=leanprover/lean4:v4.35.0-rc2 "$HOME/.elan/bin/elan" which lean)" \
-            python -m unittest tests.test_sandbox_integration tests.test_resource_supervision -v
+            python -m unittest tests.test_sandbox_integration tests.test_resource_supervision tests.test_source_requirements -v
       - name: Babysitter status and delegation report on failure
         if: failure()
         run: |

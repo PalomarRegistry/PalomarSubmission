@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from scripts.verification_errors import VerificationError
 
 MAX_LEAN_SOURCE_LINES = 10_000
 SOURCE_REQUIREMENTS_VERSION = 1
+COMMENT_MARKER = re.compile(r"/-|-/")
 
 
 def has_module_header(text: str) -> bool:
@@ -27,17 +29,16 @@ def has_module_header(text: str) -> bool:
             end = text.find("\n", index + 2)
             index = len(text) if end < 0 else end + 1
         elif text.startswith("/-", index) and not text.startswith(("/--", "/-!"), index):
-            index += 2
+            # Lean consumes the character after the plain opener before
+            # scanning its body (unlike nested openers). Match its parser.
+            index += 3
             depth = 1
-            while depth and index < len(text):
-                if text.startswith("/-", index):
-                    depth += 1
-                    index += 2
-                elif text.startswith("-/", index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
+            while depth:
+                marker = COMMENT_MARKER.search(text, index)
+                if marker is None:
+                    break
+                depth += 1 if marker.group() == "/-" else -1
+                index = marker.end()
             if depth:
                 return False
         else:
@@ -55,9 +56,9 @@ def physical_lines(text: str) -> int:
 
 
 def lean_source_files(root: Path) -> list[Path]:
-    """All regular Lean sources, including contained projects/path dependencies.
+    """Lean source paths, including contained projects and symlinks to reject.
 
-    Lake configuration and generated/dependency state are separate contracts.
+    Lake configuration shares the line cap, but is exempt from module headers.
     Never traverse symlinks or Git internals.
     """
     files = []
@@ -68,10 +69,7 @@ def lean_source_files(root: Path) -> list[Path]:
         )
         for name in sorted(names):
             path = Path(directory) / name
-            if (
-                name.endswith(".lean") and name != "lakefile.lean"
-                and not path.is_symlink() and path.is_file()
-            ):
+            if name.endswith(".lean") and (path.is_symlink() or path.is_file()):
                 files.append(path)
     return files
 
@@ -88,7 +86,7 @@ def source_issues(text: str, path: str) -> list[VerificationError]:
                 "commit the changes, and submit the new commit."
             ),
         ))
-    if not has_module_header(text):
+    if Path(path).name != "lakefile.lean" and not has_module_header(text):
         issues.append(VerificationError(
             f"{path} must begin with the module header keyword (ordinary comments may precede it)",
             code="source.module_required", path=path, line=1,
@@ -105,6 +103,13 @@ def inspect_lean_sources(root: Path) -> tuple[dict[str, Any], list[VerificationE
     issues: list[VerificationError] = []
     for path in files:
         relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            issues.append(VerificationError(
+                f"{relative} must be a regular Lean file, not a symbolic link",
+                code="source.symlink_not_allowed", path=relative,
+                next_action="Commit the Lean source as a regular .lean file and submit the new commit.",
+            ))
+            continue
         try:
             # Keep LF-based physical counts: universal newline conversion would
             # turn bare CR into extra lines not present in the committed file.

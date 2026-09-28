@@ -4696,7 +4696,8 @@ def confirm_source_modules(
     or elaborates the candidate. Batch requests bound argv size and avoid a
     separate sandbox setup per file.
     """
-    files = lean_source_files(checkout)
+    # Keep the lexical precheck: Lean's fast parser also accepts moduleFoo.
+    files = [path for path in lean_source_files(checkout) if path.name != "lakefile.lean"]
     for start in range(0, len(files), 64):
         batch = files[start:start + 64]
         proc = sandboxed_run(

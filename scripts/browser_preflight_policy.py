@@ -55,7 +55,8 @@ def browser_preflight_policy() -> dict[str, Any]:
         "lean_sources": {
             "module_required": True,
             "excluded_directories": [".git", ".lake"],
-            "excluded_filenames": ["lakefile.lean"],
+            "module_exempt_filenames": ["lakefile.lean"],
+            "symlinks_allowed": False,
         },
         "toolchain": {
             "pattern": NAMED_GROUP_RE.sub("", verify_submission.TOOLCHAIN_RE.pattern),

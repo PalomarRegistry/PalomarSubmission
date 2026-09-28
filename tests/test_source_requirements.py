@@ -19,7 +19,9 @@ class SourceRequirementsTests(unittest.TestCase):
         for case in fixture["cases"]:
             with self.subTest(case=case["id"]):
                 self.assertEqual(
-                    [issue.code for issue in sources.source_issues(case["text"], "Source.lean")],
+                    [issue.code for issue in sources.source_issues(
+                        case["text"], case.get("path", "Source.lean")
+                    )],
                     case["expected_codes"],
                 )
 
@@ -35,9 +37,10 @@ class SourceRequirementsTests(unittest.TestCase):
             (root / "Link.lean").symlink_to(root / "nested/Unused.lean")
             (root / "linkdir").symlink_to(root / "nested", target_is_directory=True)
             evidence, issues = sources.inspect_lean_sources(root)
-            self.assertEqual(evidence["files_checked"], 3)
+            self.assertEqual(evidence["files_checked"], 6)
             self.assertEqual({(issue.path, issue.code) for issue in issues}, {
                 ("nested/Unused.lean", "source.module_required"),
+                ("Link.lean", "source.symlink_not_allowed"),
                 ("deps/local/Large.lean", "source.file_too_long"),
             })
             long = next(issue for issue in issues if issue.code == "source.file_too_long")
@@ -97,7 +100,7 @@ class SourceRequirementsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name, text in [("A.lean", "module\npublic theorem t : True := trivial\n"),
-                               ("B.lean", "/- license /- nested -/ -/\nmodule\n")]:
+                               ("B.lean", "/-/- x -/\nmodule\n")]:
                 (root / name).write_text(text)
             # Only header parsing runs; no candidate imports or elaboration.
             with mock.patch.object(verifier, "sandboxed_run", side_effect=
@@ -106,3 +109,10 @@ class SourceRequirementsTests(unittest.TestCase):
                 verifier.confirm_source_modules(root, source=root,
                     lean=Path(os.environ["PALOMAR_TEST_LEAN"]), environment={},
                     writable_directories=[], readable_paths=[], executable_paths=[], tools={})
+                (root / "C.lean").write_text("/-/- x -/ theorem t : True := trivial -/\nmodule\n")
+                with self.assertRaises(VerificationError) as caught:
+                    verifier.confirm_source_modules(root, source=root,
+                        lean=Path(os.environ["PALOMAR_TEST_LEAN"]), environment={},
+                        writable_directories=[], readable_paths=[], executable_paths=[], tools={})
+                self.assertEqual(caught.exception.code, "source.module_required")
+                self.assertEqual(caught.exception.path, "C.lean")
