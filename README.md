@@ -341,16 +341,18 @@ modules or reduce generated certificates; do not hide them in excluded paths.
 
 The submission form and HTTPS intake check a bounded subset of the submitted
 repository at the exact commit and report incomplete scans explicitly. They do
-not scan separately declared substantive repositories; preparation checks those. The verifier scans the complete
-checkout before builds and confirms headers with Lean's parser before running
+not scan separately declared substantive repositories; preparation checks those.
+The verifier scans the complete checkout before builds and confirms headers with Lean's parser before running
 submitted Lake code. Violations identify the file and require a corrected new
 commit. These rules apply to new ordinary submissions and revisions; metadata
 corrections retain their registered source and are not retroactively rejected.
 
 The preparation report records `source_requirements` and aggregates file diagnostics
 with the other non-executing checks. `source.module_required`,
-`source.file_too_long`, `source.invalid_utf8`, and `source.symlink_not_allowed`
-are submitter failures, not
-retryable infrastructure failures. Execution repeats the scan and batches
+`source.file_too_long`, `source.invalid_utf8`, `source.invalid_header`, and
+`source.symlink_not_allowed` are submitter failures, not retryable infrastructure
+failures. Header confirmation uses Lean's fast import parser; full compilation
+continues to check the selected sources' complete syntax and line endings.
+Execution repeats the scan and batches
 `lean --deps-json` over all submitted source files before candidate Lake code
 runs. `browser-preflight-policy.json` publishes the shared scope and line cap.

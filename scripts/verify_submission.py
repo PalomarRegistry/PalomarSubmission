@@ -1406,7 +1406,10 @@ def prepare(args: argparse.Namespace) -> int:
 
         def add_issue(stage: str, error: BaseException) -> None:
             if isinstance(error, FormalizationValidationError):
-                preflight_issues.extend((stage, issue) for issue in error.issues)
+                preflight_issues.extend(
+                    ("source-requirements" if issue.code.startswith("source.") else stage, issue)
+                    for issue in error.issues
+                )
             else:
                 preflight_issues.append((stage, error))
 

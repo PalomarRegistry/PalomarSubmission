@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -75,6 +76,25 @@ class SourceRequirementsTests(unittest.TestCase):
                 self.assertIn("Remote.lean", str(issue))
                 # Do not link this file into the wrapper repository by mistake.
                 self.assertIsNone(issue.path)
+
+    def test_execution_rejects_legacy_prepared_source_before_candidate_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            checkout = work / "source"
+            (checkout / ".git").mkdir(parents=True)
+            (checkout / "Unused.lean").write_text("import Init\n")
+            output = work / "report.json"
+            output.write_text(json.dumps({"status": "pending", "source": {}, "errors": []}))
+            args = Namespace(output=str(output), work_dir=str(work),
+                             bwrap_source_tag="v0.11.0", workflow_url="https://example.test/run")
+            with mock.patch.object(verifier, "configure_bwrap") as setup:
+                self.assertEqual(verifier.execute(args), 0)
+                setup.assert_not_called()
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["stage"], "source-requirements")
+            self.assertEqual(report["diagnostics"][0]["code"], "source.module_required")
+            self.assertEqual(report["source_requirements"]["files_checked"], 1)
 
     def test_compiler_headers_cover_unused_files_and_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
