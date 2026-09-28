@@ -32,6 +32,7 @@ class BrowserPreflightContractTests(unittest.TestCase):
             policy["limits"],
             {
                 "source_bytes": verify_submission.MAX_SOURCE_BYTES,
+                "lean_source_lines": 10_000,
                 "configuration_bytes": verify_submission.MAX_CONFIGURATION_BYTES,
                 "formalization_bytes": submission_contract.MAX_FORMALIZATION_BYTES,
             },

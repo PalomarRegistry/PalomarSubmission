@@ -312,3 +312,47 @@ that quietly shrinks is invisible in a passing run. Run it with:
 ```sh
 python .github/scripts/check_retired_intake_wording.py
 ```
+
+## Lean source requirements
+
+Every regular `.lean` source file in the submitted repository must use Lean's
+module system and contain at most **10,000 physical lines**. This includes
+Challenge, Solution, unused source files, generated certificates, contained
+projects, and local path dependencies. Ordinary comments may precede the
+`module` header; module documentation belongs after it. Blank and comment lines
+count. LF and CRLF each delimit one line; an unterminated final line counts,
+and a final newline does not add an empty line.
+
+Lake configuration files named `lakefile.lean` are exempt from the module
+header requirement, but still have the 10,000-line cap. Files below `.git` or
+`.lake` are excluded; submitted `.lean` symbolic links are rejected so a link
+cannot hide an oversized source file. Separately declared
+substantive source repositories for thin wrappers receive the same checks.
+External pinned Git dependencies are outside this per-file limit; Lean still
+checks their compatibility with the module system. The existing Challenge
+limits of **1,000 lines and 100 KiB** also apply.
+
+Porting requires more than adding `module`: make the declarations needed by
+other modules public, use `public import` where the public interface needs an
+import, and expose definitions whose bodies clients need. See
+[Lean's modules and visibility reference](https://lean-lang.org/doc/reference/latest/Source-Files-and-Modules/#modules-and-visibility).
+Rebuild and rerun Comparator after porting. Split oversized files into smaller
+modules or reduce generated certificates; do not hide them in excluded paths.
+
+The submission form and HTTPS intake check a bounded subset of the submitted
+repository at the exact commit and report incomplete scans explicitly. They do
+not scan separately declared substantive repositories; preparation checks those.
+The verifier scans the complete checkout before builds and confirms headers with Lean's parser before running
+submitted Lake code. Violations identify the file and require a corrected new
+commit. These rules apply to new ordinary submissions and revisions; metadata
+corrections retain their registered source and are not retroactively rejected.
+
+The preparation report records `source_requirements` and aggregates file diagnostics
+with the other non-executing checks. `source.module_required`,
+`source.file_too_long`, `source.invalid_utf8`, `source.invalid_header`, and
+`source.symlink_not_allowed` are submitter failures, not retryable infrastructure
+failures. Header confirmation uses Lean's fast import parser; full compilation
+continues to check the selected sources' complete syntax and line endings.
+Execution repeats the scan and batches
+`lean --deps-json` over all submitted source files before candidate Lake code
+runs. `browser-preflight-policy.json` publishes the shared scope and line cap.

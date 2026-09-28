@@ -1899,6 +1899,23 @@ review:
                 mock.patch("scripts.verify_submission.workflow_output"),
             ):
                 self.assertEqual(verifier.prepare(args), 0)
+                (fixture / "Unused.lean").write_text("-- legacy source\n" + "--\n" * 10000)
+                bad_work = root / "bad-work"
+                bad_work.mkdir()
+                args.work_dir = str(bad_work)
+                self.assertEqual(verifier.prepare(args), 0)
+                failed = json.loads(output.read_text())
+                self.assertEqual(failed["status"], "fail")
+                self.assertEqual({item["code"] for item in failed["diagnostics"]},
+                                 {"source.module_required", "source.file_too_long"})
+                self.assertTrue(all(item["stage"] == "source-requirements"
+                                    for item in failed["diagnostics"]))
+                # Restore the original report for the existing evidence assertions.
+                (fixture / "Unused.lean").unlink()
+                restored_work = root / "restored-work"
+                restored_work.mkdir()
+                args.work_dir = str(restored_work)
+                self.assertEqual(verifier.prepare(args), 0)
 
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "pending", report["errors"])

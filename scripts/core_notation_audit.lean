@@ -1,3 +1,5 @@
+module
+
 import Lean
 import Lean.Util.FoldConsts
 
@@ -113,7 +115,7 @@ private def printSignature (env : Environment) (name : Name) : IO String := do
   let (signature, _) ← (PrettyPrinter.ppSignature name).run' {} |>.toIO ctx state
   return signature.fmt.pretty
 
-unsafe def main (args : List String) : IO UInt32 := do
+public unsafe def main (args : List String) : IO UInt32 := do
   let sysroot ← findSysroot
   initSearchPath sysroot
   let (moduleName, requests) ← parseRequests args
