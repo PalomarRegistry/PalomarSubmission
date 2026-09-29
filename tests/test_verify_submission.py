@@ -4837,7 +4837,7 @@ class LakeComparatorTests(unittest.TestCase):
                 verifier.protected_kernels(tools),
                 {
                     "nanoda": [str(prefix / "bin" / "nanoda_bin")],
-                    "con-ron": [str(prefix / "bin" / "con-ron")],
+                    "con-ron": [str(prefix / "bin" / "con-ron"), "--jobs=2"],
                 },
             )
             (prefix / "bin" / "con-ron").unlink()
@@ -4983,7 +4983,7 @@ class LakeComparatorTests(unittest.TestCase):
                 "permitted_axioms": ["propext"],
                 "enable_nanoda": True,
             }))
-            kernels = {"nanoda": ["/toolchain/bin/nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron"]}
+            kernels = {"nanoda": ["/toolchain/bin/nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron", "--jobs=2"]}
             written = verifier.protected_comparator_config(source, root / "protected.json", kernels=kernels)
             config = json.loads(written.read_text())
             self.assertEqual(

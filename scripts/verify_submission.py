@@ -65,6 +65,11 @@ STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 # toolchain bundles for it. They are the binaries `--paranoid` would run;
 # Palomar makes no kernel version choice of its own.
 PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
+# con-ron otherwise starts one worker per hardware thread (at most 16), and each
+# worker can hold several GiB on a large export, so the same export fits a
+# 4-thread runner and exhausts a 16-thread one. A fixed count keeps the verdict
+# independent of the runner, as `lake comparator` already does for NanoDa.
+CON_RON_JOBS = 2
 # The toolchain binaries a verification runs, each digested into the record.
 TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")
 BWRAP_SOURCE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
@@ -5020,7 +5025,9 @@ def tool_digests(tools: dict[str, Path], bwrap: Path) -> dict[str, str]:
 
 def protected_kernels(tools: dict[str, Path]) -> dict[str, list[str]]:
     """The external kernels the protected configuration registers, by name."""
-    return {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
+    kernels = {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
+    kernels["con-ron"].append(f"--jobs={CON_RON_JOBS}")
+    return kernels
 
 
 def primitive_targets(lean_prefix: Path) -> list[str]:
