@@ -1054,9 +1054,13 @@ package proofwidgets where
                 )
             )
             (source / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
-            (project / "lake-manifest.json").write_text(
-                json.dumps({"version": "1.2.0", "packages": []})
-            )
+            (source / "lean/bridge").mkdir(parents=True)
+            (project / "lake-manifest.json").write_text(json.dumps({
+                "version": "1.2.0", "packages": [{
+                    "name": "Bridge", "type": "path", "dir": "../lean/bridge",
+                    "inherited": False,
+                }],
+            }))
 
             external = root / "external"
             external.write_bytes(b"do not replace")
@@ -1105,6 +1109,12 @@ package proofwidgets where
             self.assertEqual(render_workspace.solution.read_bytes(), b"accepted solution")
             self.assertEqual(render_workspace.comparator.read_bytes(), comparator.read_bytes())
             self.assertEqual(render_workspace.challenge_module, "accepted.Task")
+            merged = json.loads((render_workspace.project / "lake-manifest.json").read_text())
+            local = next(p for p in merged["packages"] if p["name"] == "Bridge")
+            self.assertEqual(local["dir"], "../lean/bridge")
+            self.assertTrue((render_workspace.project / local["dir"]).is_dir())
+            self.assertIn('path = "../lean/bridge"',
+                          (render_workspace.project / "lakefile.toml").read_text())
 
     def test_workspace_preserves_nested_module_identity_and_private_source(self):
         with tempfile.TemporaryDirectory() as directory:
