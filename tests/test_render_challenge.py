@@ -23,6 +23,7 @@ from scripts.render_challenge import (
     PreparedMathlibCacheTool,
     artifact_manifest,
     compatible_verso_toolchain,
+    contained_manifest_paths,
     core_notation_audit_lean_path,
     download_mathlib_cache,
     execute,
@@ -1053,9 +1054,13 @@ package proofwidgets where
                 )
             )
             (source / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
-            (project / "lake-manifest.json").write_text(
-                json.dumps({"version": "1.2.0", "packages": []})
-            )
+            (source / "lean/bridge").mkdir(parents=True)
+            (project / "lake-manifest.json").write_text(json.dumps({
+                "version": "1.2.0", "packages": [{
+                    "name": "Bridge", "type": "path", "dir": "../lean/bridge",
+                    "inherited": False,
+                }],
+            }))
 
             external = root / "external"
             external.write_bytes(b"do not replace")
@@ -1104,6 +1109,12 @@ package proofwidgets where
             self.assertEqual(render_workspace.solution.read_bytes(), b"accepted solution")
             self.assertEqual(render_workspace.comparator.read_bytes(), comparator.read_bytes())
             self.assertEqual(render_workspace.challenge_module, "accepted.Task")
+            merged = json.loads((render_workspace.project / "lake-manifest.json").read_text())
+            local = next(p for p in merged["packages"] if p["name"] == "Bridge")
+            self.assertEqual(local["dir"], "../lean/bridge")
+            self.assertTrue((render_workspace.project / local["dir"]).is_dir())
+            self.assertIn('path = "../lean/bridge"',
+                          (render_workspace.project / "lakefile.toml").read_text())
 
     def test_workspace_preserves_nested_module_identity_and_private_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1800,6 +1811,59 @@ end Audit.Task
         }
         with self.assertRaisesRegex(VerificationError, "conflicts"):
             merge_renderer_manifest(source, verso, "3" * 40)
+
+    def test_nested_repository_path_packages_survive_renderer_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "hunts/ainta_seven_point/lean-four-point"
+            project.mkdir(parents=True)
+            packages = []
+            for name, target in [("Zeta23Bridge", "lean/bridge"), ("Zeta23", "lean/vendor/zeta23")]:
+                (root / target).mkdir(parents=True)
+                packages.append({"name": name, "type": "path", "dir": "../../../" + target,
+                                 "inherited": name == "Zeta23"})
+            source = {"packages": packages}
+            merged = merge_renderer_manifest(source, {"packages": []}, "3" * 40,
+                                             source_project=project, source_repository=root)
+            local = [p for p in merged["packages"] if p["type"] == "path"]
+            self.assertEqual({p["dir"] for p in local}, {p["dir"] for p in packages})
+            copied = root.parent / (root.name + "-copy")
+            try:
+                shutil.copytree(root, copied)
+                copied_project = copied / project.relative_to(root)
+                for package in local:
+                    self.assertTrue((copied_project / package["dir"]).resolve().is_relative_to(copied))
+                    self.assertTrue((copied_project / package["dir"]).is_dir())
+            finally:
+                shutil.rmtree(copied, ignore_errors=True)
+
+    def test_renderer_path_packages_reject_repository_and_symlink_escapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory).resolve()
+            root = outer / "repo"
+            project = root / "project"
+            project.mkdir(parents=True)
+            outside = outer / "outside"
+            outside.mkdir()
+            (project / "escape").symlink_to(outside, target_is_directory=True)
+            for path in ["../../outside", "escape", str(outside), "missing"]:
+                with self.subTest(path=path), self.assertRaises(VerificationError):
+                    merge_renderer_manifest({"packages": [{"name": "bad", "type": "path", "dir": path}]},
+                                            {"packages": []}, "3" * 40,
+                                            source_project=project, source_repository=root)
+
+    def test_renderer_rebases_contained_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            project.mkdir()
+            target = root / "library"
+            target.mkdir()
+            (project / "alias").symlink_to(target, target_is_directory=True)
+            manifest = {"packages": [{"name": "local", "type": "path", "dir": "alias"}]}
+            normalized = contained_manifest_paths(manifest, project, root)
+            self.assertEqual(normalized["packages"][0]["dir"], "../library")
+            self.assertEqual(manifest["packages"][0]["dir"], "alias")
 
     def test_trusted_lakefile_uses_only_direct_exact_dependencies(self):
         manifest = {
