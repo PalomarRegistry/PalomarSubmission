@@ -4814,6 +4814,66 @@ class DispatchWorkflowTests(unittest.TestCase):
         )
 
 
+class ModuleRootShadowingTests(unittest.TestCase):
+    """A dependency with the Challenge's top-level directory captures its source in Verso."""
+
+    def source(self, root: Path, *, dependency_entries: tuple[str, ...]) -> Path:
+        source = root / "source"
+        (source / "comparators").mkdir(parents=True)
+        (source / "comparators" / "AxisymmetricChallenge.lean").write_text("theorem t : True := trivial\n")
+        (source / "lake-manifest.json").write_text(json.dumps({
+            "version": 7,
+            "packages": [{
+                "name": "CKN", "type": "git",
+                "url": "https://github.com/example/ckn", "rev": "1" * 40, "inherited": False,
+            }],
+        }))
+        package = source / ".lake" / "packages" / "CKN"
+        for entry in dependency_entries:
+            if entry.endswith(".lean"):
+                package.mkdir(parents=True, exist_ok=True)
+                (package / entry).write_text("")
+            else:
+                (package / entry).mkdir(parents=True, exist_ok=True)
+        package.mkdir(parents=True, exist_ok=True)
+        return source
+
+    def test_a_dependency_with_the_challenges_directory_is_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.source(Path(directory), dependency_entries=("comparators",))
+            packages = verifier.manifest_packages(source)
+            self.assertEqual(
+                verifier.shadowing_dependency(
+                    "comparators.AxisymmetricChallenge", packages, source=source, checkout=source
+                ),
+                "CKN",
+            )
+            error = verifier.module_root_shadowed("comparators.AxisymmetricChallenge", "CKN")
+            self.assertEqual(error.code, "challenge.module_root_shadowed")
+            self.assertEqual(error.owner, "submitter")
+            self.assertIn("'comparators'", str(error))
+            self.assertIn("CKN", str(error))
+
+    def test_a_single_file_module_is_shadowed_by_a_same_named_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.source(Path(directory), dependency_entries=("Challenge.lean",))
+            packages = verifier.manifest_packages(source)
+            self.assertEqual(
+                verifier.shadowing_dependency("Challenge", packages, source=source, checkout=source),
+                "CKN",
+            )
+
+    def test_an_unrelated_dependency_layout_is_not_a_shadow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.source(Path(directory), dependency_entries=("CKN", "Comparators"))
+            packages = verifier.manifest_packages(source)
+            self.assertIsNone(
+                verifier.shadowing_dependency(
+                    "comparators.AxisymmetricChallenge", packages, source=source, checkout=source
+                )
+            )
+
+
 class LakeComparatorTests(unittest.TestCase):
     """What Palomar hands `lake comparator`, and what it reads back."""
 

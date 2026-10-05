@@ -2585,6 +2585,25 @@ instPartialOrderElement</span></body></html>'''
             self.assertEqual([item["path"] for item in files], ["nested/artifact-manifest.json"])
 
 
+class LiterateFailureTests(unittest.TestCase):
+    def test_the_line_that_says_why_survives_a_long_search_path_dump(self):
+        import subprocess as sp
+
+        from scripts.render_challenge import literate_failure
+
+        roots = ", ".join(f"/work/.lake/packages/dep{n}" for n in range(300))
+        proc = sp.CompletedProcess(
+            ["lake"], 1,
+            "info: stderr:\nerror finding highlighted code: Failed to load comparators.X from ["
+            + roots + "]\nerror: external command 'verso-literate' exited with code 2\n",
+            "warning: manifest out of date\nerror: build failed\n",
+        )
+        error = literate_failure(proc)
+        self.assertIn("Failed to load comparators.X", error.detail)
+        self.assertIn("exited with code 2", error.detail)
+        self.assertLess(len(error.detail), 5_000)
+
+
 class CallSignatureTests(unittest.TestCase):
     """Every helper the render path calls, called the way it calls it.
 

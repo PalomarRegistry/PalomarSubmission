@@ -164,6 +164,13 @@ formalization.yaml
 LICENSE                   # repository root, and only there
 ```
 
+The Challenge module's top-level directory (or file, for a single-component
+module name) must not share its name with a top-level entry of any dependency:
+Lean resolves a module's source by that first component and Lake lists
+dependencies first, so Verso would look for the Challenge inside the
+dependency. Verification refuses such a layout with
+`challenge.module_root_shadowed` before any review is spent on it.
+
 Only `formalization.yaml` is required under that exact name. The Challenge and
 Solution paths follow from `challenge_module` and `solution_module` in the
 Comparator configuration, and the configuration's own path is the one the
