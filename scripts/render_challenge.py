@@ -884,7 +884,40 @@ def prepare(args: argparse.Namespace) -> int:
     return 0
 
 
-def manifest_package_key(package: dict[str, Any]) -> tuple[str, str, str]:
+def contained_manifest_paths(manifest: dict[str, Any], project: Path, repository: Path) -> dict[str, Any]:
+    """Canonicalize local dependencies while retaining the repository layout."""
+    root = repository.resolve(strict=True)
+    owner = project.resolve(strict=True)
+    if not owner.is_relative_to(root):
+        raise VerificationError("renderer project escapes its repository")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        raise VerificationError("Lake manifest packages must be arrays")
+    result = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise VerificationError("Lake manifest package entries must be objects")
+        candidate = dict(package)
+        if candidate.get("type") == "path":
+            directory = candidate.get("dir")
+            if (
+                not isinstance(directory, str) or not directory
+                or Path(directory).is_absolute() or "\\" in directory
+            ):
+                raise VerificationError("renderer manifest has an invalid path package")
+            try:
+                target = (owner / directory).resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise VerificationError("renderer path package cannot be resolved") from error
+            if not target.is_relative_to(root) or not target.is_dir():
+                raise VerificationError("renderer path package escapes its repository or is not a directory")
+            # Canonical relative paths also rebase contained absolute symlinks.
+            candidate["dir"] = Path(os.path.relpath(target, owner)).as_posix()
+        result.append(candidate)
+    return {**manifest, "packages": result}
+
+
+def manifest_package_key(package: dict[str, Any], *, contained_paths: bool = False) -> tuple[str, str, str]:
     package_type = str(package.get("type") or "")
     if package_type == "git":
         repository = github_repository(str(package.get("url") or ""))
@@ -894,7 +927,10 @@ def manifest_package_key(package: dict[str, Any]) -> tuple[str, str, str]:
         return package_type, repository.lower(), revision
     if package_type == "path":
         directory = str(package.get("dir") or "")
-        if not directory or Path(directory).is_absolute() or ".." in Path(directory).parts:
+        if (
+            not directory or Path(directory).is_absolute()
+            or (not contained_paths and ".." in Path(directory).parts)
+        ):
             raise VerificationError(f"renderer manifest has an invalid path package: {package.get('name')!r}")
         return package_type, directory, ""
     raise VerificationError(f"renderer manifest has an unsupported package type: {package_type!r}")
@@ -904,14 +940,19 @@ def merge_renderer_manifest(
     source_manifest: dict[str, Any],
     verso_manifest: dict[str, Any],
     verso_commit: str,
+    *,
+    source_project: Path | None = None,
+    source_repository: Path | None = None,
 ) -> dict[str, Any]:
+    if source_project is not None and source_repository is not None:
+        source_manifest = contained_manifest_paths(source_manifest, source_project, source_repository)
     source_packages = source_manifest.get("packages")
     verso_packages = verso_manifest.get("packages")
     if not isinstance(source_packages, list) or not isinstance(verso_packages, list):
         raise VerificationError("Lake manifest packages must be arrays")
     merged: dict[str, dict[str, Any]] = {}
 
-    def add(package: dict[str, Any], *, inherited: bool) -> None:
+    def add(package: dict[str, Any], *, inherited: bool, contained_paths: bool = False) -> None:
         if not isinstance(package, dict):
             raise VerificationError("Lake manifest package entries must be objects")
         name = lake_package_name(package.get("name"))
@@ -919,15 +960,20 @@ def merge_renderer_manifest(
             raise VerificationError(f"invalid Lake package name: {package.get('name')!r}")
         candidate = dict(package)
         candidate["inherited"] = inherited
-        identity = manifest_package_key(candidate)
+        identity = manifest_package_key(candidate, contained_paths=contained_paths)
         previous = merged.get(name)
-        if previous is not None and manifest_package_key(previous) != identity:
+        if (previous is not None
+            and manifest_package_key(previous, contained_paths=source_project is not None) != identity
+        ):
             raise VerificationError(f"Verso dependency conflicts with submitted package {name!r}")
         if previous is None:
             merged[name] = candidate
 
     for package in source_packages:
-        add(package, inherited=bool(package.get("inherited")))
+        add(
+            package, inherited=bool(package.get("inherited")),
+            contained_paths=source_project is not None and source_repository is not None,
+        )
     for package in verso_packages:
         add(package, inherited=True)
     add(
@@ -1100,7 +1146,9 @@ def prepare_workspace(
         else source.resolve()
     )
     ensure_lake_manifest(source_project, source)
-    source_manifest = load_json_object(source_project / "lake-manifest.json")
+    source_manifest = contained_manifest_paths(
+        load_json_object(source_project / "lake-manifest.json"), source_project, source
+    )
     challenge_relative = normalized_repository_path(
         accepted_paths.challenge_path, "render challenge_path"
     )
@@ -1159,7 +1207,10 @@ def prepare_workspace(
                 ),
             )
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
-        merged_manifest = merge_renderer_manifest(source_manifest, verso_manifest, verso_commit)
+        merged_manifest = merge_renderer_manifest(
+            source_manifest, verso_manifest, verso_commit,
+            source_project=source_project, source_repository=source,
+        )
     finally:
         shutil.rmtree(verso_probe, ignore_errors=True)
     # Preserve hostile symlinks rather than dereferencing them in the trusted
