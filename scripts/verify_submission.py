@@ -2187,6 +2187,44 @@ def package_checkout(source: Path, package: dict[str, str], *, checkout: Path) -
     ).resolve()
 
 
+def shadowing_dependency(
+    module: str, packages: list[dict[str, str]], *, source: Path, checkout: Path
+) -> str | None:
+    """The dependency whose top-level directory would capture `module`'s source.
+
+    Lean finds a module's source by the first component of its name: the first
+    search-path root that holds a directory or file of that name wins, and
+    Lake lists dependencies before the root package. A Challenge whose
+    top-level directory shares its name with a dependency's is therefore looked
+    for inside the dependency, where it is not, when Verso renders it. The
+    verifier's own phases never use that lookup (Lake builds and `leanexport`
+    go by the library configuration), so this is checked here, where the
+    submitter still has a cheap correction, instead of surfacing after review
+    as a render that fails the same way every time.
+    """
+    root = module.split(".", 1)[0]
+    for package in packages:
+        directory = package_checkout(source, package, checkout=checkout)
+        if (directory / root).is_dir() or (directory / f"{root}.lean").is_file():
+            return package["name"]
+    return None
+
+
+def module_root_shadowed(module: str, dependency: str) -> VerificationError:
+    root = module.split(".", 1)[0]
+    return VerificationError(
+        f"the Challenge module's top-level name {root!r} is also a top-level entry of the "
+        f"dependency {dependency!r}, which is where Verso would look for its source",
+        code="challenge.module_root_shadowed",
+        field="comparator.challenge_module",
+        next_action=(
+            "Move the Challenge module under a top-level directory that no dependency also has "
+            "at its top level, update challenge_module in comparator.json, commit the change, "
+            "and make a new submission."
+        ),
+    )
+
+
 def check_mathlib_toolchain(
     source: Path, packages: list[dict[str, str]], *, checkout: Path,
     project_toolchain: str, project_toolchain_path: str,
@@ -5970,6 +6008,11 @@ def execute(args: argparse.Namespace) -> int:
         report["stage"] = "dependency-provenance"
         guarded_write()
         packages = manifest_packages(source)
+        shadow = shadowing_dependency(
+            report["comparator"]["challenge_module"], packages, source=source, checkout=checkout
+        )
+        if shadow is not None:
+            raise module_root_shadowed(report["comparator"]["challenge_module"], shadow)
         allowlist = package_allowlist(
             source, packages, checkout=checkout, base_env=env
         )

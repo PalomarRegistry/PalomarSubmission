@@ -43,6 +43,7 @@ from scripts.verify_submission import (  # noqa: E402
     LeanHeader,
     bwrap_source_tag_from_installer,
     clone_commit,
+    comparator_failure_excerpt,
     configure_bwrap,
     ensure_lake_manifest,
     github_repository,
@@ -50,6 +51,7 @@ from scripts.verify_submission import (  # noqa: E402
     load_comparator_config,
     manifest_packages,
     materialize_packages,
+    module_root_shadowed,
     module_source_suffix,
     normalized_repository_path,
     now,
@@ -63,6 +65,7 @@ from scripts.verify_submission import (  # noqa: E402
     run,
     sandboxed_run,
     sha256,
+    shadowing_dependency,
     stage_trusted_closure,
     supported_toolchain,
     system_readable_paths,
@@ -609,6 +612,21 @@ class ComparedDeclarationsNotRendered(VerificationError):
         )
         self.declarations = tuple(bounded)
         self.total = count
+
+
+def literate_failure(proc: subprocess.CompletedProcess[str]) -> VerificationError:
+    """Say why Verso's literate build stopped, in the lines that say so.
+
+    A failed `lake build Challenge:literate` can end its output with several
+    kilobytes of search-path listing, which is what a bounded tail of the log
+    shows and the one line that matters does not; the lines that name an
+    error are carried instead, each bounded.
+    """
+    log = (proc.stdout + "\n" + proc.stderr).strip()
+    return VerificationError(
+        f"lake build Challenge:literate failed ({proc.returncode})",
+        detail=comparator_failure_excerpt(log),
+    )
 
 
 def compared_declarations_not_rendered(declarations: list[str]) -> VerificationError:
@@ -2995,7 +3013,18 @@ def execute(args: argparse.Namespace) -> int:
 
         report["stage"] = "literate"
         write_json(output, report)
-        sandboxed_run(
+        # The verifier refuses this at verification; the renderer repeats the
+        # check because a render reaches here from older reports too, and the
+        # failure it prevents would otherwise read as Palomar's.
+        shadow = shadowing_dependency(
+            render_workspace.challenge_module,
+            manifest_packages(workspace),
+            source=workspace,
+            checkout=workspace_checkout,
+        )
+        if shadow is not None:
+            raise module_root_shadowed(render_workspace.challenge_module, shadow)
+        literate = sandboxed_run(
             [str(lake), "build", "Challenge:literate"],
             cwd=workspace,
             environment=env,
@@ -3006,7 +3035,10 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
             timeout=BUILD_TIMEOUT_SECONDS,
             resource_properties=RESOURCE_PROPERTIES,
+            check=False,
         )
+        if literate.returncode:
+            raise literate_failure(literate)
         if tree_bytes(workspace / ".lake", stop_after=MAX_RENDER_WORK_BYTES) > MAX_RENDER_WORK_BYTES:
             raise VerificationError("render workspace exceeds the disk cap")
         validate_build_metadata_files(writable_files)
