@@ -65,10 +65,13 @@ STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 # toolchain bundles for it. They are the binaries `--paranoid` would run;
 # Palomar makes no kernel version choice of its own.
 PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
-# con-ron otherwise starts one worker per hardware thread (at most 16), and each
-# worker can hold several GiB on a large export, so the same export fits a
-# 4-thread runner and exhausts a 16-thread one. A fixed count keeps the verdict
-# independent of the runner, as `lake comparator` already does for NanoDa.
+# #157/#158 measured the 734 MB li2 export at about 10.7 GiB for the
+# comparator phase with 2 workers, versus 17.6 GiB with 4. Two leaves
+# headroom on the 16 GB standard runner; total runtime was about
+# 25 minutes at either count. Use the same count across runner profiles.
+# Revisit this limit when runner memory capacity or con-ron's memory/
+# parallelism implementation changes. Compare peak memory and runtime
+# on representative large exports before changing it.
 CON_RON_JOBS = 2
 # The toolchain binaries a verification runs, each digested into the record.
 TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")

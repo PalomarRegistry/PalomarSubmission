@@ -4983,7 +4983,10 @@ class LakeComparatorTests(unittest.TestCase):
                 "permitted_axioms": ["propext"],
                 "enable_nanoda": True,
             }))
-            kernels = {"nanoda": ["/toolchain/bin/nanoda_bin"], "con-ron": ["/toolchain/bin/con-ron", "--jobs=2"]}
+            kernels = {
+                "nanoda": ["/toolchain/bin/nanoda_bin"],
+                "con-ron": ["/toolchain/bin/con-ron", "--jobs=2"],
+            }
             written = verifier.protected_comparator_config(source, root / "protected.json", kernels=kernels)
             config = json.loads(written.read_text())
             self.assertEqual(
