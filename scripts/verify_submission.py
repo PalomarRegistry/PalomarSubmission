@@ -65,6 +65,14 @@ STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 # toolchain bundles for it. They are the binaries `--paranoid` would run;
 # Palomar makes no kernel version choice of its own.
 PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
+# #157/#158 measured the 734 MB li2 export at about 10.7 GiB for the
+# comparator phase with 2 workers, versus 17.6 GiB with 4. Two leaves
+# headroom on the 16 GB standard runner; total runtime was about
+# 25 minutes at either count. Use the same count across runner profiles.
+# Revisit this limit when runner memory capacity or con-ron's memory/
+# parallelism implementation changes. Compare peak memory and runtime
+# on representative large exports before changing it.
+CON_RON_JOBS = 2
 # The toolchain binaries a verification runs, each digested into the record.
 TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")
 BWRAP_SOURCE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
@@ -5020,7 +5028,9 @@ def tool_digests(tools: dict[str, Path], bwrap: Path) -> dict[str, str]:
 
 def protected_kernels(tools: dict[str, Path]) -> dict[str, list[str]]:
     """The external kernels the protected configuration registers, by name."""
-    return {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
+    kernels = {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
+    kernels["con-ron"].append(f"--jobs={CON_RON_JOBS}")
+    return kernels
 
 
 def primitive_targets(lean_prefix: Path) -> list[str]:
