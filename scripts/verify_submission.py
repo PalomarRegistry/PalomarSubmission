@@ -4961,6 +4961,72 @@ def comparator_failure_excerpt(log: str, *, limit: int = 10) -> str:
     return "\n".join(line[:400] for line in chosen)
 
 
+MAX_BUILD_ERROR_EXCERPTS = 20
+MAX_BUILD_ERROR_EXCERPT_CHARS = 8_000
+LEAN_BUILD_ERROR_RE = re.compile(
+    r"^error: (?P<path>.+?\.lean):(?P<line>[0-9]{1,10}):(?P<column>[0-9]{1,10}):",
+    re.MULTILINE,
+)
+BUILD_MESSAGE_BOUNDARY_RE = re.compile(
+    r"^(?:(?:error|warning|info|trace): |[✔✖⚠ℹ] \[)", re.MULTILINE,
+)
+
+
+def solution_build_error_excerpts(log: str) -> dict[str, Any]:
+    """Keep multiline Lean errors even when later output displaces the log tail.
+
+    These excerpts are evidence only; the process exit code determines failure.
+    Each block ends at the next diagnostic or Lake progress line. Report both
+    size truncation and errors omitted by the count limit explicitly.
+    """
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", log)
+    errors = []
+    count = 0
+    for match in LEAN_BUILD_ERROR_RE.finditer(plain):
+        count += 1
+        if len(errors) >= MAX_BUILD_ERROR_EXCERPTS:
+            continue
+        boundary = BUILD_MESSAGE_BOUNDARY_RE.search(plain, match.end())
+        end = boundary.start() if boundary else len(plain)
+        excerpt_end = min(end, match.start() + MAX_BUILD_ERROR_EXCERPT_CHARS)
+        errors.append({
+            "location": {
+                "path": match.group("path")[:400],
+                "line": int(match.group("line")),
+                "column": int(match.group("column")),
+            },
+            "excerpt": plain[match.start():excerpt_end].rstrip(),
+            "truncated": excerpt_end < end,
+        })
+    return {
+        "schema_version": 1,
+        "errors": errors,
+        "omitted_error_count": count - len(errors),
+        "output_truncated": bool(re.search(r"^<output truncated; omitted [0-9]+ bytes>", log, re.MULTILINE)),
+    }
+
+
+def solution_build_failure(
+    report: dict[str, Any], proc: subprocess.CompletedProcess[str],
+) -> VerificationError | None:
+    """Record bounded build evidence without changing failure ownership."""
+    log = (proc.stdout + "\n" + proc.stderr).strip()
+    report["build_log_tail"] = log[-20_000:]
+    if proc.returncode == 0:
+        return None
+    excerpts = solution_build_error_excerpts(log)
+    report["build_error_excerpts"] = excerpts
+    detail = "\n\n".join(error["excerpt"] for error in excerpts["errors"])
+    return VerificationError(
+        f"the Solution build failed (exit {proc.returncode})",
+        code="solution.build_failed",
+        detail=detail or comparator_failure_excerpt(log),
+        next_action=(
+            "Correct the Lean failure quoted above, commit it, and make a new submission."
+        ),
+    )
+
+
 def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
     """Say what a `lake comparator` exit means, and whose problem it is.
 
@@ -6236,21 +6302,9 @@ def execute(args: argparse.Namespace) -> int:
             timeout=EXECUTION_BUDGET_SECONDS,
             check=False,
         )
-        log = (proc.stdout + "\n" + proc.stderr).strip()
-        report["build_log_tail"] = log[-20000:]
-        if proc.returncode:
-            return stop(
-                VerificationError(
-                    f"the Solution build failed (exit {proc.returncode})",
-                    code="solution.build_failed",
-                    detail=comparator_failure_excerpt(log),
-                    next_action=(
-                        "Correct the Lean failure quoted above, commit it, and make a new "
-                        "submission."
-                    ),
-                ),
-                "solution-build",
-            )
+        build_error = solution_build_failure(report, proc)
+        if build_error is not None:
+            return stop(build_error, "solution-build")
 
         report["stage"] = "solution-export"
         guarded_write()

@@ -5415,5 +5415,101 @@ class TaxonomyTextTests(unittest.TestCase):
         )
 
 
+class SolutionBuildDiagnosticsTests(unittest.TestCase):
+    ERROR = (
+        "error: Example/Failure.lean:800:6: Type mismatch\n"
+        "  actual_value\nhas type\n  Nat\n"
+        "but is expected to have type\n  Int\n"
+    )
+
+    def failure(self, stdout, stderr=""):
+        report = {}
+        error = verifier.solution_build_failure(
+            report, subprocess.CompletedProcess(["lake", "build"], 1, stdout, stderr)
+        )
+        return report, error
+
+    def test_multiline_errors_survive_later_axiom_output(self):
+        second = self.ERROR.replace("800:6", "3033:2").replace("actual_value", "second_value")
+        log = self.ERROR + "info: next message\n" + second
+        log += "info: printed axioms\n" * 2_000 + "error: build failed\n"
+        report, error = self.failure(log)
+        self.assertNotIn("Type mismatch", report["build_log_tail"])
+        blocks = report["build_error_excerpts"]
+        self.assertEqual(blocks["schema_version"], 1)
+        self.assertEqual(blocks["omitted_error_count"], 0)
+        self.assertEqual([e["location"]["line"] for e in blocks["errors"]], [800, 3033])
+        self.assertEqual(blocks["errors"][0]["excerpt"], self.ERROR.rstrip())
+        self.assertEqual(blocks["errors"][1]["excerpt"], second.rstrip())
+        diagnostic = error.diagnostic("solution-build")
+        self.assertIn("actual_value", diagnostic["explanation"])
+        self.assertIn("is expected to have type\n  Int", diagnostic["explanation"])
+        self.assertEqual(diagnostic["code"], "solution.build_failed")
+        self.assertEqual(diagnostic["owner"], "submitter")
+        self.assertFalse(diagnostic["retryable"])
+
+    def test_blank_lines_inside_the_error_are_kept(self):
+        log = self.ERROR.replace("has type", "\nhas type")
+        report, _ = self.failure(log)
+        self.assertEqual(report["build_error_excerpts"]["errors"][0]["excerpt"], log.rstrip())
+
+    def test_diagnostic_and_progress_lines_end_the_error(self):
+        for boundary in ("info: later", "warning: later", "trace: later", "error: build failed",
+                         "✔ [20/30] Built Other", "✖ [20/30] Building Other"):
+            with self.subTest(boundary=boundary):
+                report, _ = self.failure(self.ERROR + boundary + "\nUnrelated body\n")
+                self.assertEqual(report["build_error_excerpts"]["errors"][0]["excerpt"],
+                                 self.ERROR.rstrip())
+
+    def test_colored_stderr_is_parsed_and_quoted_without_sgr_codes(self):
+        report, _ = self.failure("", "\x1b[31m" + self.ERROR + "\x1b[0m")
+        block = report["build_error_excerpts"]["errors"][0]
+        self.assertEqual(block["location"], {"path": "Example/Failure.lean", "line": 800, "column": 6})
+        self.assertEqual(block["excerpt"], self.ERROR.rstrip())
+
+    def test_count_limit_reports_omitted_errors(self):
+        limit = verifier.MAX_BUILD_ERROR_EXCERPTS
+        log = "".join(self.ERROR.replace("800:6", f"{line}:6") for line in range(limit + 3))
+        report, _ = self.failure(log)
+        blocks = report["build_error_excerpts"]
+        self.assertEqual(len(blocks["errors"]), limit)
+        self.assertEqual(blocks["omitted_error_count"], 3)
+
+    def test_oversized_error_is_explicitly_truncated_without_losing_next_error(self):
+        limit = verifier.MAX_BUILD_ERROR_EXCERPT_CHARS
+        log = self.ERROR + "x" * (limit * 2) + "\n" + self.ERROR.replace("800:6", "3033:2")
+        report, _ = self.failure(log)
+        first, second = report["build_error_excerpts"]["errors"]
+        self.assertEqual(len(first["excerpt"]), limit)
+        self.assertTrue(first["truncated"])
+        self.assertFalse(second["truncated"])
+        self.assertIn("is expected to have type", second["excerpt"])
+
+    def test_unlocated_error_keeps_the_existing_fallback(self):
+        report, error = self.failure("error: dependency could not be fetched")
+        self.assertEqual(report["build_error_excerpts"]["errors"], [])
+        self.assertIn("dependency could not be fetched", error.diagnostic("solution-build")["explanation"])
+
+    def test_truncated_process_output_is_explicit(self):
+        report, _ = self.failure("<output truncated; omitted 12345 bytes>\n" + self.ERROR)
+        self.assertTrue(report["build_error_excerpts"]["output_truncated"])
+        report, _ = self.failure(self.ERROR)
+        self.assertFalse(report["build_error_excerpts"]["output_truncated"])
+
+    def test_unbounded_numeric_location_does_not_crash_reporting(self):
+        report, error = self.failure(self.ERROR.replace("800:6", "9" * 5_000 + ":6"))
+        self.assertEqual(report["build_error_excerpts"]["errors"], [])
+        self.assertEqual(error.code, "solution.build_failed")
+
+    def test_successful_report_and_exit_code_are_unchanged(self):
+        report = {}
+        log = self.ERROR + "success\n"
+        error = verifier.solution_build_failure(
+            report, subprocess.CompletedProcess(["lake", "build"], 0, log, "")
+        )
+        self.assertIsNone(error)
+        self.assertEqual(report, {"build_log_tail": log.strip()[-20_000:]})
+
+
 if __name__ == "__main__":
     unittest.main()

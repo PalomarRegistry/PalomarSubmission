@@ -82,6 +82,13 @@ next action, retryability, optional location, and—only for fields in
 [`formalization-profile.json`](formalization-profile.json)—whether a constrained
 metadata repair may be offered.
 
+Failed Solution builds also carry `build_error_excerpts`: multiline Lean errors
+with their locations, limited to 20 blocks of 8,000 characters each. Each block
+marks truncation, and the report counts captured errors omitted by the block limit
+and records when the process output itself was truncated. This
+preserves the expected and actual types when later output displaces the log tail.
+The existing bounded diagnostic explanation and `build_log_tail` remain available.
+
 Every report also labels its broad `phase` as `preparation` or `verification`.
 That producer-owned classification lets downstream services keep preparation
 failures actionable even when they are discovered during a full run.
