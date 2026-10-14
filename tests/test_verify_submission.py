@@ -4313,6 +4313,15 @@ review:
             json.loads(trusted_package_url_map(packages, authoritative[:1])),
             {"mathlib": "https://github.com/leanprover-community/mathlib4.git"},
         )
+        for submitted in (
+            "https://github.com:8443/leanprover-community/mathlib4",
+            "http://github.com/leanprover-community/mathlib4",
+            "https://user:token@github.com/leanprover-community/mathlib4",
+            "https://github.com/leanprover-community/mathlib4?ref=x",
+        ):
+            packages[0]["url"] = submitted
+            with self.assertRaisesRegex(VerificationError, "submitted URL is not a credential-free HTTPS"):
+                trusted_package_url_map(packages, authoritative[:1])
         packages[0]["url"] = "https://github.com/attacker/mathlib4"
         with self.assertRaisesRegex(VerificationError, "does not match"):
             trusted_package_url_map(packages, authoritative[:1])
