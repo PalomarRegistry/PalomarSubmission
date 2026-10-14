@@ -2254,7 +2254,17 @@ def check_mathlib_toolchain(
 def trusted_package_url_map(
     packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
-    """Pin trusted Lake dependency remotes to the authenticated root manifest."""
+    """Pin trusted Lake dependency remotes to the authenticated root manifest.
+
+    The authenticated manifest fixes which repository and revision each trusted
+    package is. The URL handed to Lake is the one the package was materialized
+    from, which is `origin` in its checkout. Lake compares the two literally,
+    so mapping a project that spells Mathlib `.../mathlib4.git` to a root
+    manifest that spells it `.../mathlib4` would make Lake see a changed remote
+    and try to rewrite `.git/config` in a package the sandbox keeps read-only.
+    Both spellings must still be credential-free HTTPS GitHub URLs naming the
+    same canonical repository, at the same revision.
+    """
     _roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     urls: dict[str, str] = {}
@@ -2266,17 +2276,14 @@ def trusted_package_url_map(
         expected_url = expected["url"]
         if actual["url"].startswith("path:") or expected_url.startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        parsed_expected = urlparse(expected_url)
-        if (
-            parsed_expected.scheme != "https"
-            or parsed_expected.netloc.lower() != "github.com"
-            or parsed_expected.username
-            or parsed_expected.password
-            or parsed_expected.query
-            or parsed_expected.fragment
-        ):
+        if not _credential_free_github_url(expected_url):
             raise VerificationError(
                 f"trusted package {name!r} authenticated URL is not a credential-free "
+                "HTTPS GitHub remote"
+            )
+        if not _credential_free_github_url(actual["url"]):
+            raise VerificationError(
+                f"trusted package {name!r} manifest URL is not a credential-free "
                 "HTTPS GitHub remote"
             )
         actual_repository = github_repository(actual["url"])
@@ -2296,8 +2303,20 @@ def trusted_package_url_map(
             )
         if actual["manifest_name"] != expected["manifest_name"]:
             raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
-        urls[expected["manifest_name"]] = expected_url
+        urls[expected["manifest_name"]] = actual["url"]
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
+
+
+def _credential_free_github_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc.lower() == "github.com"
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def package_lake_directories(

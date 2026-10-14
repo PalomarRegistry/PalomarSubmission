@@ -4308,11 +4308,20 @@ review:
         packages[0]["url"] = "path:../mathlib"
         with self.assertRaisesRegex(VerificationError, "may not use a path dependency"):
             trusted_package_url_map(packages, authoritative[:1])
+        # Lake is given the URL the checkout was materialized from, so that a
+        # `.git` spelling difference from the root manifest is not seen as a
+        # changed remote that Lake would rewrite in a read-only package.
         packages[0]["url"] = "https://github.com/leanprover-community/mathlib4.git"
         self.assertEqual(
             json.loads(trusted_package_url_map(packages, authoritative[:1])),
-            {"mathlib": "https://github.com/leanprover-community/mathlib4"},
+            {"mathlib": "https://github.com/leanprover-community/mathlib4.git"},
         )
+        packages[0]["url"] = "https://token@github.com/leanprover-community/mathlib4"
+        with self.assertRaisesRegex(VerificationError, "manifest URL is not a credential-free"):
+            trusted_package_url_map(packages, authoritative[:1])
+        packages[0]["url"] = "http://github.com/leanprover-community/mathlib4"
+        with self.assertRaisesRegex(VerificationError, "manifest URL is not a credential-free"):
+            trusted_package_url_map(packages, authoritative[:1])
         packages[0]["url"] = "https://github.com/attacker/mathlib4"
         with self.assertRaisesRegex(VerificationError, "does not match"):
             trusted_package_url_map(packages, authoritative[:1])
