@@ -4311,7 +4311,7 @@ review:
         packages[0]["url"] = "https://github.com/leanprover-community/mathlib4.git"
         self.assertEqual(
             json.loads(trusted_package_url_map(packages, authoritative[:1])),
-            {"mathlib": "https://github.com/leanprover-community/mathlib4"},
+            {"mathlib": "https://github.com/leanprover-community/mathlib4.git"},
         )
         packages[0]["url"] = "https://github.com/attacker/mathlib4"
         with self.assertRaisesRegex(VerificationError, "does not match"):

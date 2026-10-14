@@ -2254,7 +2254,8 @@ def check_mathlib_toolchain(
 def trusted_package_url_map(
     packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
-    """Pin trusted Lake dependency remotes to the authenticated root manifest."""
+    """Pin trusted Lake dependency remotes to the checkout's own URL, after
+    authenticating its repository and revision against the root manifest."""
     _roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     urls: dict[str, str] = {}
@@ -2296,7 +2297,7 @@ def trusted_package_url_map(
             )
         if actual["manifest_name"] != expected["manifest_name"]:
             raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
-        urls[expected["manifest_name"]] = expected_url
+        urls[expected["manifest_name"]] = actual["url"]
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
 
