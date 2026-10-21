@@ -2254,7 +2254,8 @@ def check_mathlib_toolchain(
 def trusted_package_url_map(
     packages: list[dict[str, str]], authoritative_packages: list[dict[str, str]]
 ) -> str:
-    """Pin trusted Lake dependency remotes to the authenticated root manifest."""
+    """Pin trusted Lake dependency remotes to the checkout's own URL, after
+    authenticating its repository and revision against the root manifest."""
     _roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     urls: dict[str, str] = {}
@@ -2266,19 +2267,22 @@ def trusted_package_url_map(
         expected_url = expected["url"]
         if actual["url"].startswith("path:") or expected_url.startswith("path:"):
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
-        parsed_expected = urlparse(expected_url)
-        if (
-            parsed_expected.scheme != "https"
-            or parsed_expected.netloc.lower() != "github.com"
-            or parsed_expected.username
-            or parsed_expected.password
-            or parsed_expected.query
-            or parsed_expected.fragment
-        ):
-            raise VerificationError(
-                f"trusted package {name!r} authenticated URL is not a credential-free "
-                "HTTPS GitHub remote"
-            )
+        # Lake receives the actual spelling, so it must meet the same exact-host
+        # rule as the authenticated one, not only materialization's looser check.
+        for role, url in (("authenticated", expected_url), ("submitted", actual["url"])):
+            parsed = urlparse(url)
+            if (
+                parsed.scheme != "https"
+                or parsed.netloc.lower() != "github.com"
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise VerificationError(
+                    f"trusted package {name!r} {role} URL is not a credential-free "
+                    "HTTPS GitHub remote"
+                )
         actual_repository = github_repository(actual["url"])
         expected_repository = github_repository(expected_url)
         if (
@@ -2296,7 +2300,7 @@ def trusted_package_url_map(
             )
         if actual["manifest_name"] != expected["manifest_name"]:
             raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
-        urls[expected["manifest_name"]] = expected_url
+        urls[expected["manifest_name"]] = actual["url"]
     return json.dumps(urls, sort_keys=True, separators=(",", ":"))
 
 
