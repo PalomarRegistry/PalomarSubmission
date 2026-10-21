@@ -2,6 +2,11 @@
 
 Mechanical verification for the Palomar registry.
 
+The new-submission toolchain minimum does not prevent rendering an already
+verified historical edition. Registration rendering supports Lean 4.28 and later,
+still binding the exact source, paths, Challenge hash and reviewed comparison.
+It does not admit an older toolchain for a new mechanical verification.
+
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
 The form asks for a public GitHub repository, an immutable commit, the

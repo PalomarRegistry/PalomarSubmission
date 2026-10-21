@@ -1754,6 +1754,16 @@ end Audit.Task
         with self.assertRaisesRegex(VerificationError, "older than the minimum"):
             toolchain_verso_commit("leanprover/lean4:v4.20.0")
 
+    def test_historical_rendering_does_not_lower_the_new_submission_floor(self):
+        from scripts.verify_submission import supported_toolchain
+
+        for toolchain in ("leanprover/lean4:v4.28.0", "leanprover/lean4:v4.29.0", "leanprover/lean4:v4.30.0"):
+            with self.subTest(toolchain=toolchain):
+                with self.assertRaisesRegex(VerificationError, "older than the minimum"):
+                    supported_toolchain(toolchain)
+                with mock.patch("scripts.render_challenge.resolve_release_commit", return_value="1" * 40):
+                    self.assertEqual(toolchain_verso_commit(toolchain), "1" * 40)
+
     def test_a_toolchain_that_is_not_a_lean_release_is_refused(self):
         for value in ("leanprover/lean4:nightly-2026-08-01", "v4.36.0", "leanprover/lean4:v4"):
             with self.subTest(value):

@@ -57,6 +57,7 @@ from scripts.verify_submission import (  # noqa: E402
     now,
     package_checkout,
     parse_lean_header,
+    parse_lean_version,
     promote_staged_lake_state,
     require_protected_paths,
     reset_trusted_lake_state,
@@ -67,9 +68,9 @@ from scripts.verify_submission import (  # noqa: E402
     sha256,
     shadowing_dependency,
     stage_trusted_closure,
-    supported_toolchain,
     system_readable_paths,
     tool_snapshot,
+    toolchain_release_tag,
     tree_size,
     validate_staged_lake_promotions,
     validate_trusted_source_snapshots,
@@ -713,6 +714,26 @@ def append_render_failure(report: dict[str, Any], error: BaseException) -> None:
             report["status"] = "fail"
 
 
+def render_toolchain_tag(toolchain: str) -> str:
+    """Render accepted historical editions independently of today's intake floor.
+
+    Rendering does not admit or mechanically verify a submission. Registration
+    binds its result to the existing verified source and review; new intake
+    continues to use supported_toolchain and the current toolchains.json floor.
+    Lean 4.28 is the oldest renderer covered by the legacy compatibility path.
+    """
+    if parse_lean_version(toolchain, TOOLCHAIN_RE) < (4, 28, 0, 1, 0):
+        raise VerificationError(
+            f"Lean toolchain {toolchain} is older than the minimum historical renderer supports (v4.28.0)",
+            code="palomar.renderer_toolchain_unsupported",
+            owner="palomar",
+            next_action=(
+                "Palomar must arrange rendering for this historical edition; do not change its source."
+            ),
+        )
+    return toolchain_release_tag(toolchain)
+
+
 def toolchain_verso_commit(toolchain: str) -> str:
     """The compatible Verso release for this toolchain, resolved to a commit.
 
@@ -722,7 +743,7 @@ def toolchain_verso_commit(toolchain: str) -> str:
     resolved commit is what gets recorded, so no compatibility table or
     mutable tag is part of the render report's provenance.
     """
-    tag = supported_toolchain(toolchain)
+    tag = render_toolchain_tag(toolchain)
     try:
         return resolve_release_commit(VERSO_REPOSITORY, tag)
     except VerificationError as error:
