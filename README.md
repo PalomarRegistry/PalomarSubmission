@@ -13,10 +13,10 @@ separate workspace. It does not change the accepted Challenge, Solution,
 comparator configuration, or any dependency required by those libraries.
 Conflicts inside the Challenge closure remain errors. Render reports identify
 excluded proof-only packages. Contained parent-relative dependencies in nested
-projects keep the repository layout; only the two source-identical Plausible
+projects keep the repository layout; only the three source-identical Plausible
 revisions explicitly listed in the renderer may share a package pin.
 
-For Challenge rendering on Lean 4.35.0-rc4 and 4.35.0, Palomar backports
+For Challenge rendering on Lean 4.35.0-rc4, 4.35.0, and 4.36.0-rc1, Palomar backports
 [Verso #1043](https://github.com/leanprover/verso/pull/1043) to the exact released
 Verso sources. The complete source digest is checked before applying the
 conditional server/private import-level fix. Render reports record the upstream

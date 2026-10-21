@@ -1888,12 +1888,21 @@ end Audit.Task
             "manifestFile": "lake-manifest.json",
             "inherited": True,
         }
-        alternative = {**shared, "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b"}
-        merged = merge_renderer_manifest(
-            {"packages": [shared]}, {"packages": [alternative]}, "3" * 40
-        )
-        actual = next(package for package in merged["packages"] if package["name"] == "plausible")
-        self.assertEqual(actual, shared)
+        revisions = [
+            "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+            "b7fb2b866d25bd937a2069931f9733197521cb27",
+        ]
+        for source_revision in revisions:
+            for renderer_revision in revisions:
+                with self.subTest(source=source_revision, renderer=renderer_revision):
+                    submitted = {**shared, "rev": source_revision}
+                    alternative = {**shared, "rev": renderer_revision}
+                    merged = merge_renderer_manifest(
+                        {"packages": [submitted]}, {"packages": [alternative]}, "3" * 40
+                    )
+                    actual = next(p for p in merged["packages"] if p["name"] == "plausible")
+                    self.assertEqual(actual, submitted)
 
     def test_manifest_merge_plausible_exception_rejects_other_identity_or_layout(self):
         shared = {
@@ -2845,13 +2854,21 @@ class LiterateFailureTests(unittest.TestCase):
 
 class VersoModuleImportBackportTests(unittest.TestCase):
     def test_only_authenticated_releases_and_source_are_patched(self):
+        for revision in (
+            "01a09f320122475119588526857a07d218aef600",
+            "304b8561790c50222551c937ce02928df0d5b445",
+            "f7a4dc6867f8df27778b2b320763ec9e3b7be070",
+        ):
+            with self.subTest(revision=revision):
+                self.check_authenticated_release(revision)
+
+    def check_authenticated_release(self, revision):
         from scripts.render_challenge import apply_verso_module_import_backport
 
         original = (
             "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
             "(loadExts := true) (arts := importArts)\n"
         ).encode()
-        revision = "304b8561790c50222551c937ce02928df0d5b445"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / ".lake/packages/verso/src/verso-literate/VersoLiterateMain.lean"
@@ -2867,8 +2884,8 @@ class VersoModuleImportBackportTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), original)
             with self.assertRaisesRegex(VerificationError, "differs from"):
                 apply_verso_module_import_backport(root, root, revision)
-            with mock.patch("scripts.render_challenge.VERSO_MODULE_IMPORT_BACKPORT_SOURCE",
-                            hashlib.sha256(original).hexdigest()):
+            with mock.patch.dict("scripts.render_challenge.VERSO_MODULE_IMPORT_BACKPORT_SOURCES",
+                                 {revision: hashlib.sha256(original).hexdigest()}):
                 evidence = apply_verso_module_import_backport(root, root, revision)
                 self.assertIn("if HeaderSyntax.isModule headerStx then .server else .private",
                               target.read_text())
