@@ -81,15 +81,24 @@ from scripts.verify_submission import (  # noqa: E402
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
-# Upstream verso#1043 landed after these releases, on Lean 4.36. Apply its
-# conditional import level to the exact released source until a maintenance
-# release exists. The complete input digest prevents patching different code.
-VERSO_MODULE_IMPORT_BACKPORT_REVISIONS = frozenset({
-    "01a09f320122475119588526857a07d218aef600",
-    "304b8561790c50222551c937ce02928df0d5b445",
-})
-VERSO_MODULE_IMPORT_BACKPORT_SOURCE = "87f5acecca083d83edb8302bec588afacc47832459c5370323c813208530e608"
+# Upstream verso#1043 landed after these releases. Authenticate each released
+# file before backporting its conditional module/server import level.
+VERSO_MODULE_IMPORT_BACKPORT_SOURCES = {
+    "01a09f320122475119588526857a07d218aef600":
+        "87f5acecca083d83edb8302bec588afacc47832459c5370323c813208530e608",
+    "304b8561790c50222551c937ce02928df0d5b445":
+        "87f5acecca083d83edb8302bec588afacc47832459c5370323c813208530e608",
+    "f7a4dc6867f8df27778b2b320763ec9e3b7be070":
+        "4cf5328851f57d3d9b13a00247f9857a7261b69f544a29851dcecf99fead8db1",
+}
 VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM = "cb7dc84d54b69269254bf4390a2e53db49a0e26f"
+# Only CI workflow changes separate these immutable revisions. Preserve the
+# submitted revision because Mathlib's cache checks shared-dependency pins.
+SOURCE_IDENTICAL_PLAUSIBLE_REVISIONS = frozenset({
+    "afc2695efcb6855264d85a45632db1ddc56c8774",
+    "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+    "b7fb2b866d25bd937a2069931f9733197521cb27",
+})
 PROOFWIDGETS_REPOSITORY = "leanprover-community/proofwidgets4"
 PROOFWIDGETS_RELEASE_ARCHIVE = "ProofWidgets4.tar.gz"
 LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256 = {
@@ -1094,17 +1103,11 @@ def merge_renderer_manifest(
         if (previous is not None
             and manifest_package_key(previous, contained_paths=source_project is not None) != identity
         ):
-            # These two immutable Plausible revisions differ only in
-            # .github/workflows/lean_action_ci.yml. Keep the submitted pin:
-            # Mathlib's cache also checks shared-dependency revision equality.
             same_plausible_sources = (
                 name == "plausible"
                 and manifest_package_key(previous)[:2] == identity[:2]
                 == ("git", "leanprover-community/plausible")
-                and {previous["rev"], candidate["rev"]} == {
-                    "afc2695efcb6855264d85a45632db1ddc56c8774",
-                    "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
-                }
+                and {previous["rev"], candidate["rev"]} <= SOURCE_IDENTICAL_PLAUSIBLE_REVISIONS
                 and all(
                     (entry.get("subDir"), entry.get("configFile"), entry.get("manifestFile"))
                     == (None, "lakefile.toml", "lake-manifest.json")
@@ -1445,8 +1448,9 @@ def prepare_workspace(
 def apply_verso_module_import_backport(
     project: Path, checkout: Path, revision: str
 ) -> dict[str, str] | None:
-    """Backport upstream's module/server import fix to two exact releases."""
-    if revision not in VERSO_MODULE_IMPORT_BACKPORT_REVISIONS:
+    """Backport upstream's module/server import fix to authenticated releases."""
+    expected_source = VERSO_MODULE_IMPORT_BACKPORT_SOURCES.get(revision)
+    if expected_source is None:
         return None
     package = next(item for item in manifest_packages(project) if item["name"] == "verso")
     if package["revision"] != revision or github_repository(package["url"]) != VERSO_REPOSITORY:
@@ -1455,7 +1459,7 @@ def apply_verso_module_import_backport(
     relative = PurePosixPath("src/verso-literate/VersoLiterateMain.lean")
     source = resolve_repository_path(package_dir, relative, "Verso backport source", kind="file")
     original = source.read_bytes()
-    if hashlib.sha256(original).hexdigest() != VERSO_MODULE_IMPORT_BACKPORT_SOURCE:
+    if hashlib.sha256(original).hexdigest() != expected_source:
         raise VerificationError("Verso backport source differs from the authenticated release")
     before = (
         "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
@@ -1473,7 +1477,7 @@ def apply_verso_module_import_backport(
     return {
         "upstream_commit": VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM,
         "path": relative.as_posix(),
-        "before_sha256": VERSO_MODULE_IMPORT_BACKPORT_SOURCE,
+        "before_sha256": expected_source,
         "after_sha256": hashlib.sha256(patched).hexdigest(),
     }
 
