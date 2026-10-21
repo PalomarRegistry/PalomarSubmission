@@ -571,3 +571,13 @@ network failures at most three times within a five-minute operation budget and
 the original job allowance. Checksum, authentication, absent revision, and build
 failures do not restart verification. Progress reports preserve semantic stages
 and trusted resource measurements for interrupted runs.
+
+Maintainer-selected con-ron updates are closed entries in
+`checker-revisions.json`, shipped with the trusted verifier. The source compiler,
+Lean kernel, exporter and NanoDa do not change. An update names an official Lean
+release and authenticates both its archive and con-ron executable before any
+candidate code runs. The selected executable is protected and snapshotted with
+the other judge tools; positive and ill-typed negative controls remain mandatory.
+The report records the actual executable digest and independent release
+provenance. Candidate configuration and environment cannot request an update,
+and authentication failure never falls back to an unrecorded checker.

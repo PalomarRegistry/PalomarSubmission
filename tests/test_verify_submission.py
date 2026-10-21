@@ -3049,6 +3049,7 @@ review:
                         "errors": [],
                         "warnings": [],
                         "source": {},
+                        "lean_toolchain": "leanprover/lean4:v4.35.0-rc2",
                     }
                 )
             )
@@ -3090,6 +3091,10 @@ review:
                     ),
                 ),
                 mock.patch("scripts.verify_submission.ensure_lake_manifest", return_value=False),
+                mock.patch(
+                    "scripts.checker_updates.materialize_checker",
+                    side_effect=lambda _toolchain, bundled, _destination: (bundled, {"kind": "bundled"}),
+                ),
                 mock.patch(
                     "scripts.verify_submission.materialize_packages",
                     side_effect=VerificationError("unsafe package name in Lake manifest"),

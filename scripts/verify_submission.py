@@ -63,7 +63,7 @@ STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
 # The checkers `lake comparator` runs besides Lean's own kernel: the name the
 # protected configuration registers each under, and the binary the selected
 # toolchain bundles for it. They are the binaries `--paranoid` would run;
-# Palomar makes no kernel version choice of its own.
+# A maintainer-pinned con-ron update may be selected independently below.
 PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
 # #157/#158 measured the 734 MB li2 export at about 10.7 GiB for the
 # comparator phase with 2 workers, versus 17.6 GiB with 4. Two leaves
@@ -5110,7 +5110,12 @@ def replay_con_ron(
             argv, cwd=scratch,
             environment={name: environment[name] for name in ("LANG", "LC_ALL") if name in environment},
             writable_directories=[], readable_paths=[solution_export.resolve(), *system_readable_paths()],
-            executable_paths=[binary.resolve(), lean_prefix], tools=tools,
+            executable_paths=sorted({binary.resolve(), lean_prefix, *(
+                path.resolve() for path in (
+                    Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"),
+                    Path("/run/current-system/sw"), Path("/nix/store"),
+                ) if path.exists()
+            )}), tools=tools,
             timeout=timeout, check=False,
         )
         result = con_ron_outcome(proc.returncode, proc.stdout, proc.stderr)
@@ -5390,6 +5395,7 @@ def comparator_preflight(
     executable_paths: list[Path],
     tools: dict[Path, str],
     timeout: int,
+    con_ron_binary: Path | None = None,
 ) -> None:
     """Prove the judge pipeline on this runner before any candidate code runs.
 
@@ -5536,13 +5542,13 @@ def comparator_preflight(
                                ("PalomarPreflightIllTyped", "rejected")):
         exported = exports / f"{solution}.export"
         replay = replay_con_ron(
-            binary=lean_prefix / "bin" / "con-ron", solution_export=exported,
+            binary=con_ron_binary or lean_prefix / "bin" / "con-ron", solution_export=exported,
             scratch=root / f"con-ron-{solution}", lean_prefix=lean_prefix,
             environment=environment, tools={**tools, exported.resolve(): sha256(exported)},
             timeout=min(timeout, CON_RON_REPLAY_SECONDS),
         )
         if replay["status"] != expected:
-            raise failure(f"con-ron did not {expected} its control", replay["detail"])
+            raise failure(f"con-ron control expected {expected}, got {replay['status']}", replay["detail"])
 
 
 def protected_lean_path(
@@ -5872,6 +5878,11 @@ def execute(args: argparse.Namespace) -> int:
         bundled = toolchain_tools(lean_prefix)
         if bundled["lean"] != lean or bundled["lake"] != lake:
             raise VerificationError("the Lean and Lake on PATH are not the selected toolchain's")
+        from scripts.checker_updates import materialize_checker
+
+        bundled["con-ron"], report["con_ron_checker"] = materialize_checker(
+            report["lean_toolchain"], bundled["con-ron"], work / "trusted-checker-update"
+        )
         leanexport = bundled["leanexport"]
         # Lean's native kernel and NanoDa are mandatory. Replay con-ron only
         # after that comparison succeeds, so a support/capacity decline cannot
@@ -6016,6 +6027,7 @@ def execute(args: argparse.Namespace) -> int:
             lean_prefix=lean_prefix,
             bwrap=bwrap,
             kernels=kernels,
+            con_ron_binary=bundled["con-ron"],
             primitives=primitives,
             environment=env,
             executable_paths=executable_paths,

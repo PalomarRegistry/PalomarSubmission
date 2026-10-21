@@ -151,8 +151,19 @@ controls must pass before any submission is built. The report's `kernels` lists
 only successful independent kernels; bounded `kernel_attempts` evidence and a
 workflow warning record any decline. Entries display the recorded successful
 kernels, so a declined con-ron is never presented as having verified the proof.
-This avoids making submitters maintain a switch whose value Palomar must
-override for every accepted result.
+Technical Maintainers can update con-ron independently of the source compiler by
+reviewing and merging `checker-revisions.json` in this repository. Each exact
+source toolchain maps to an official Lean release, its release commit, archive
+SHA-256 and executable SHA-256. No submission setting or environment variable
+can select an update. The runner authenticates both digests, stores the executable
+outside candidate-writable paths, and requires the same positive and negative
+controls before using it. Download, authentication or control failures stop
+verification. The initial update uses con-ron from Lean 4.36.0-rc1 for the four
+supported Lean 4.35 releases; Lean, Lake, the exporter and NanoDa stay pinned to
+the submitted source toolchain. `tool_digests` records the executable actually
+run, and `con_ron_checker` records the release provenance in the archived public
+mechanical report. Updating the manifest requires the normal repository review,
+CI and deployment process; it never rewrites an existing entry's evidence.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it

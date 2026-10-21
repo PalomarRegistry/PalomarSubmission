@@ -29,7 +29,9 @@ def retry_delay(attempt: int, headers: str) -> float:
     return (5, 20)[attempt]
 
 
-def download(url: str, destination: Path, digest: str, *, budget: float = 300) -> None:
+def download(
+    url: str, destination: Path, digest: str, *, budget: float = 300, max_bytes: int | None = None
+) -> None:
     if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("trusted downloads require HTTPS and a pinned SHA-256")
     started = os.environ.get("PALOMAR_JOB_STARTED_AT")
@@ -64,6 +66,7 @@ def download(url: str, destination: Path, digest: str, *, budget: float = 300) -
                     str(temporary),
                     "--write-out",
                     "%{http_code}",
+                    *(["--max-filesize", str(max_bytes)] if max_bytes is not None else []),
                     url,
                 ],
                 capture_output=True,
@@ -72,7 +75,11 @@ def download(url: str, destination: Path, digest: str, *, budget: float = 300) -
             )
             status = int(completed.stdout) if completed.stdout.isdigit() else 0
             if completed.returncode == 0 and 200 <= status < 300:
-                if hashlib.sha256(temporary.read_bytes()).hexdigest() != digest:
+                if max_bytes is not None and temporary.stat().st_size > max_bytes:
+                    raise ValueError("trusted download exceeds its size limit")
+                with temporary.open("rb") as downloaded:
+                    actual_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
+                if actual_digest != digest:
                     raise ValueError("trusted download checksum mismatch")
                 temporary.replace(destination)
                 return
