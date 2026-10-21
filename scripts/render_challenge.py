@@ -1023,7 +1023,25 @@ def merge_renderer_manifest(
         if (previous is not None
             and manifest_package_key(previous, contained_paths=source_project is not None) != identity
         ):
-            raise VerificationError(f"Verso dependency conflicts with submitted package {name!r}")
+            # These two immutable Plausible revisions differ only in
+            # .github/workflows/lean_action_ci.yml. Keep the submitted pin:
+            # Mathlib's cache also checks shared-dependency revision equality.
+            same_plausible_sources = (
+                name == "plausible"
+                and manifest_package_key(previous)[:2] == identity[:2]
+                == ("git", "leanprover-community/plausible")
+                and {previous["rev"], candidate["rev"]} == {
+                    "afc2695efcb6855264d85a45632db1ddc56c8774",
+                    "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+                }
+                and all(
+                    (entry.get("subDir"), entry.get("configFile"), entry.get("manifestFile"))
+                    == (None, "lakefile.toml", "lake-manifest.json")
+                    for entry in (previous, candidate)
+                )
+            )
+            if not same_plausible_sources:
+                raise VerificationError(f"Verso dependency conflicts with submitted package {name!r}")
         if previous is None:
             merged[name] = candidate
 

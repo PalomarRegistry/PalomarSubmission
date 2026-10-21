@@ -1875,6 +1875,73 @@ end Audit.Task
             self.assertEqual(normalized["packages"][0]["dir"], "../library")
             self.assertEqual(manifest["packages"][0]["dir"], "alias")
 
+    def test_manifest_merge_preserves_submitted_source_identical_plausible_pin(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "inputRev": "main",
+            "subDir": None,
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+            "inherited": True,
+        }
+        alternative = {**shared, "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b"}
+        merged = merge_renderer_manifest(
+            {"packages": [shared]}, {"packages": [alternative]}, "3" * 40
+        )
+        actual = next(package for package in merged["packages"] if package["name"] == "plausible")
+        self.assertEqual(actual, shared)
+
+    def test_manifest_merge_plausible_exception_rejects_other_identity_or_layout(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "subDir": None,
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+        }
+        alternative = {**shared, "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b"}
+        for field, value in (
+            ("rev", "1" * 40),
+            ("url", "https://github.com/example/plausible"),
+            ("subDir", "other"),
+            ("configFile", "other.toml"),
+            ("manifestFile", "other.json"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(VerificationError, "conflicts"):
+                    merge_renderer_manifest(
+                        {"packages": [shared]}, {"packages": [{**alternative, field: value}]}, "3" * 40
+                    )
+        with self.assertRaisesRegex(VerificationError, "conflicts"):
+            merge_renderer_manifest(
+                {"packages": [{**shared, "name": "other"}]},
+                {"packages": [{**alternative, "name": "other"}]},
+                "3" * 40,
+            )
+
+    def test_manifest_merge_plausible_exception_requires_standard_source_layout(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "subDir": "custom",
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+        }
+        alternative = {
+            **shared,
+            "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+            "subDir": None,
+        }
+        with self.assertRaisesRegex(VerificationError, "conflicts"):
+            merge_renderer_manifest({"packages": [shared]}, {"packages": [alternative]}, "3" * 40)
+
     def test_trusted_lakefile_uses_only_direct_exact_dependencies(self):
         manifest = {
             "packages": [
