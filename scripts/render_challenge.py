@@ -41,7 +41,9 @@ from scripts.verify_submission import (  # noqa: E402
     MAX_SOURCE_BYTES,
     TOOLCHAIN_RE,
     LeanHeader,
+    allowed_roots,
     bwrap_source_tag_from_installer,
+    canonical_repository,
     clone_commit,
     comparator_failure_excerpt,
     configure_bwrap,
@@ -57,6 +59,7 @@ from scripts.verify_submission import (  # noqa: E402
     now,
     package_checkout,
     parse_lean_header,
+    parse_lean_version,
     promote_staged_lake_state,
     require_protected_paths,
     reset_trusted_lake_state,
@@ -67,9 +70,9 @@ from scripts.verify_submission import (  # noqa: E402
     sha256,
     shadowing_dependency,
     stage_trusted_closure,
-    supported_toolchain,
     system_readable_paths,
     tool_snapshot,
+    toolchain_release_tag,
     tree_size,
     validate_staged_lake_promotions,
     validate_trusted_source_snapshots,
@@ -732,6 +735,26 @@ def append_render_failure(report: dict[str, Any], error: BaseException) -> None:
             report["status"] = "fail"
 
 
+def render_toolchain_tag(toolchain: str) -> str:
+    """Render accepted historical editions independently of today's intake floor.
+
+    Rendering does not admit or mechanically verify a submission. Registration
+    binds its result to the existing verified source and review; new intake
+    continues to use supported_toolchain and the current toolchains.json floor.
+    Lean 4.28 is the oldest renderer covered by the legacy compatibility path.
+    """
+    if parse_lean_version(toolchain, TOOLCHAIN_RE) < (4, 28, 0, 1, 0):
+        raise VerificationError(
+            f"Lean toolchain {toolchain} is older than the minimum historical renderer supports (v4.28.0)",
+            code="palomar.renderer_toolchain_unsupported",
+            owner="palomar",
+            next_action=(
+                "Palomar must arrange rendering for this historical edition; do not change its source."
+            ),
+        )
+    return toolchain_release_tag(toolchain)
+
+
 def toolchain_verso_commit(toolchain: str) -> str:
     """The compatible Verso release for this toolchain, resolved to a commit.
 
@@ -741,7 +764,7 @@ def toolchain_verso_commit(toolchain: str) -> str:
     resolved commit is what gets recorded, so no compatibility table or
     mutable tag is part of the render report's provenance.
     """
-    tag = supported_toolchain(toolchain)
+    tag = render_toolchain_tag(toolchain)
     try:
         return resolve_release_commit(VERSO_REPOSITORY, tag)
     except VerificationError as error:
@@ -921,7 +944,40 @@ def prepare(args: argparse.Namespace) -> int:
     return 0
 
 
-def manifest_package_key(package: dict[str, Any]) -> tuple[str, str, str]:
+def contained_manifest_paths(manifest: dict[str, Any], project: Path, repository: Path) -> dict[str, Any]:
+    """Canonicalize local dependencies while retaining the repository layout."""
+    root = repository.resolve(strict=True)
+    owner = project.resolve(strict=True)
+    if not owner.is_relative_to(root):
+        raise VerificationError("renderer project escapes its repository")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        raise VerificationError("Lake manifest packages must be arrays")
+    result = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise VerificationError("Lake manifest package entries must be objects")
+        candidate = dict(package)
+        if candidate.get("type") == "path":
+            directory = candidate.get("dir")
+            if (
+                not isinstance(directory, str) or not directory
+                or Path(directory).is_absolute() or "\\" in directory
+            ):
+                raise VerificationError("renderer manifest has an invalid path package")
+            try:
+                target = (owner / directory).resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise VerificationError("renderer path package cannot be resolved") from error
+            if not target.is_relative_to(root) or not target.is_dir():
+                raise VerificationError("renderer path package escapes its repository or is not a directory")
+            # Canonical relative paths also rebase contained absolute symlinks.
+            candidate["dir"] = Path(os.path.relpath(target, owner)).as_posix()
+        result.append(candidate)
+    return {**manifest, "packages": result}
+
+
+def manifest_package_key(package: dict[str, Any], *, contained_paths: bool = False) -> tuple[str, str, str]:
     package_type = str(package.get("type") or "")
     if package_type == "git":
         repository = github_repository(str(package.get("url") or ""))
@@ -931,24 +987,101 @@ def manifest_package_key(package: dict[str, Any]) -> tuple[str, str, str]:
         return package_type, repository.lower(), revision
     if package_type == "path":
         directory = str(package.get("dir") or "")
-        if not directory or Path(directory).is_absolute() or ".." in Path(directory).parts:
+        if (
+            not directory or Path(directory).is_absolute()
+            or (not contained_paths and ".." in Path(directory).parts)
+        ):
             raise VerificationError(f"renderer manifest has an invalid path package: {package.get('name')!r}")
         return package_type, directory, ""
     raise VerificationError(f"renderer manifest has an unsupported package type: {package_type!r}")
+
+
+class RendererDependencyConflict(VerificationError):
+    """A proof dependency conflicts with the renderer's own tool closure."""
+
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(
+            message, code="palomar.renderer_dependency_conflict", owner="palomar",
+            retryable=False, detail=detail,
+            next_action="Palomar must select a compatible renderer; do not change the accepted source.",
+        )
+
+
+def challenge_only_manifest(
+    source_manifest: dict[str, Any], work: Path,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Retain canonical Challenge libraries and their exact pinned closures.
+
+    Mechanical verification permits Challenge imports only from these roots
+    and their closures. Solution-only packages need not enter the renderer.
+    This fallback never substitutes a package required by a trusted root.
+    """
+    packages = source_manifest["packages"]
+    by_name = {lake_package_name(package.get("name")): package for package in packages}
+    if None in by_name or len(by_name) != len(packages):
+        raise RendererDependencyConflict("invalid or duplicate source package in renderer manifest")
+    _roots, aliases = allowed_roots()
+    selected = {}
+    for package in packages:
+        kind, repository, revision = manifest_package_key(package, contained_paths=True)
+        root = aliases.get(repository) if kind == "git" else None
+        if root is None:
+            continue
+        selected[lake_package_name(package["name"])] = {**package, "inherited": False}
+        # Read the exact canonical root's manifest as data; no submitted Lake
+        # configuration executes to choose dependencies. clone_commit checks
+        # that the fetched object is the requested immutable revision.
+        with tempfile.TemporaryDirectory(prefix="challenge-library-", dir=work) as raw:
+            checkout = Path(raw) / "source"
+            try:
+                clone_commit(f"https://github.com/{root['repository']}", revision, checkout)
+            except VerificationError as error:
+                raise VerificationError(
+                    "Palomar could not fetch the canonical Challenge library manifest",
+                    code="provider.renderer_dependency_lookup_failed", owner="provider",
+                    retryable=True, detail=str(error)[:1500],
+                    next_action="Do not change the repository. Retry the same commit later.",
+                ) from error
+            # Use the verifier's normal name/repository/revision parser and
+            # its empty-closure behavior when the pinned root has no manifest.
+            expected_packages = manifest_packages(checkout)
+        for expected in expected_packages:
+            name = expected["name"]
+            actual = by_name.get(name)
+            actual_key = manifest_package_key(actual) if actual is not None else None
+            if actual_key is not None and actual_key[0] == "git":
+                actual_key = ("git", canonical_repository(actual_key[1], aliases).lower(), actual_key[2])
+            expected_key = (
+                "git", canonical_repository(expected["repository"], aliases).lower(), expected["revision"]
+            )
+            if actual_key != expected_key:
+                raise RendererDependencyConflict(
+                    f"renderer source substitutes a pinned Challenge dependency: {name!r}"
+                )
+            selected.setdefault(name, actual)
+    # An accepted Challenge with no canonical library can use only the
+    # toolchain. Its Solution-only dependency set is entirely unnecessary.
+    excluded = tuple(sorted(set(by_name) - set(selected)))
+    return {**source_manifest, "packages": [selected[name] for name in sorted(selected)]}, excluded
 
 
 def merge_renderer_manifest(
     source_manifest: dict[str, Any],
     verso_manifest: dict[str, Any],
     verso_commit: str,
+    *,
+    source_project: Path | None = None,
+    source_repository: Path | None = None,
 ) -> dict[str, Any]:
+    if source_project is not None and source_repository is not None:
+        source_manifest = contained_manifest_paths(source_manifest, source_project, source_repository)
     source_packages = source_manifest.get("packages")
     verso_packages = verso_manifest.get("packages")
     if not isinstance(source_packages, list) or not isinstance(verso_packages, list):
         raise VerificationError("Lake manifest packages must be arrays")
     merged: dict[str, dict[str, Any]] = {}
 
-    def add(package: dict[str, Any], *, inherited: bool) -> None:
+    def add(package: dict[str, Any], *, inherited: bool, contained_paths: bool = False) -> None:
         if not isinstance(package, dict):
             raise VerificationError("Lake manifest package entries must be objects")
         name = lake_package_name(package.get("name"))
@@ -956,15 +1089,40 @@ def merge_renderer_manifest(
             raise VerificationError(f"invalid Lake package name: {package.get('name')!r}")
         candidate = dict(package)
         candidate["inherited"] = inherited
-        identity = manifest_package_key(candidate)
+        identity = manifest_package_key(candidate, contained_paths=contained_paths)
         previous = merged.get(name)
-        if previous is not None and manifest_package_key(previous) != identity:
-            raise VerificationError(f"Verso dependency conflicts with submitted package {name!r}")
+        if (previous is not None
+            and manifest_package_key(previous, contained_paths=source_project is not None) != identity
+        ):
+            # These two immutable Plausible revisions differ only in
+            # .github/workflows/lean_action_ci.yml. Keep the submitted pin:
+            # Mathlib's cache also checks shared-dependency revision equality.
+            same_plausible_sources = (
+                name == "plausible"
+                and manifest_package_key(previous)[:2] == identity[:2]
+                == ("git", "leanprover-community/plausible")
+                and {previous["rev"], candidate["rev"]} == {
+                    "afc2695efcb6855264d85a45632db1ddc56c8774",
+                    "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+                }
+                and all(
+                    (entry.get("subDir"), entry.get("configFile"), entry.get("manifestFile"))
+                    == (None, "lakefile.toml", "lake-manifest.json")
+                    for entry in (previous, candidate)
+                )
+            )
+            if not same_plausible_sources:
+                raise RendererDependencyConflict(
+                    f"Verso dependency conflicts with submitted package {name!r}"
+                )
         if previous is None:
             merged[name] = candidate
 
     for package in source_packages:
-        add(package, inherited=bool(package.get("inherited")))
+        add(
+            package, inherited=bool(package.get("inherited")),
+            contained_paths=source_project is not None and source_repository is not None,
+        )
     for package in verso_packages:
         add(package, inherited=True)
     add(
@@ -1110,6 +1268,7 @@ class RenderWorkspace:
     solution: Path
     comparator: Path
     challenge_module: str
+    excluded_proof_packages: tuple[str, ...] = ()
 
 
 def prepare_workspace(
@@ -1137,7 +1296,9 @@ def prepare_workspace(
         else source.resolve()
     )
     ensure_lake_manifest(source_project, source)
-    source_manifest = load_json_object(source_project / "lake-manifest.json")
+    source_manifest = contained_manifest_paths(
+        load_json_object(source_project / "lake-manifest.json"), source_project, source
+    )
     challenge_relative = normalized_repository_path(
         accepted_paths.challenge_path, "render challenge_path"
     )
@@ -1182,6 +1343,7 @@ def prepare_workspace(
         source, toolchain_relative, "render lean_toolchain_path", kind="file"
     )
     verso_probe = work / "verso-manifest"
+    excluded_proof_packages: tuple[str, ...] = ()
     clone_commit(f"https://github.com/{VERSO_REPOSITORY}", verso_commit, verso_probe)
     try:
         verso_toolchain = (verso_probe / "lean-toolchain").read_text(encoding="utf-8").strip()
@@ -1196,7 +1358,25 @@ def prepare_workspace(
                 ),
             )
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
-        merged_manifest = merge_renderer_manifest(source_manifest, verso_manifest, verso_commit)
+        try:
+            merged_manifest = merge_renderer_manifest(
+                source_manifest, verso_manifest, verso_commit,
+                source_project=source_project, source_repository=source,
+            )
+        except RendererDependencyConflict as conflict:
+            try:
+                source_manifest, excluded_proof_packages = challenge_only_manifest(source_manifest, work)
+                # Any conflict inside the canonical Challenge closure still fails.
+                merged_manifest = merge_renderer_manifest(
+                    source_manifest, verso_manifest, verso_commit,
+                    source_project=source_project, source_repository=source,
+                )
+            except VerificationError as error:
+                raise VerificationError(
+                    str(error), code=error.code, owner=error.owner, retryable=error.retryable,
+                    next_action=error.next_action,
+                    detail=f"Original conflict: {conflict}\n\n{error.detail or error}"[:2000],
+                ) from error
     finally:
         shutil.rmtree(verso_probe, ignore_errors=True)
     # Preserve hostile symlinks rather than dereferencing them in the trusted
@@ -1258,6 +1438,7 @@ def prepare_workspace(
         solution=workspace_solution,
         comparator=workspace_comparator,
         challenge_module=challenge_module,
+        excluded_proof_packages=excluded_proof_packages,
     )
 
 
@@ -2939,6 +3120,8 @@ def execute(args: argparse.Namespace) -> int:
             prepared.source.paths,
         )
         workspace = render_workspace.project
+        if render_workspace.excluded_proof_packages:
+            report["excluded_proof_packages"] = list(render_workspace.excluded_proof_packages)
 
         bwrap = configure_bwrap(Path(args.bwrap))
         renderer = Path(__file__).resolve(strict=True)

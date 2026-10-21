@@ -22,7 +22,9 @@ from scripts.render_challenge import (
     VERSO_RUNTIME,
     PreparedMathlibCacheTool,
     artifact_manifest,
+    challenge_only_manifest,
     compatible_verso_toolchain,
+    contained_manifest_paths,
     core_notation_audit_lean_path,
     download_mathlib_cache,
     execute,
@@ -1053,9 +1055,13 @@ package proofwidgets where
                 )
             )
             (source / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
-            (project / "lake-manifest.json").write_text(
-                json.dumps({"version": "1.2.0", "packages": []})
-            )
+            (source / "lean/bridge").mkdir(parents=True)
+            (project / "lake-manifest.json").write_text(json.dumps({
+                "version": "1.2.0", "packages": [{
+                    "name": "Bridge", "type": "path", "dir": "../lean/bridge",
+                    "inherited": False,
+                }],
+            }))
 
             external = root / "external"
             external.write_bytes(b"do not replace")
@@ -1104,6 +1110,12 @@ package proofwidgets where
             self.assertEqual(render_workspace.solution.read_bytes(), b"accepted solution")
             self.assertEqual(render_workspace.comparator.read_bytes(), comparator.read_bytes())
             self.assertEqual(render_workspace.challenge_module, "accepted.Task")
+            merged = json.loads((render_workspace.project / "lake-manifest.json").read_text())
+            local = next(p for p in merged["packages"] if p["name"] == "Bridge")
+            self.assertEqual(local["dir"], "../lean/bridge")
+            self.assertTrue((render_workspace.project / local["dir"]).is_dir())
+            self.assertIn('path = "../lean/bridge"',
+                          (render_workspace.project / "lakefile.toml").read_text())
 
     def test_workspace_preserves_nested_module_identity_and_private_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1754,6 +1766,16 @@ end Audit.Task
         with self.assertRaisesRegex(VerificationError, "older than the minimum"):
             toolchain_verso_commit("leanprover/lean4:v4.20.0")
 
+    def test_historical_rendering_does_not_lower_the_new_submission_floor(self):
+        from scripts.verify_submission import supported_toolchain
+
+        for toolchain in ("leanprover/lean4:v4.28.0", "leanprover/lean4:v4.29.0", "leanprover/lean4:v4.30.0"):
+            with self.subTest(toolchain=toolchain):
+                with self.assertRaisesRegex(VerificationError, "older than the minimum"):
+                    supported_toolchain(toolchain)
+                with mock.patch("scripts.render_challenge.resolve_release_commit", return_value="1" * 40):
+                    self.assertEqual(toolchain_verso_commit(toolchain), "1" * 40)
+
     def test_a_toolchain_that_is_not_a_lean_release_is_refused(self):
         for value in ("leanprover/lean4:nightly-2026-08-01", "v4.36.0", "leanprover/lean4:v4"):
             with self.subTest(value):
@@ -1800,6 +1822,212 @@ end Audit.Task
         }
         with self.assertRaisesRegex(VerificationError, "conflicts"):
             merge_renderer_manifest(source, verso, "3" * 40)
+
+    def test_nested_repository_path_packages_survive_renderer_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "hunts/ainta_seven_point/lean-four-point"
+            project.mkdir(parents=True)
+            packages = []
+            for name, target in [("Zeta23Bridge", "lean/bridge"), ("Zeta23", "lean/vendor/zeta23")]:
+                (root / target).mkdir(parents=True)
+                packages.append({"name": name, "type": "path", "dir": "../../../" + target,
+                                 "inherited": name == "Zeta23"})
+            source = {"packages": packages}
+            merged = merge_renderer_manifest(source, {"packages": []}, "3" * 40,
+                                             source_project=project, source_repository=root)
+            local = [p for p in merged["packages"] if p["type"] == "path"]
+            self.assertEqual({p["dir"] for p in local}, {p["dir"] for p in packages})
+            copied = root.parent / (root.name + "-copy")
+            try:
+                shutil.copytree(root, copied)
+                copied_project = copied / project.relative_to(root)
+                for package in local:
+                    self.assertTrue((copied_project / package["dir"]).resolve().is_relative_to(copied))
+                    self.assertTrue((copied_project / package["dir"]).is_dir())
+            finally:
+                shutil.rmtree(copied, ignore_errors=True)
+
+    def test_renderer_path_packages_reject_repository_and_symlink_escapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory).resolve()
+            root = outer / "repo"
+            project = root / "project"
+            project.mkdir(parents=True)
+            outside = outer / "outside"
+            outside.mkdir()
+            (project / "escape").symlink_to(outside, target_is_directory=True)
+            for path in ["../../outside", "escape", str(outside), "missing"]:
+                with self.subTest(path=path), self.assertRaises(VerificationError):
+                    merge_renderer_manifest({"packages": [{"name": "bad", "type": "path", "dir": path}]},
+                                            {"packages": []}, "3" * 40,
+                                            source_project=project, source_repository=root)
+
+    def test_renderer_rebases_contained_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            project.mkdir()
+            target = root / "library"
+            target.mkdir()
+            (project / "alias").symlink_to(target, target_is_directory=True)
+            manifest = {"packages": [{"name": "local", "type": "path", "dir": "alias"}]}
+            normalized = contained_manifest_paths(manifest, project, root)
+            self.assertEqual(normalized["packages"][0]["dir"], "../library")
+            self.assertEqual(manifest["packages"][0]["dir"], "alias")
+
+    def test_manifest_merge_preserves_submitted_source_identical_plausible_pin(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "inputRev": "main",
+            "subDir": None,
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+            "inherited": True,
+        }
+        alternative = {**shared, "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b"}
+        merged = merge_renderer_manifest(
+            {"packages": [shared]}, {"packages": [alternative]}, "3" * 40
+        )
+        actual = next(package for package in merged["packages"] if package["name"] == "plausible")
+        self.assertEqual(actual, shared)
+
+    def test_manifest_merge_plausible_exception_rejects_other_identity_or_layout(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "subDir": None,
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+        }
+        alternative = {**shared, "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b"}
+        for field, value in (
+            ("rev", "1" * 40),
+            ("url", "https://github.com/example/plausible"),
+            ("subDir", "other"),
+            ("configFile", "other.toml"),
+            ("manifestFile", "other.json"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(VerificationError, "conflicts"):
+                    merge_renderer_manifest(
+                        {"packages": [shared]}, {"packages": [{**alternative, field: value}]}, "3" * 40
+                    )
+        with self.assertRaisesRegex(VerificationError, "conflicts"):
+            merge_renderer_manifest(
+                {"packages": [{**shared, "name": "other"}]},
+                {"packages": [{**alternative, "name": "other"}]},
+                "3" * 40,
+            )
+
+    def test_manifest_merge_plausible_exception_requires_standard_source_layout(self):
+        shared = {
+            "name": "plausible",
+            "type": "git",
+            "url": "https://github.com/leanprover-community/plausible",
+            "rev": "afc2695efcb6855264d85a45632db1ddc56c8774",
+            "subDir": "custom",
+            "configFile": "lakefile.toml",
+            "manifestFile": "lake-manifest.json",
+        }
+        alternative = {
+            **shared,
+            "rev": "fb13df72ecefd8ddbf9291021d7f33a8673eb57b",
+            "subDir": None,
+        }
+        with self.assertRaisesRegex(VerificationError, "conflicts"):
+            merge_renderer_manifest({"packages": [shared]}, {"packages": [alternative]}, "3" * 40)
+
+    def test_challenge_manifest_excludes_proof_only_forks_without_changing_trusted_pins(self):
+        def package(name, repository, rev, **extra):
+            return {"name": name, "type": "git", "url": f"https://github.com/{repository}",
+                    "rev": rev * 40, "subDir": None, "configFile": "lakefile.toml",
+                    "manifestFile": "lake-manifest.json", "inherited": True, **extra}
+
+        root = package("mathlib", "leanprover-community/mathlib4", "1")
+        dependency = package("batteries", "leanprover-community/batteries", "2")
+        fork = package("subverso", "candidate/subverso", "3", inherited=False)
+        official = package("subverso", "leanprover/subverso", "4")
+        source = {"packages": [root, dependency, fork]}
+
+        def canonical_manifest(url, revision, destination):
+            self.assertEqual(url, "https://github.com/leanprover-community/mathlib4")
+            self.assertEqual(revision, "1" * 40)
+            destination.mkdir(parents=True)
+            (destination / "lake-manifest.json").write_text(json.dumps({"packages": [dependency]}))
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch(
+            "scripts.render_challenge.clone_commit", side_effect=canonical_manifest
+        ):
+            reduced, excluded = challenge_only_manifest(source, Path(raw))
+            self.assertEqual(excluded, ("subverso",))
+            by_name = {entry["name"]: entry for entry in reduced["packages"]}
+            self.assertEqual(by_name["batteries"], dependency)
+            self.assertEqual(by_name["mathlib"], {**root, "inherited": False})
+            merged = merge_renderer_manifest(reduced, {"packages": [official]}, "5" * 40)
+            self.assertEqual(next(p for p in merged["packages"] if p["name"] == "subverso"), official)
+            self.assertEqual(source["packages"], [root, dependency, fork])
+            # A renderer conflict in the Challenge closure still blocks.
+            conflicting = {**dependency, "rev": "6" * 40}
+            with self.assertRaisesRegex(VerificationError, "conflicts") as error:
+                merge_renderer_manifest(reduced, {"packages": [conflicting]}, "5" * 40)
+            self.assertEqual(error.exception.code, "palomar.renderer_dependency_conflict")
+            self.assertEqual(error.exception.owner, "palomar")
+            self.assertFalse(error.exception.retryable)
+            for bad in ([], [{**dependency, "rev": "6" * 40}]):
+                with self.subTest(bad=bad), self.assertRaisesRegex(VerificationError, "substitutes"):
+                    challenge_only_manifest({"packages": [root, fork, *bad]}, Path(raw))
+
+    def test_workspace_isolates_conflicting_proof_packages_and_promotes_the_challenge_root(self):
+        for has_library in (True, False):
+            with self.subTest(has_library=has_library), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                work = root / "work"
+                source.mkdir()
+                work.mkdir()
+                (source / "Challenge.lean").write_bytes(b"accepted Challenge bytes")
+                (source / "Solution.lean").write_bytes(b"accepted Solution bytes")
+                config = {"challenge_module": "Challenge", "solution_module": "Solution",
+                          "theorem_names": ["headline"], "definition_names": [], "permitted_axioms": []}
+                (source / "comparator.json").write_text(json.dumps(config))
+                (source / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
+                library = {"name": "mathlib", "type": "git", "rev": "1" * 40, "inherited": True,
+                           "url": "https://github.com/leanprover-community/mathlib4"}
+                fork = {"name": "subverso", "type": "git", "rev": "2" * 40, "inherited": False,
+                        "url": "https://github.com/candidate/subverso"}
+                renderer_package = {**fork, "url": "https://github.com/leanprover/subverso", "rev": "3" * 40}
+                manifest = {"packages": [library, fork] if has_library else [fork]}
+                original = json.dumps(manifest).encode()
+                (source / "lake-manifest.json").write_bytes(original)
+
+                def clone(url, _revision, destination, package=renderer_package):
+                    destination.mkdir(parents=True)
+                    (destination / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
+                    (destination / "lake-manifest.json").write_text(json.dumps({
+                        "packages": [package] if url.endswith("/verso") else []
+                    }))
+
+                with mock.patch("scripts.render_challenge.clone_commit", side_effect=clone):
+                    result = prepare_workspace(
+                        source, root / "workspace", "4" * 40, work,
+                        AcceptedRenderPaths("", "Challenge.lean", "Solution.lean", "comparator.json",
+                                            "lakefile.toml", "lean-toolchain"),
+                    )
+                self.assertEqual(result.excluded_proof_packages, ("subverso",))
+                for filename in ("Challenge.lean", "Solution.lean", "comparator.json"):
+                    self.assertEqual(
+                        (result.project / filename).read_bytes(), (source / filename).read_bytes()
+                    )
+                self.assertEqual((source / "lake-manifest.json").read_bytes(), original)
+                lakefile = (result.project / "lakefile.toml").read_text()
+                self.assertNotIn("candidate/subverso", lakefile)
+                self.assertEqual('name = "mathlib"' in lakefile, has_library)
 
     def test_trusted_lakefile_uses_only_direct_exact_dependencies(self):
         manifest = {
