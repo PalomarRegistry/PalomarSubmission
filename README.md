@@ -26,7 +26,7 @@ declarations is verified and reviewed as a whole. CI then:
    canonical Challenge and the built Solution with the toolchain's exporter,
    and has `lake comparator` judge the two exports, permitting at most the
    three standard axioms and running the Solution through Lean's kernel and
-   the toolchain's bundled NanoDa and con-ron kernels;
+   the toolchain's bundled NanoDa kernel, then independently attempts con-ron replay;
 6. publishes a machine-readable report as a run artifact.
 
 Verification is dispatched by the submission server, not started from this
@@ -139,8 +139,18 @@ The optional `enable_nanoda` field in a submitted `comparator.json` is retained
 for upstream compatibility but is deliberately non-authoritative: missing,
 false, or any other JSON value does not disable or block verification, and a
 submitted `external_kernels` is rejected. The trusted runner writes a separate
-protected configuration that registers the toolchain's bundled NanoDa and
-con-ron binaries as external kernels and passes that copy to `lake comparator`.
+protected configuration that registers the toolchain's bundled NanoDa kernel
+and passes that copy to `lake comparator`. Lean and NanoDa must both accept.
+The runner then replays the exact protected Solution export with con-ron in a
+separate sandbox. A recognized inductive-support decline, fuel exhaustion, or
+authenticated capacity limit can leave that advisory replay inconclusive;
+an actual rejection, unknown error, or non-standard axiom still blocks acceptance.
+The replay has a 30-minute cap inside the existing shared verification budget,
+reserving a minute for report finalization. Both positive and ill-typed negative
+controls must pass before any submission is built. The report's `kernels` lists
+only successful independent kernels; bounded `kernel_attempts` evidence and a
+workflow warning record any decline. Entries display the recorded successful
+kernels, so a declined con-ron is never presented as having verified the proof.
 This avoids making submitters maintain a switch whose value Palomar must
 override for every accepted result.
 

@@ -73,6 +73,7 @@ PROTECTED_KERNELS = (("nanoda", "nanoda_bin"), ("con-ron", "con-ron"))
 # parallelism implementation changes. Compare peak memory and runtime
 # on representative large exports before changing it.
 CON_RON_JOBS = 2
+CON_RON_REPLAY_SECONDS = 30 * 60
 # The toolchain binaries a verification runs, each digested into the record.
 TOOLCHAIN_TOOLS = ("lake", "lean", "leanexport", "leanchecker", "nanoda_bin", "con-ron")
 BWRAP_SOURCE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
@@ -4976,6 +4977,17 @@ def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
     if returncode == 0:
         return None
     excerpt = comparator_failure_excerpt(log)
+    if returncode == 1 and re.search(r"^error: Illegal axiom detected: ", log, re.MULTILINE):
+        return VerificationError(
+            "the Solution depends on an axiom Palomar does not permit",
+            code="comparator.illegal_axiom",
+            detail=excerpt,
+            next_action=(
+                "Remove the disallowed axiom from the selected proof's dependencies. "
+                "For native_decide, use a kernel-checked proof such as decide +kernel "
+                "where feasible, then commit and resubmit."
+            ),
+        )
     if returncode == 2:
         return VerificationError(
             "lake comparator could not run",
@@ -5073,6 +5085,41 @@ def protected_kernels(tools: dict[str, Path]) -> dict[str, list[str]]:
     kernels = {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
     kernels["con-ron"].append(f"--jobs={CON_RON_JOBS}")
     return kernels
+
+
+def replay_con_ron(
+    *, binary: Path, solution_export: Path, scratch: Path, lean_prefix: Path,
+    environment: dict[str, str], tools: dict[Path, str], timeout: int,
+) -> dict[str, Any]:
+    """Replay only the protected export after mandatory Lean/NanoDa acceptance.
+
+    This process has no candidate sources, writable paths or nested namespace
+    permission. Its own capacity failure can decline; a mandatory phase's
+    resource failure must still leave verification inconclusive.
+    """
+    from scripts.kernel_outcomes import con_ron_outcome
+
+    scratch.mkdir(parents=True)
+    argv = [str(binary), f"--jobs={CON_RON_JOBS}", "--verified", str(solution_export)]
+    try:
+        if _EXECUTION_DEADLINE is not None:
+            timeout = min(timeout, int(_EXECUTION_DEADLINE - _MONOTONIC()) - 60)
+        if timeout < 1:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        proc = sandboxed_run(
+            argv, cwd=scratch,
+            environment={name: environment[name] for name in ("LANG", "LC_ALL") if name in environment},
+            writable_directories=[], readable_paths=[solution_export.resolve(), *system_readable_paths()],
+            executable_paths=[binary.resolve(), lean_prefix], tools=tools,
+            timeout=timeout, check=False,
+        )
+        result = con_ron_outcome(proc.returncode, proc.stdout, proc.stderr)
+    except (subprocess.TimeoutExpired, ResourceExhausted) as error:
+        result = {"name": "con-ron", "status": "declined", "reason": "capacity",
+                  "exit_code": None, "detail": str(error)[:2000]}
+    result["argv"] = argv[:-1]
+    result["budget_seconds"] = max(0, timeout)
+    return result
 
 
 def primitive_targets(lean_prefix: Path) -> list[str]:
@@ -5367,6 +5414,10 @@ def comparator_preflight(
         "PalomarPreflightChallenge": "theorem palomar_preflight : True := trivial\n",
         "PalomarPreflightSolution": "theorem palomar_preflight : True := trivial\n",
         "PalomarPreflightWrong": "theorem palomar_preflight : True ∧ True := ⟨trivial, trivial⟩\n",
+        "PalomarPreflightIllegalAxiom": (
+            "axiom palomar_forbidden : True\n"
+            "theorem palomar_preflight : True := palomar_forbidden\n"
+        ),
     }
     config = {
         "challenge_module": "PalomarPreflightChallenge",
@@ -5445,6 +5496,7 @@ def comparator_preflight(
         ("PalomarPreflightSolution", 0),
         ("PalomarPreflightWrong", 1),
         ("PalomarPreflightIllTyped", 1),
+        ("PalomarPreflightIllegalAxiom", 1),
     ):
         scratch = root / f"judge-{solution}"
         proc = judge_exports(
@@ -5463,7 +5515,11 @@ def comparator_preflight(
         verdict = comparator_verdict(proc.returncode, log)
         if expected == 0 and (verdict is not None or "Your solution is okay!" not in log):
             raise failure("a matching export pair was not accepted", log)
-        if expected == 1 and (verdict is None or verdict.code != "comparator.rejected"):
+        expected_rejection = (
+            "comparator.illegal_axiom"
+            if solution == "PalomarPreflightIllegalAxiom" else "comparator.rejected"
+        )
+        if expected == 1 and (verdict is None or verdict.code != expected_rejection):
             raise failure(f"{solution} was not found against", log)
         if solution == "PalomarPreflightWrong" and (
             "Challenge and solution theorem statement do not match" not in log
@@ -5473,6 +5529,20 @@ def comparator_preflight(
             COMPARATOR_LEAN_KERNEL not in COMPARATOR_KERNEL_REJECTED_RE.findall(log)
         ):
             raise failure("an ill-typed proof was not refused by Lean's kernel", log)
+    # An advisory checker must still accept the positive control and reject
+    # the ill-typed negative control. A broken or incompatible executable must
+    # never silently decline every real submission.
+    for solution, expected in (("PalomarPreflightSolution", "accepted"),
+                               ("PalomarPreflightIllTyped", "rejected")):
+        exported = exports / f"{solution}.export"
+        replay = replay_con_ron(
+            binary=lean_prefix / "bin" / "con-ron", solution_export=exported,
+            scratch=root / f"con-ron-{solution}", lean_prefix=lean_prefix,
+            environment=environment, tools={**tools, exported.resolve(): sha256(exported)},
+            timeout=min(timeout, CON_RON_REPLAY_SECONDS),
+        )
+        if replay["status"] != expected:
+            raise failure(f"con-ron did not {expected} its control", replay["detail"])
 
 
 def protected_lean_path(
@@ -5803,10 +5873,13 @@ def execute(args: argparse.Namespace) -> int:
         if bundled["lean"] != lean or bundled["lake"] != lake:
             raise VerificationError("the Lean and Lake on PATH are not the selected toolchain's")
         leanexport = bundled["leanexport"]
-        kernels = protected_kernels(bundled)
+        # Lean's native kernel and NanoDa are mandatory. Replay con-ron only
+        # after that comparison succeeds, so a support/capacity decline cannot
+        # prevent the mandatory kernels from establishing their verdicts.
+        kernels = {name: argv for name, argv in protected_kernels(bundled).items() if name != "con-ron"}
         primitives = primitive_targets(lean_prefix)
         report["tool_digests"] = tool_digests(bundled, bwrap)
-        report["kernels"] = [{"name": name, "argv": argv} for name, argv in kernels.items()]
+        report["kernels"] = []
 
         report["stage"] = "candidate-setup"
         guarded_write()
@@ -6301,6 +6374,32 @@ def execute(args: argparse.Namespace) -> int:
         verdict = comparator_verdict(proc.returncode, log)
         if verdict is not None:
             return stop(verdict, "comparator")
+
+        accepted = [{"name": name, "argv": argv} for name, argv in kernels.items()]
+        report["stage"] = "con-ron"
+        guarded_write()
+        replay = replay_con_ron(
+            binary=bundled["con-ron"], solution_export=solution_export,
+            scratch=work / "con-ron-replay", lean_prefix=lean_prefix,
+            environment=env, tools=tools, timeout=CON_RON_REPLAY_SECONDS,
+        )
+        report["kernel_attempts"] = [replay]
+        if replay["status"] == "accepted":
+            accepted.append({"name": "con-ron", "argv": replay["argv"]})
+        elif replay["status"] == "declined":
+            warning = f"con-ron declined ({replay['reason']}); mandatory Lean and NanoDa checks passed."
+            report["warnings"].append(warning)
+            print(f"::warning::{warning} Bounded checker evidence is in kernel_attempts.", flush=True)
+        else:
+            return stop(VerificationError(
+                "con-ron rejected the export or stopped without a recognized support/capacity decline",
+                code="palomar.kernel_disagreement", owner="palomar", detail=replay["detail"],
+                next_action=(
+                    "Palomar must inspect the checker evidence; do not change the submitted repository."
+                ),
+                retryable=False,
+            ), "con-ron")
+        report["kernels"] = accepted
 
         report["status"] = "pass"
         report["stage"] = "complete"

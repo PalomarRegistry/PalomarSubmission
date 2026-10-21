@@ -2910,7 +2910,6 @@ review:
             "error: Challenge constant is not a definition: 'Foo.bar'",
             "error: Solution constant is not a definition: 'Foo.bar'",
             "error: Solution constant is not a theorem: 'Foo.bar'",
-            "error: Illegal axiom detected: 'sorryAx'",
             "con-ron kernel accepts the solution\nLean default kernel rejected the solution\n"
             "error: Lean default exited with 1",
             "nanoda kernel rejected the solution\nLean default kernel rejected the solution\n"
@@ -2921,6 +2920,15 @@ review:
                 self.assertEqual(error.code, "comparator.rejected")
                 self.assertEqual(error.owner, "submitter")
                 self.assertFalse(error.retryable)
+
+    def test_disallowed_axiom_is_diagnosed_before_kernel_replay(self):
+        error = comparator_verdict(
+            1, "error: Illegal axiom detected: '_private.Native.0.main._native.native_decide.ax_1_1'"
+        )
+        self.assertEqual(error.code, "comparator.illegal_axiom")
+        self.assertEqual(error.owner, "submitter")
+        self.assertIn("decide +kernel", error.next_action)
+        self.assertIn("native_decide.ax", error.detail)
 
     def test_an_independent_kernel_alone_does_not_reject(self):
         # `runExternalKernel` says "rejected" for every nonzero exit, a crash

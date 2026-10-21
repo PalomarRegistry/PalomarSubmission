@@ -40,6 +40,7 @@ from scripts.verify_submission import (  # noqa: E402
     protected_comparator_config,
     protected_kernels,
     protected_lean_path,
+    replay_con_ron,
     reject_untrusted_package_artifacts,
     require_protected_paths,
     run,
@@ -91,7 +92,7 @@ def main() -> int:
     touch = Path(touch_command).absolute()
     bundled = toolchain_tools(lean_prefix)
     leanexport = bundled["leanexport"]
-    kernels = protected_kernels(bundled)
+    kernels = {name: argv for name, argv in protected_kernels(bundled).items() if name != "con-ron"}
     primitives = primitive_targets(lean_prefix)
 
     writable_directories = materialize_packages(
@@ -435,6 +436,13 @@ def main() -> int:
     verdict = comparator_verdict(comparison.returncode, log)
     if verdict is not None or "Your solution is okay!" not in log:
         raise VerificationError(f"cold-build lake comparator integration failed: {log[-4000:]}")
+    replay = replay_con_ron(
+        binary=bundled["con-ron"], solution_export=exports / "solution.export",
+        scratch=work / "con-ron", lean_prefix=lean_prefix,
+        environment=environment, tools=tools, timeout=1800,
+    )
+    if replay["status"] != "accepted":
+        raise VerificationError(f"cold-build con-ron control was not accepted: {replay['detail']}")
 
     print(
         json.dumps(
@@ -445,6 +453,7 @@ def main() -> int:
                 "challenge_dependencies": audit["dependencies"],
                 "project_dependencies": len(packages),
                 "comparator": "pass",
+                "con_ron": "accepted",
             },
             indent=2,
         )
