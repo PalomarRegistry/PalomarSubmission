@@ -11,6 +11,7 @@ import json
 import platform
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def selected_revision(toolchain: str) -> dict[str, str] | None:
+def revision_manifest() -> dict[str, dict[str, str]]:
     document = json.loads(MANIFEST.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     if set(document) != {"schema_version", "con_ron"} or document["schema_version"] != 1:
         raise ValueError("unsupported checker revision manifest")
@@ -54,7 +55,19 @@ def selected_revision(toolchain: str) -> dict[str, str] | None:
         for field, length in (("release_commit", 40), ("archive_sha256", 64), ("binary_sha256", 64)):
             if not re.fullmatch(r"[0-9a-f]{" + str(length) + "}", revision[field]):
                 raise ValueError(f"invalid checker {field}")
-    return revisions.get(toolchain)
+    return revisions
+
+
+def selected_revision(toolchain: str) -> dict[str, str] | None:
+    return revision_manifest().get(toolchain)
+
+
+def verify_release_commits(resolve: Callable[[str, str], str]) -> None:
+    """CI authenticates every mapped release, including non-fixture toolchains."""
+    releases = {(value["release_tag"], value["release_commit"]) for value in revision_manifest().values()}
+    for tag, commit in sorted(releases):
+        if resolve("leanprover/lean4", tag) != commit:
+            raise ValueError(f"pinned checker release commit disagrees with the official tag {tag}")
 
 
 def materialize_checker(toolchain: str, bundled: Path, destination: Path) -> tuple[Path, dict[str, Any]]:

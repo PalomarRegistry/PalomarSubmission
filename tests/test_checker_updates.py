@@ -102,3 +102,16 @@ class CheckerUpdatesTests(unittest.TestCase):
                 ValueError, "duplicate"
             ):
                 checker_updates.selected_revision("leanprover/lean4:v4.35.0")
+
+    def test_release_commit_checks_cover_updates_outside_the_cold_build_fixture(self):
+        revisions = checker_updates.revision_manifest()
+        revisions["leanprover/lean4:v4.35.0-rc3"] = {
+            **revisions["leanprover/lean4:v4.35.0-rc3"], "release_commit": "a" * 40,
+        }
+        with (
+            patch.object(checker_updates, "revision_manifest", return_value=revisions),
+            self.assertRaisesRegex(ValueError, "disagrees"),
+        ):
+            checker_updates.verify_release_commits(
+                lambda _repo, _tag: "c9afcddf514a6772bd4d649f7cfc04eff0b9f15e"
+            )

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
-from scripts.checker_updates import materialize_checker  # noqa: E402
+from scripts.checker_updates import materialize_checker, verify_release_commits  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
     EXECUTION_BUDGET_SECONDS,
@@ -93,13 +93,10 @@ def main() -> int:
     printenv = Path(printenv_command).absolute()
     touch = Path(touch_command).absolute()
     bundled = toolchain_tools(lean_prefix)
+    verify_release_commits(resolve_release_commit)
     bundled["con-ron"], checker_provenance = materialize_checker(
         (source / "lean-toolchain").read_text().strip(), bundled["con-ron"], work / "trusted-checker-update"
     )
-    if (checker_provenance["kind"] == "maintainer-pinned-release"
-        and resolve_release_commit("leanprover/lean4", checker_provenance["release_tag"])
-        != checker_provenance["release_commit"]):
-        raise VerificationError("pinned checker release commit disagrees with the official tag")
     leanexport = bundled["leanexport"]
     kernels = {name: argv for name, argv in protected_kernels(bundled).items() if name != "con-ron"}
     primitives = primitive_targets(lean_prefix)
