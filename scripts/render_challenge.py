@@ -43,6 +43,7 @@ from scripts.verify_submission import (  # noqa: E402
     LeanHeader,
     allowed_roots,
     bwrap_source_tag_from_installer,
+    canonical_repository,
     clone_commit,
     comparator_failure_excerpt,
     configure_bwrap,
@@ -998,6 +999,13 @@ def manifest_package_key(package: dict[str, Any], *, contained_paths: bool = Fal
 class RendererDependencyConflict(VerificationError):
     """A proof dependency conflicts with the renderer's own tool closure."""
 
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(
+            message, code="palomar.renderer_dependency_conflict", owner="palomar",
+            retryable=False, detail=detail,
+            next_action="Palomar must select a compatible renderer; do not change the accepted source.",
+        )
+
 
 def challenge_only_manifest(
     source_manifest: dict[str, Any], work: Path,
@@ -1009,9 +1017,9 @@ def challenge_only_manifest(
     This fallback never substitutes a package required by a trusted root.
     """
     packages = source_manifest["packages"]
-    by_name = {package["name"]: package for package in packages}
-    if len(by_name) != len(packages):
-        raise VerificationError("duplicate source package in renderer manifest")
+    by_name = {lake_package_name(package.get("name")): package for package in packages}
+    if None in by_name or len(by_name) != len(packages):
+        raise RendererDependencyConflict("invalid or duplicate source package in renderer manifest")
     _roots, aliases = allowed_roots()
     selected = {}
     for package in packages:
@@ -1019,31 +1027,40 @@ def challenge_only_manifest(
         root = aliases.get(repository) if kind == "git" else None
         if root is None:
             continue
-        if package.get("subDir") is not None:
-            raise VerificationError("Challenge library root must use its canonical repository layout")
-        selected[package["name"]] = {**package, "inherited": False}
+        selected[lake_package_name(package["name"])] = {**package, "inherited": False}
         # Read the exact canonical root's manifest as data; no submitted Lake
         # configuration executes to choose dependencies. clone_commit checks
         # that the fetched object is the requested immutable revision.
         with tempfile.TemporaryDirectory(prefix="challenge-library-", dir=work) as raw:
             checkout = Path(raw) / "source"
-            clone_commit(f"https://github.com/{root['repository']}", revision, checkout)
-            manifest = load_json_object(checkout / "lake-manifest.json")
-        expected_packages = manifest.get("packages")
-        if not isinstance(expected_packages, list):
-            raise VerificationError("Challenge library pinned manifest has no package list")
-        for expected in expected_packages:
-            name = expected.get("name")
-            actual = by_name.get(name)
-            if (actual is None or manifest_package_key(actual) != manifest_package_key(expected)
-                or any(actual.get(field) != expected.get(field)
-                       for field in ("subDir", "configFile", "manifestFile"))):
+            try:
+                clone_commit(f"https://github.com/{root['repository']}", revision, checkout)
+            except VerificationError as error:
                 raise VerificationError(
+                    "Palomar could not fetch the canonical Challenge library manifest",
+                    code="provider.renderer_dependency_lookup_failed", owner="provider",
+                    retryable=True, detail=str(error)[:1500],
+                    next_action="Do not change the repository. Retry the same commit later.",
+                ) from error
+            # Use the verifier's normal name/repository/revision parser and
+            # its empty-closure behavior when the pinned root has no manifest.
+            expected_packages = manifest_packages(checkout)
+        for expected in expected_packages:
+            name = expected["name"]
+            actual = by_name.get(name)
+            actual_key = manifest_package_key(actual) if actual is not None else None
+            if actual_key is not None and actual_key[0] == "git":
+                actual_key = ("git", canonical_repository(actual_key[1], aliases).lower(), actual_key[2])
+            expected_key = (
+                "git", canonical_repository(expected["repository"], aliases).lower(), expected["revision"]
+            )
+            if actual_key != expected_key:
+                raise RendererDependencyConflict(
                     f"renderer source substitutes a pinned Challenge dependency: {name!r}"
                 )
             selected.setdefault(name, actual)
-    if not selected:
-        raise VerificationError("renderer cannot isolate dependencies without a canonical Challenge library")
+    # An accepted Challenge with no canonical library can use only the
+    # toolchain. Its Solution-only dependency set is entirely unnecessary.
     excluded = tuple(sorted(set(by_name) - set(selected)))
     return {**source_manifest, "packages": [selected[name] for name in sorted(selected)]}, excluded
 
@@ -1346,13 +1363,20 @@ def prepare_workspace(
                 source_manifest, verso_manifest, verso_commit,
                 source_project=source_project, source_repository=source,
             )
-        except RendererDependencyConflict:
-            source_manifest, excluded_proof_packages = challenge_only_manifest(source_manifest, work)
-            # Any conflict inside the canonical Challenge closure still fails.
-            merged_manifest = merge_renderer_manifest(
-                source_manifest, verso_manifest, verso_commit,
-                source_project=source_project, source_repository=source,
-            )
+        except RendererDependencyConflict as conflict:
+            try:
+                source_manifest, excluded_proof_packages = challenge_only_manifest(source_manifest, work)
+                # Any conflict inside the canonical Challenge closure still fails.
+                merged_manifest = merge_renderer_manifest(
+                    source_manifest, verso_manifest, verso_commit,
+                    source_project=source_project, source_repository=source,
+                )
+            except VerificationError as error:
+                raise VerificationError(
+                    str(error), code=error.code, owner=error.owner, retryable=error.retryable,
+                    next_action=error.next_action,
+                    detail=f"Original conflict: {conflict}\n\n{error.detail or error}"[:2000],
+                ) from error
     finally:
         shutil.rmtree(verso_probe, ignore_errors=True)
     # Preserve hostile symlinks rather than dereferencing them in the trusted

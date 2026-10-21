@@ -1974,11 +1974,60 @@ end Audit.Task
             self.assertEqual(source["packages"], [root, dependency, fork])
             # A renderer conflict in the Challenge closure still blocks.
             conflicting = {**dependency, "rev": "6" * 40}
-            with self.assertRaisesRegex(VerificationError, "conflicts"):
+            with self.assertRaisesRegex(VerificationError, "conflicts") as error:
                 merge_renderer_manifest(reduced, {"packages": [conflicting]}, "5" * 40)
-            for bad in ([], [{**dependency, "rev": "6" * 40}], [{**dependency, "subDir": "other"}]):
+            self.assertEqual(error.exception.code, "palomar.renderer_dependency_conflict")
+            self.assertEqual(error.exception.owner, "palomar")
+            self.assertFalse(error.exception.retryable)
+            for bad in ([], [{**dependency, "rev": "6" * 40}]):
                 with self.subTest(bad=bad), self.assertRaisesRegex(VerificationError, "substitutes"):
                     challenge_only_manifest({"packages": [root, fork, *bad]}, Path(raw))
+
+    def test_workspace_isolates_conflicting_proof_packages_and_promotes_the_challenge_root(self):
+        for has_library in (True, False):
+            with self.subTest(has_library=has_library), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                work = root / "work"
+                source.mkdir()
+                work.mkdir()
+                (source / "Challenge.lean").write_bytes(b"accepted Challenge bytes")
+                (source / "Solution.lean").write_bytes(b"accepted Solution bytes")
+                config = {"challenge_module": "Challenge", "solution_module": "Solution",
+                          "theorem_names": ["headline"], "definition_names": [], "permitted_axioms": []}
+                (source / "comparator.json").write_text(json.dumps(config))
+                (source / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
+                library = {"name": "mathlib", "type": "git", "rev": "1" * 40, "inherited": True,
+                           "url": "https://github.com/leanprover-community/mathlib4"}
+                fork = {"name": "subverso", "type": "git", "rev": "2" * 40, "inherited": False,
+                        "url": "https://github.com/candidate/subverso"}
+                renderer_package = {**fork, "url": "https://github.com/leanprover/subverso", "rev": "3" * 40}
+                manifest = {"packages": [library, fork] if has_library else [fork]}
+                original = json.dumps(manifest).encode()
+                (source / "lake-manifest.json").write_bytes(original)
+
+                def clone(url, _revision, destination, package=renderer_package):
+                    destination.mkdir(parents=True)
+                    (destination / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc2\n")
+                    (destination / "lake-manifest.json").write_text(json.dumps({
+                        "packages": [package] if url.endswith("/verso") else []
+                    }))
+
+                with mock.patch("scripts.render_challenge.clone_commit", side_effect=clone):
+                    result = prepare_workspace(
+                        source, root / "workspace", "4" * 40, work,
+                        AcceptedRenderPaths("", "Challenge.lean", "Solution.lean", "comparator.json",
+                                            "lakefile.toml", "lean-toolchain"),
+                    )
+                self.assertEqual(result.excluded_proof_packages, ("subverso",))
+                for filename in ("Challenge.lean", "Solution.lean", "comparator.json"):
+                    self.assertEqual(
+                        (result.project / filename).read_bytes(), (source / filename).read_bytes()
+                    )
+                self.assertEqual((source / "lake-manifest.json").read_bytes(), original)
+                lakefile = (result.project / "lakefile.toml").read_text()
+                self.assertNotIn("candidate/subverso", lakefile)
+                self.assertEqual('name = "mathlib"' in lakefile, has_library)
 
     def test_trusted_lakefile_uses_only_direct_exact_dependencies(self):
         manifest = {
