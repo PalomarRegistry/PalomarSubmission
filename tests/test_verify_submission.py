@@ -4111,6 +4111,40 @@ review:
             )
         run_mock.assert_not_called()
 
+    def test_tauceti_revisions_outside_legacy_exceptions_use_canonical_ancestry(self):
+        root = next(root for root in allowed_roots()[0]
+                    if root["repository"] == "TauCetiProject/TauCeti")
+        # Canonical main on Lean 4.36.0-rc1, independently of the old 4.31 exception.
+        revision = "03ee6acb433d9f9dcdf69dfe45f299b2bd9d3404"
+        self.assertNotIn(revision, root["accepted_revisions"])
+        for ancestry_status in (0, 1):
+            with self.subTest(ancestry_status=ancestry_status), mock.patch(
+                "scripts.verify_submission.run",
+                side_effect=[mock.Mock(returncode=0), mock.Mock(returncode=0),
+                             mock.Mock(returncode=ancestry_status)],
+            ) as run_mock:
+                def verify():
+                    verify_official_revision(
+                        Path("/source/.lake/packages/TauCeti"),
+                        repository=root["repository"],
+                        revision=revision,
+                        official_ref=root["official_ref"],
+                        accepted_revisions=root["accepted_revisions"],
+                        git_env={"PATH": "/usr/bin"},
+                    )
+
+                if ancestry_status == 0:
+                    verify()
+                else:
+                    with self.assertRaisesRegex(VerificationError, "not an ancestor"):
+                        verify()
+                self.assertIn("https://github.com/TauCetiProject/TauCeti",
+                              run_mock.call_args_list[0].args[0])
+                self.assertIn("+refs/heads/main:refs/remotes/palomar-official/head",
+                              run_mock.call_args_list[1].args[0])
+                self.assertEqual(run_mock.call_args_list[2].args[0][-2:],
+                                 [revision, "refs/remotes/palomar-official/head"])
+
     def test_canonical_semver_release_tag_accepts_a_diverged_revision(self):
         revision = "3" * 40
         remote = mock.Mock(returncode=0)

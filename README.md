@@ -162,6 +162,14 @@ an official patch release can add a toolchain-bump commit to the previous
 release while `master` has already advanced on the next release line. Arbitrary,
 nightly, and repository-local tags do not broaden the trusted history.
 
+Tau Ceti revisions on canonical `TauCetiProject/TauCeti` `main` are supported,
+subject to the submission toolchain minimum and exact pinned manifest closure.
+The `accepted_revisions` list adds historical exceptions to the canonical
+ancestry rule; it does not restrict Tau Ceti to those revisions. In particular,
+the old Lean 4.31 revision in that list is retained for historical provenance,
+not recommended for new submissions. Pin a full canonical commit with a
+supported toolchain and preserve that commit's complete dependency closure.
+
 Independent kernel replay is a registry invariant, not a submitter option.
 The optional `enable_nanoda` field in a submitted `comparator.json` is retained
 for upstream compatibility but is deliberately non-authoritative: missing,
