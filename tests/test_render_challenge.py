@@ -2596,6 +2596,17 @@ instPartialOrderElement</span></body></html>'''
 
 
 class LiterateFailureTests(unittest.TestCase):
+    def test_the_published_diagnostic_keeps_the_underlying_error(self):
+        from scripts.render_challenge import literate_failure, render_failure_diagnostic
+
+        proc = subprocess.CompletedProcess(
+            ["lake"], 1,
+            "error finding highlighted code: missing data file for module Mathlib\n", "",
+        )
+        diagnostic = render_failure_diagnostic(literate_failure(proc), "literate")
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertIn("missing data file for module Mathlib", diagnostic["explanation"])
+
     def test_the_line_that_says_why_survives_a_long_search_path_dump(self):
         import subprocess as sp
 
@@ -2612,6 +2623,45 @@ class LiterateFailureTests(unittest.TestCase):
         self.assertIn("Failed to load comparators.X", error.detail)
         self.assertIn("exited with code 2", error.detail)
         self.assertLess(len(error.detail), 5_000)
+
+
+class VersoModuleImportBackportTests(unittest.TestCase):
+    def test_only_authenticated_releases_and_source_are_patched(self):
+        from scripts.render_challenge import apply_verso_module_import_backport
+
+        original = (
+            "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
+            "(loadExts := true) (arts := importArts)\n"
+        ).encode()
+        revision = "304b8561790c50222551c937ce02928df0d5b445"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".lake/packages/verso/src/verso-literate/VersoLiterateMain.lean"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(original)
+            manifest = {
+                "version": "1.1.0", "packagesDir": ".lake/packages",
+                "packages": [{"name": "verso", "type": "git", "url": "https://github.com/leanprover/verso",
+                              "rev": revision}],
+            }
+            (root / "lake-manifest.json").write_text(json.dumps(manifest))
+            self.assertIsNone(apply_verso_module_import_backport(root, root, "f" * 40))
+            self.assertEqual(target.read_bytes(), original)
+            with self.assertRaisesRegex(VerificationError, "differs from"):
+                apply_verso_module_import_backport(root, root, revision)
+            with mock.patch("scripts.render_challenge.VERSO_MODULE_IMPORT_BACKPORT_SOURCE",
+                            hashlib.sha256(original).hexdigest()):
+                evidence = apply_verso_module_import_backport(root, root, revision)
+                self.assertIn("if HeaderSyntax.isModule headerStx then .server else .private",
+                              target.read_text())
+                self.assertIn("(level := level)", target.read_text())
+                self.assertEqual(evidence["after_sha256"], hashlib.sha256(target.read_bytes()).hexdigest())
+                target.write_bytes(original)
+                manifest["packages"][0]["url"] = "https://github.com/attacker/verso"
+                (root / "lake-manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(VerificationError, "identity"):
+                    apply_verso_module_import_backport(root, root, revision)
+                self.assertEqual(target.read_bytes(), original)
 
 
 class CallSignatureTests(unittest.TestCase):

@@ -3,6 +3,12 @@ name: Cold-build compatibility
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      execution_profile:
+        description: Approved profile for an operator-run compatibility check (blank uses production default)
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "17 3 * * 1"
 
@@ -104,13 +110,16 @@ jobs:
         with:
           persist-credentials: false
       - id: resolve
+        env:
+          PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile || '' }}
         run: python3 scripts/verification_profile.py --resolve
 
   cold_build:
     needs: [scope, profile]
     if: needs.scope.outputs.cold_build == 'true'
     # The cold build runs where production verification runs: the catalogue's
-    # default profile, with its timeout and budget.
+    # default profile, with its timeout and budget. An operator dispatch may
+    # explicitly select another published profile when capacity is unavailable.
     runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
     timeout-minutes: ${{ fromJSON(needs.profile.outputs.timeout) }}
     steps:

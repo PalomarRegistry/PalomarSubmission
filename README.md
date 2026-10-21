@@ -7,6 +7,13 @@ verified historical edition. Registration rendering supports Lean 4.28 and later
 still binding the exact source, paths, Challenge hash and reviewed comparison.
 It does not admit an older toolchain for a new mechanical verification.
 
+For Challenge rendering on Lean 4.35.0-rc4 and 4.35.0, Palomar backports
+[Verso #1043](https://github.com/leanprover/verso/pull/1043) to the exact released
+Verso sources. The complete source digest is checked before applying the
+conditional server/private import-level fix. Render reports record the upstream
+fix and before/after source digests in `verso_backport`; `verso_commit` identifies
+the unpatched release, and `renderer_commit` identifies the backport implementation.
+
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 
 The form asks for a public GitHub repository, an immutable commit, the
