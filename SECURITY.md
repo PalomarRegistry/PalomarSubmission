@@ -380,9 +380,10 @@ anywhere.
 ## Pins and trusted computing base
 
 GitHub Actions, bubblewrap, elan releases, and source-built verifier tools are
-pinned to immutable revisions or checksums. Everything that judges a submission
-ships in the submitted Lean toolchain: `lake comparator`, `leanexport`,
-`leanchecker` and the bundled NanoDa and con-ron kernels. Lean and NanoDa are
+pinned to immutable revisions or checksums. `lake comparator`, `leanexport`,
+`leanchecker` and NanoDa ship in the submitted Lean toolchain. Con-ron may come
+from a separately authenticated official release selected in the maintainer's
+checker manifest. Lean and NanoDa are
 mandatory; con-ron is an additional advisory replay after both accept. Its
 recognized support or capacity declines are recorded without claiming an
 acceptance. Actual rejections, unknown errors and disallowed axioms block
@@ -392,9 +393,11 @@ broken checker from silently declining all submissions. The record therefore
 carries the lean4 commit the toolchain's release tag names, resolved from the
 tag rather than from a table (a table is a second place for the answer to be
 wrong, and it kept being the wrong one), together with the sha256 of each of
-those binaries as installed, the kernels the protected configuration
-accepted, the mandatory configuration's own digest and text, and the bubblewrap
-release. The digests cover the entrypoints; the shared libraries they load
+the binaries actually executed, the successful independent kernels, the
+mandatory configuration's own digest and text, and the bubblewrap release.
+The archived public mechanical report additionally records `con_ron_checker`
+with the selected checker release commit, archive URL and both digests; an
+updated con-ron digest is not a binary from `toolchain_commit`. The digests cover the entrypoints; the shared libraries they load
 (`lake comparator` itself lives in `libLake_shared.so`) are pinned by the
 release commit and the read-only toolchain binding rather than digested. The
 floor in `toolchains.json` is the oldest toolchain whose comparator Palomar

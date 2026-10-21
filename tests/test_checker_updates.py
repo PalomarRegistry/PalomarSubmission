@@ -52,8 +52,10 @@ class CheckerUpdatesTests(unittest.TestCase):
                 else:
                     with self.assertRaises(VerificationError) as error:
                         checker_updates.materialize_checker("source", root / "old", root / "new")
-                    self.assertEqual(error.exception.code, "palomar.checker_update_failed")
+                    self.assertEqual(error.exception.code, "palomar.checker_authentication_failed")
+                    self.assertFalse(error.exception.retryable)
                     self.assertFalse((root / "new" / "con-ron").exists())
+                self.assertFalse((root / "new" / "release.tar.zst").exists())
 
     def test_manifest_rejects_unreviewed_fields_and_non_release_paths(self):
         document = json.loads(checker_updates.MANIFEST.read_text())
@@ -65,3 +67,38 @@ class CheckerUpdatesTests(unittest.TestCase):
                 manifest.write_text(json.dumps(broken))
                 with patch.object(checker_updates, "MANIFEST", manifest), self.assertRaises(ValueError):
                     checker_updates.selected_revision("leanprover/lean4:v4.35.0")
+
+    def test_only_temporary_provider_failures_are_retryable(self):
+        failures = (
+            (checker_updates.DownloadTransientError("bounded network retries exhausted"), True),
+            (checker_updates.DownloadPermanentError("HTTP 404"), False),
+            (checker_updates.DownloadAuthenticationError("checksum mismatch"), False),
+            (ValueError("invalid manifest"), False),
+        )
+        for failure, retryable in failures:
+            with (
+                self.subTest(failure=failure), tempfile.TemporaryDirectory() as raw,
+                patch.object(checker_updates.platform, "system", return_value="Linux"),
+                patch.object(checker_updates.platform, "machine", return_value="x86_64"),
+                patch.object(checker_updates, "download", side_effect=failure),
+                self.assertRaises(VerificationError) as error,
+            ):
+                checker_updates.materialize_checker(
+                    "leanprover/lean4:v4.35.0", Path(raw) / "old", Path(raw) / "new"
+                )
+            self.assertEqual(error.exception.retryable, retryable)
+        with patch.object(checker_updates.platform, "system", return_value="Darwin"), self.assertRaises(
+            VerificationError
+        ) as error:
+            checker_updates.materialize_checker("leanprover/lean4:v4.35.0", Path("old"), Path("new"))
+        self.assertEqual(error.exception.code, "palomar.checker_policy_invalid")
+        self.assertFalse(error.exception.retryable)
+
+    def test_duplicate_manifest_keys_fail_closed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            manifest = Path(raw) / "manifest.json"
+            manifest.write_text('{"schema_version":1,"con_ron":{},"con_ron":{}}')
+            with patch.object(checker_updates, "MANIFEST", manifest), self.assertRaisesRegex(
+                ValueError, "duplicate"
+            ):
+                checker_updates.selected_revision("leanprover/lean4:v4.35.0")

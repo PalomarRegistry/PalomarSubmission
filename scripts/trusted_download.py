@@ -16,6 +16,18 @@ TRANSIENT_CURL = {5, 6, 7, 18, 28, 35, 52, 55, 56}
 TRANSIENT_HTTP = {408, 429, *range(500, 600)}
 
 
+class DownloadAuthenticationError(ValueError):
+    """Downloaded bytes did not match the trusted digest."""
+
+
+class DownloadPermanentError(RuntimeError):
+    """The source, authentication or local transport policy refused the request."""
+
+
+class DownloadTransientError(RuntimeError):
+    """A temporary provider failure exhausted its bounded retry budget."""
+
+
 def retry_delay(attempt: int, headers: str) -> float:
     values = re.findall(r"(?im)^retry-after:\s*([^\r\n]+)", headers)
     if values:
@@ -76,24 +88,26 @@ def download(
             status = int(completed.stdout) if completed.stdout.isdigit() else 0
             if completed.returncode == 0 and 200 <= status < 300:
                 if max_bytes is not None and temporary.stat().st_size > max_bytes:
-                    raise ValueError("trusted download exceeds its size limit")
+                    raise DownloadAuthenticationError("trusted download exceeds its size limit")
                 with temporary.open("rb") as downloaded:
                     actual_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
                 if actual_digest != digest:
-                    raise ValueError("trusted download checksum mismatch")
+                    raise DownloadAuthenticationError("trusted download checksum mismatch")
                 temporary.replace(destination)
                 return
             if not (
                 completed.returncode in TRANSIENT_CURL
                 or (completed.returncode == 0 and status in TRANSIENT_HTTP)
             ):
-                raise RuntimeError(f"trusted download refused (curl={completed.returncode}, HTTP={status})")
+                raise DownloadPermanentError(
+                    f"trusted download refused (curl={completed.returncode}, HTTP={status})"
+                )
             if attempt < 2:
                 delay = retry_delay(attempt, headers.read_text(errors="replace") if headers.exists() else "")
                 if time.monotonic() + delay >= deadline:
                     break
                 time.sleep(delay)
-    raise RuntimeError("trusted download exhausted its bounded retry budget")
+    raise DownloadTransientError("trusted download exhausted its bounded retry budget")
 
 
 def main() -> None:

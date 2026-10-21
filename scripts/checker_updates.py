@@ -14,15 +14,29 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from scripts.trusted_download import download
+from scripts.trusted_download import (
+    DownloadAuthenticationError,
+    DownloadPermanentError,
+    DownloadTransientError,
+    download,
+)
 from scripts.verification_errors import VerificationError
 
 MANIFEST = Path(__file__).resolve().parent.parent / "checker-revisions.json"
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?")
 
 
+def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate checker manifest key: {key}")
+        result[key] = value
+    return result
+
+
 def selected_revision(toolchain: str) -> dict[str, str] | None:
-    document = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    document = json.loads(MANIFEST.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     if set(document) != {"schema_version", "con_ron"} or document["schema_version"] != 1:
         raise ValueError("unsupported checker revision manifest")
     revisions = document["con_ron"]
@@ -45,6 +59,7 @@ def selected_revision(toolchain: str) -> dict[str, str] | None:
 
 def materialize_checker(toolchain: str, bundled: Path, destination: Path) -> tuple[Path, dict[str, Any]]:
     """Return the actual executable and public provenance; never fall back on failure."""
+    archive = None
     try:
         revision = selected_revision(toolchain)
         if revision is None:
@@ -65,19 +80,35 @@ def materialize_checker(toolchain: str, bundled: Path, destination: Path) -> tup
         )
         binary = completed.stdout
         if hashlib.sha256(binary).hexdigest() != revision["binary_sha256"]:
-            raise ValueError("checker binary checksum mismatch")
+            raise DownloadAuthenticationError("checker binary checksum mismatch")
         executable = destination / "con-ron"
         executable.write_bytes(binary)
         executable.chmod(0o555)
-        archive.unlink()
         return executable.resolve(), {
             "kind": "maintainer-pinned-release", "source_toolchain": toolchain,
             **revision, "archive_url": url,
         }
     except (OSError, ValueError, TypeError, subprocess.SubprocessError, RuntimeError) as error:
+        code, retryable = "palomar.checker_policy_invalid", False
+        if isinstance(error, DownloadAuthenticationError):
+            code = "palomar.checker_authentication_failed"
+        elif isinstance(error, (DownloadTransientError, subprocess.TimeoutExpired)):
+            code, retryable = "provider.checker_download_failed", True
+        elif isinstance(error, DownloadPermanentError):
+            code = "provider.checker_download_refused"
+        elif isinstance(error, subprocess.CalledProcessError):
+            code = "palomar.checker_install_failed"
         raise VerificationError(
             "Palomar could not authenticate the selected checker update",
-            code="palomar.checker_update_failed", owner="palomar", detail=str(error)[:1500],
-            next_action="Palomar must repair its pinned checker release; do not change the submission.",
-            retryable=True,
+            code=code, owner="provider" if code.startswith("provider.") else "palomar",
+            detail=str(error)[:1500],
+            next_action=(
+                "Do not change the repository. Retry the same commit later."
+                if retryable
+                else "Palomar must repair its pinned checker release; do not change the submission."
+            ),
+            retryable=retryable,
         ) from error
+    finally:
+        if archive is not None:
+            archive.unlink(missing_ok=True)
