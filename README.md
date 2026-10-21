@@ -7,6 +7,15 @@ verified historical edition. Registration rendering supports Lean 4.28 and later
 still binding the exact source, paths, Challenge hash and reviewed comparison.
 It does not admit an older toolchain for a new mechanical verification.
 
+When a Solution-only dependency conflicts with Verso, rendering isolates the
+canonical Challenge libraries and their exact pinned manifest closures in its
+separate workspace. It does not change the accepted Challenge, Solution,
+comparator configuration, or any dependency required by those libraries.
+Conflicts inside the Challenge closure remain errors. Render reports identify
+excluded proof-only packages. Contained parent-relative dependencies in nested
+projects keep the repository layout; only the two source-identical Plausible
+revisions explicitly listed in the renderer may share a package pin.
+
 For Challenge rendering on Lean 4.35.0-rc4 and 4.35.0, Palomar backports
 [Verso #1043](https://github.com/leanprover/verso/pull/1043) to the exact released
 Verso sources. The complete source digest is checked before applying the

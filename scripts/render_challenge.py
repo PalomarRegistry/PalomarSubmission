@@ -41,6 +41,7 @@ from scripts.verify_submission import (  # noqa: E402
     MAX_SOURCE_BYTES,
     TOOLCHAIN_RE,
     LeanHeader,
+    allowed_roots,
     bwrap_source_tag_from_installer,
     clone_commit,
     comparator_failure_excerpt,
@@ -994,6 +995,59 @@ def manifest_package_key(package: dict[str, Any], *, contained_paths: bool = Fal
     raise VerificationError(f"renderer manifest has an unsupported package type: {package_type!r}")
 
 
+class RendererDependencyConflict(VerificationError):
+    """A proof dependency conflicts with the renderer's own tool closure."""
+
+
+def challenge_only_manifest(
+    source_manifest: dict[str, Any], work: Path,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Retain canonical Challenge libraries and their exact pinned closures.
+
+    Mechanical verification permits Challenge imports only from these roots
+    and their closures. Solution-only packages need not enter the renderer.
+    This fallback never substitutes a package required by a trusted root.
+    """
+    packages = source_manifest["packages"]
+    by_name = {package["name"]: package for package in packages}
+    if len(by_name) != len(packages):
+        raise VerificationError("duplicate source package in renderer manifest")
+    _roots, aliases = allowed_roots()
+    selected = {}
+    for package in packages:
+        kind, repository, revision = manifest_package_key(package, contained_paths=True)
+        root = aliases.get(repository) if kind == "git" else None
+        if root is None:
+            continue
+        if package.get("subDir") is not None:
+            raise VerificationError("Challenge library root must use its canonical repository layout")
+        selected[package["name"]] = {**package, "inherited": False}
+        # Read the exact canonical root's manifest as data; no submitted Lake
+        # configuration executes to choose dependencies. clone_commit checks
+        # that the fetched object is the requested immutable revision.
+        with tempfile.TemporaryDirectory(prefix="challenge-library-", dir=work) as raw:
+            checkout = Path(raw) / "source"
+            clone_commit(f"https://github.com/{root['repository']}", revision, checkout)
+            manifest = load_json_object(checkout / "lake-manifest.json")
+        expected_packages = manifest.get("packages")
+        if not isinstance(expected_packages, list):
+            raise VerificationError("Challenge library pinned manifest has no package list")
+        for expected in expected_packages:
+            name = expected.get("name")
+            actual = by_name.get(name)
+            if (actual is None or manifest_package_key(actual) != manifest_package_key(expected)
+                or any(actual.get(field) != expected.get(field)
+                       for field in ("subDir", "configFile", "manifestFile"))):
+                raise VerificationError(
+                    f"renderer source substitutes a pinned Challenge dependency: {name!r}"
+                )
+            selected.setdefault(name, actual)
+    if not selected:
+        raise VerificationError("renderer cannot isolate dependencies without a canonical Challenge library")
+    excluded = tuple(sorted(set(by_name) - set(selected)))
+    return {**source_manifest, "packages": [selected[name] for name in sorted(selected)]}, excluded
+
+
 def merge_renderer_manifest(
     source_manifest: dict[str, Any],
     verso_manifest: dict[str, Any],
@@ -1041,7 +1095,9 @@ def merge_renderer_manifest(
                 )
             )
             if not same_plausible_sources:
-                raise VerificationError(f"Verso dependency conflicts with submitted package {name!r}")
+                raise RendererDependencyConflict(
+                    f"Verso dependency conflicts with submitted package {name!r}"
+                )
         if previous is None:
             merged[name] = candidate
 
@@ -1195,6 +1251,7 @@ class RenderWorkspace:
     solution: Path
     comparator: Path
     challenge_module: str
+    excluded_proof_packages: tuple[str, ...] = ()
 
 
 def prepare_workspace(
@@ -1269,6 +1326,7 @@ def prepare_workspace(
         source, toolchain_relative, "render lean_toolchain_path", kind="file"
     )
     verso_probe = work / "verso-manifest"
+    excluded_proof_packages: tuple[str, ...] = ()
     clone_commit(f"https://github.com/{VERSO_REPOSITORY}", verso_commit, verso_probe)
     try:
         verso_toolchain = (verso_probe / "lean-toolchain").read_text(encoding="utf-8").strip()
@@ -1283,10 +1341,18 @@ def prepare_workspace(
                 ),
             )
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
-        merged_manifest = merge_renderer_manifest(
-            source_manifest, verso_manifest, verso_commit,
-            source_project=source_project, source_repository=source,
-        )
+        try:
+            merged_manifest = merge_renderer_manifest(
+                source_manifest, verso_manifest, verso_commit,
+                source_project=source_project, source_repository=source,
+            )
+        except RendererDependencyConflict:
+            source_manifest, excluded_proof_packages = challenge_only_manifest(source_manifest, work)
+            # Any conflict inside the canonical Challenge closure still fails.
+            merged_manifest = merge_renderer_manifest(
+                source_manifest, verso_manifest, verso_commit,
+                source_project=source_project, source_repository=source,
+            )
     finally:
         shutil.rmtree(verso_probe, ignore_errors=True)
     # Preserve hostile symlinks rather than dereferencing them in the trusted
@@ -1348,6 +1414,7 @@ def prepare_workspace(
         solution=workspace_solution,
         comparator=workspace_comparator,
         challenge_module=challenge_module,
+        excluded_proof_packages=excluded_proof_packages,
     )
 
 
@@ -3029,6 +3096,8 @@ def execute(args: argparse.Namespace) -> int:
             prepared.source.paths,
         )
         workspace = render_workspace.project
+        if render_workspace.excluded_proof_packages:
+            report["excluded_proof_packages"] = list(render_workspace.excluded_proof_packages)
 
         bwrap = configure_bwrap(Path(args.bwrap))
         renderer = Path(__file__).resolve(strict=True)

@@ -22,6 +22,7 @@ from scripts.render_challenge import (
     VERSO_RUNTIME,
     PreparedMathlibCacheTool,
     artifact_manifest,
+    challenge_only_manifest,
     compatible_verso_toolchain,
     contained_manifest_paths,
     core_notation_audit_lean_path,
@@ -1941,6 +1942,43 @@ end Audit.Task
         }
         with self.assertRaisesRegex(VerificationError, "conflicts"):
             merge_renderer_manifest({"packages": [shared]}, {"packages": [alternative]}, "3" * 40)
+
+    def test_challenge_manifest_excludes_proof_only_forks_without_changing_trusted_pins(self):
+        def package(name, repository, rev, **extra):
+            return {"name": name, "type": "git", "url": f"https://github.com/{repository}",
+                    "rev": rev * 40, "subDir": None, "configFile": "lakefile.toml",
+                    "manifestFile": "lake-manifest.json", "inherited": True, **extra}
+
+        root = package("mathlib", "leanprover-community/mathlib4", "1")
+        dependency = package("batteries", "leanprover-community/batteries", "2")
+        fork = package("subverso", "candidate/subverso", "3", inherited=False)
+        official = package("subverso", "leanprover/subverso", "4")
+        source = {"packages": [root, dependency, fork]}
+
+        def canonical_manifest(url, revision, destination):
+            self.assertEqual(url, "https://github.com/leanprover-community/mathlib4")
+            self.assertEqual(revision, "1" * 40)
+            destination.mkdir(parents=True)
+            (destination / "lake-manifest.json").write_text(json.dumps({"packages": [dependency]}))
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch(
+            "scripts.render_challenge.clone_commit", side_effect=canonical_manifest
+        ):
+            reduced, excluded = challenge_only_manifest(source, Path(raw))
+            self.assertEqual(excluded, ("subverso",))
+            by_name = {entry["name"]: entry for entry in reduced["packages"]}
+            self.assertEqual(by_name["batteries"], dependency)
+            self.assertEqual(by_name["mathlib"], {**root, "inherited": False})
+            merged = merge_renderer_manifest(reduced, {"packages": [official]}, "5" * 40)
+            self.assertEqual(next(p for p in merged["packages"] if p["name"] == "subverso"), official)
+            self.assertEqual(source["packages"], [root, dependency, fork])
+            # A renderer conflict in the Challenge closure still blocks.
+            conflicting = {**dependency, "rev": "6" * 40}
+            with self.assertRaisesRegex(VerificationError, "conflicts"):
+                merge_renderer_manifest(reduced, {"packages": [conflicting]}, "5" * 40)
+            for bad in ([], [{**dependency, "rev": "6" * 40}], [{**dependency, "subDir": "other"}]):
+                with self.subTest(bad=bad), self.assertRaisesRegex(VerificationError, "substitutes"):
+                    challenge_only_manifest({"packages": [root, fork, *bad]}, Path(raw))
 
     def test_trusted_lakefile_uses_only_direct_exact_dependencies(self):
         manifest = {
