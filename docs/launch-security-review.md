@@ -59,15 +59,16 @@ artifact as hostile. Its security-relevant sequence is:
    toolchain's `leanexport` into verifier-owned files, and run the toolchain's
    `lake comparator` over the two exports under a policy that binds no
    candidate tree, with a verifier-authored protected configuration that
-   registers the toolchain's bundled NanoDa and con-ron kernels (two of the
-   five checkers `--paranoid` would add) and replaces only the Challenge
+   registers the toolchain's bundled NanoDa kernel and replaces only the Challenge
    module name with the canonical alias.
    Publish the protected Challenge under a collision-resistant verifier-owned
    top-level module alias, then resolve that alias, Lean core, and frozen trusted
    modules before candidate paths in the export's `LEAN_PATH`; candidate output
    cannot replace any of them, and the protected root cannot capture a sibling
    Solution under the submitted Challenge namespace. Require Lean's kernel and
-   both bundled independent kernels to accept the exported proof, and read the
+   NanoDa to accept the exported proof. Attempt con-ron separately, record only
+   successful kernels, and retain recognized support/capacity declines as bounded
+   advisory evidence. Actual rejection and unknown errors remain blocking. Read the
    comparator's exit as a rejection only when its comparison, its axiom pass
    or Lean's own kernel says so; an independent kernel failing alone is a
    disagreement for Palomar to examine, not a verdict.
@@ -180,7 +181,7 @@ permitted-axiom set, and runs the Solution export through the registered
 external kernels and Lean's own `leanchecker`, each inside a bubblewrap of its
 own. The submitted `enable_nanoda` compatibility field is non-authoritative
 and a submitted `external_kernels` is rejected: the verifier's protected
-configuration registers the toolchain's bundled `nanoda_bin` and `con-ron`,
+configuration registers the toolchain's bundled `nanoda_bin`,
 replaces the submitted Challenge module name with the canonical alias, and
 leaves the Solution and declaration selection unchanged. The comparator's
 nested sandboxes sit inside Palomar's outer judge policy, which binds no

@@ -229,10 +229,8 @@ sandbox.
 
 The submitted `enable_nanoda` field is non-authoritative and a submitted
 `external_kernels` is rejected: the runner writes a protected configuration
-that registers the toolchain's bundled `nanoda_bin` and `con-ron` as external
-kernels (two of the five checkers `lake comparator --paranoid` would add, at
-exactly the revisions the toolchain bundles, so Palomar makes no kernel
-version choice of its own) and replaces only the Challenge module name with
+that registers the toolchain's bundled `nanoda_bin` as an external kernel
+and replaces only the Challenge module name with
 the per-run protected alias. The comparator's exit code is read the way it is
 meant: 2 is a run that could not start, and 1 is a rejection only when the
 transcript carries one of the comparator's own comparison or axiom verdicts,
@@ -382,15 +380,24 @@ anywhere.
 ## Pins and trusted computing base
 
 GitHub Actions, bubblewrap, elan releases, and source-built verifier tools are
-pinned to immutable revisions or checksums. Everything that judges a submission
-ships in the submitted Lean toolchain: `lake comparator`, `leanexport`,
-`leanchecker` and the bundled NanoDa and con-ron kernels. The record therefore
+pinned to immutable revisions or checksums. `lake comparator`, `leanexport`,
+`leanchecker` and NanoDa ship in the submitted Lean toolchain. Con-ron may come
+from a separately authenticated official release selected in the maintainer's
+checker manifest. Lean and NanoDa are
+mandatory; con-ron is an additional advisory replay after both accept. Its
+recognized support or capacity declines are recorded without claiming an
+acceptance. Actual rejections, unknown errors and disallowed axioms block
+verification. An input that intentionally reaches a supported decline does not
+receive con-ron assurance. Positive and ill-typed negative controls prevent a
+broken checker from silently declining all submissions. The record therefore
 carries the lean4 commit the toolchain's release tag names, resolved from the
 tag rather than from a table (a table is a second place for the answer to be
 wrong, and it kept being the wrong one), together with the sha256 of each of
-those binaries as installed, the kernels the protected configuration
-registered, the configuration's own digest and text, and the bubblewrap
-release. The digests cover the entrypoints; the shared libraries they load
+the binaries actually executed, the successful independent kernels, the
+mandatory configuration's own digest and text, and the bubblewrap release.
+The archived public mechanical report additionally records `con_ron_checker`
+with the selected checker release commit, archive URL and both digests; an
+updated con-ron digest is not a binary from `toolchain_commit`. The digests cover the entrypoints; the shared libraries they load
 (`lake comparator` itself lives in `libLake_shared.so`) are pinned by the
 release commit and the read-only toolchain binding rather than digested. The
 floor in `toolchains.json` is the oldest toolchain whose comparator Palomar
@@ -567,3 +574,13 @@ network failures at most three times within a five-minute operation budget and
 the original job allowance. Checksum, authentication, absent revision, and build
 failures do not restart verification. Progress reports preserve semantic stages
 and trusted resource measurements for interrupted runs.
+
+Maintainer-selected con-ron updates are closed entries in
+`checker-revisions.json`, shipped with the trusted verifier. The source compiler,
+Lean kernel, exporter and NanoDa do not change. An update names an official Lean
+release and authenticates both its archive and con-ron executable before any
+candidate code runs. The selected executable is protected and snapshotted with
+the other judge tools; positive and ill-typed negative controls remain mandatory.
+The report records the actual executable digest and independent release
+provenance. Candidate configuration and environment cannot request an update,
+and authentication failure never falls back to an unrecorded checker.

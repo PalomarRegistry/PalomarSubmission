@@ -16,6 +16,18 @@ TRANSIENT_CURL = {5, 6, 7, 18, 28, 35, 52, 55, 56}
 TRANSIENT_HTTP = {408, 429, *range(500, 600)}
 
 
+class DownloadAuthenticationError(ValueError):
+    """Downloaded bytes did not match the trusted digest."""
+
+
+class DownloadPermanentError(RuntimeError):
+    """The source, authentication or local transport policy refused the request."""
+
+
+class DownloadTransientError(RuntimeError):
+    """A temporary provider failure exhausted its bounded retry budget."""
+
+
 def retry_delay(attempt: int, headers: str) -> float:
     values = re.findall(r"(?im)^retry-after:\s*([^\r\n]+)", headers)
     if values:
@@ -29,7 +41,9 @@ def retry_delay(attempt: int, headers: str) -> float:
     return (5, 20)[attempt]
 
 
-def download(url: str, destination: Path, digest: str, *, budget: float = 300) -> None:
+def download(
+    url: str, destination: Path, digest: str, *, budget: float = 300, max_bytes: int | None = None
+) -> None:
     if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("trusted downloads require HTTPS and a pinned SHA-256")
     started = os.environ.get("PALOMAR_JOB_STARTED_AT")
@@ -64,6 +78,7 @@ def download(url: str, destination: Path, digest: str, *, budget: float = 300) -
                     str(temporary),
                     "--write-out",
                     "%{http_code}",
+                    *(["--max-filesize", str(max_bytes)] if max_bytes is not None else []),
                     url,
                 ],
                 capture_output=True,
@@ -72,21 +87,27 @@ def download(url: str, destination: Path, digest: str, *, budget: float = 300) -
             )
             status = int(completed.stdout) if completed.stdout.isdigit() else 0
             if completed.returncode == 0 and 200 <= status < 300:
-                if hashlib.sha256(temporary.read_bytes()).hexdigest() != digest:
-                    raise ValueError("trusted download checksum mismatch")
+                if max_bytes is not None and temporary.stat().st_size > max_bytes:
+                    raise DownloadAuthenticationError("trusted download exceeds its size limit")
+                with temporary.open("rb") as downloaded:
+                    actual_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
+                if actual_digest != digest:
+                    raise DownloadAuthenticationError("trusted download checksum mismatch")
                 temporary.replace(destination)
                 return
             if not (
                 completed.returncode in TRANSIENT_CURL
                 or (completed.returncode == 0 and status in TRANSIENT_HTTP)
             ):
-                raise RuntimeError(f"trusted download refused (curl={completed.returncode}, HTTP={status})")
+                raise DownloadPermanentError(
+                    f"trusted download refused (curl={completed.returncode}, HTTP={status})"
+                )
             if attempt < 2:
                 delay = retry_delay(attempt, headers.read_text(errors="replace") if headers.exists() else "")
                 if time.monotonic() + delay >= deadline:
                     break
                 time.sleep(delay)
-    raise RuntimeError("trusted download exhausted its bounded retry budget")
+    raise DownloadTransientError("trusted download exhausted its bounded retry budget")
 
 
 def main() -> None:

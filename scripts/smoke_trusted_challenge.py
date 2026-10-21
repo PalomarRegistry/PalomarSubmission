@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
+from scripts.checker_updates import materialize_checker, verify_release_commits  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
     EXECUTION_BUDGET_SECONDS,
@@ -41,7 +42,9 @@ from scripts.verify_submission import (  # noqa: E402
     protected_kernels,
     protected_lean_path,
     reject_untrusted_package_artifacts,
+    replay_con_ron,
     require_protected_paths,
+    resolve_release_commit,
     run,
     sandboxed_run,
     sha256,
@@ -90,8 +93,12 @@ def main() -> int:
     printenv = Path(printenv_command).absolute()
     touch = Path(touch_command).absolute()
     bundled = toolchain_tools(lean_prefix)
+    verify_release_commits(resolve_release_commit)
+    bundled["con-ron"], checker_provenance = materialize_checker(
+        (source / "lean-toolchain").read_text().strip(), bundled["con-ron"], work / "trusted-checker-update"
+    )
     leanexport = bundled["leanexport"]
-    kernels = protected_kernels(bundled)
+    kernels = {name: argv for name, argv in protected_kernels(bundled).items() if name != "con-ron"}
     primitives = primitive_targets(lean_prefix)
 
     writable_directories = materialize_packages(
@@ -180,6 +187,7 @@ def main() -> int:
         lean_prefix=lean_prefix,
         bwrap=bwrap,
         kernels=kernels,
+        con_ron_binary=bundled["con-ron"],
         primitives=primitives,
         environment=environment,
         executable_paths=executable_paths,
@@ -435,6 +443,13 @@ def main() -> int:
     verdict = comparator_verdict(comparison.returncode, log)
     if verdict is not None or "Your solution is okay!" not in log:
         raise VerificationError(f"cold-build lake comparator integration failed: {log[-4000:]}")
+    replay = replay_con_ron(
+        binary=bundled["con-ron"], solution_export=exports / "solution.export",
+        scratch=work / "con-ron", lean_prefix=lean_prefix,
+        environment=environment, tools=tools, timeout=1800,
+    )
+    if replay["status"] != "accepted":
+        raise VerificationError(f"cold-build con-ron control was not accepted: {replay['detail']}")
 
     print(
         json.dumps(
@@ -445,6 +460,8 @@ def main() -> int:
                 "challenge_dependencies": audit["dependencies"],
                 "project_dependencies": len(packages),
                 "comparator": "pass",
+                "con_ron": "accepted",
+                "con_ron_checker": checker_provenance,
             },
             indent=2,
         )

@@ -47,7 +47,7 @@ declarations is verified and reviewed as a whole. CI then:
    canonical Challenge and the built Solution with the toolchain's exporter,
    and has `lake comparator` judge the two exports, permitting at most the
    three standard axioms and running the Solution through Lean's kernel and
-   the toolchain's bundled NanoDa and con-ron kernels;
+   the toolchain's bundled NanoDa kernel, then independently attempts con-ron replay;
 6. publishes a machine-readable report as a run artifact.
 
 Verification is dispatched by the submission server, not started from this
@@ -102,6 +102,13 @@ carry a bounded diagnostics-v1 list: every item names its owner, explanation,
 next action, retryability, optional location, and—only for fields in
 [`formalization-profile.json`](formalization-profile.json)—whether a constrained
 metadata repair may be offered.
+
+Failed Solution builds also carry `build_error_excerpts`: multiline Lean errors
+with their locations, limited to 20 blocks of 8,000 characters each. Each block
+marks truncation, and the report counts captured errors omitted by the block limit
+and records when the process output itself was truncated. This
+preserves the expected and actual types when later output displaces the log tail.
+The existing bounded diagnostic explanation and `build_log_tail` remain available.
 
 Every report also labels its broad `phase` as `preparation` or `verification`.
 That producer-owned classification lets downstream services keep preparation
@@ -160,10 +167,31 @@ The optional `enable_nanoda` field in a submitted `comparator.json` is retained
 for upstream compatibility but is deliberately non-authoritative: missing,
 false, or any other JSON value does not disable or block verification, and a
 submitted `external_kernels` is rejected. The trusted runner writes a separate
-protected configuration that registers the toolchain's bundled NanoDa and
-con-ron binaries as external kernels and passes that copy to `lake comparator`.
-This avoids making submitters maintain a switch whose value Palomar must
-override for every accepted result.
+protected configuration that registers the toolchain's bundled NanoDa kernel
+and passes that copy to `lake comparator`. Lean and NanoDa must both accept.
+The runner then replays the exact protected Solution export with con-ron in a
+separate sandbox. A recognized inductive-support decline, fuel exhaustion, or
+authenticated capacity limit can leave that advisory replay inconclusive;
+an actual rejection, unknown error, or non-standard axiom still blocks acceptance.
+The replay has a 30-minute cap inside the existing shared verification budget,
+reserving a minute for report finalization. Both positive and ill-typed negative
+controls must pass before any submission is built. The report's `kernels` lists
+only successful independent kernels; bounded `kernel_attempts` evidence and a
+workflow warning record any decline. Entries display the recorded successful
+kernels, so a declined con-ron is never presented as having verified the proof.
+Technical Maintainers can update con-ron independently of the source compiler by
+reviewing and merging `checker-revisions.json` in this repository. Each exact
+source toolchain maps to an official Lean release, its release commit, archive
+SHA-256 and executable SHA-256. No submission setting or environment variable
+can select an update. The runner authenticates both digests, stores the executable
+outside candidate-writable paths, and requires the same positive and negative
+controls before using it. Download, authentication or control failures stop
+verification. The initial update uses con-ron from Lean 4.36.0-rc1 for the four
+supported Lean 4.35 releases; Lean, Lake, the exporter and NanoDa stay pinned to
+the submitted source toolchain. `tool_digests` records the executable actually
+run, and `con_ron_checker` records the release provenance in the archived public
+mechanical report. Updating the manifest requires the normal repository review,
+CI and deployment process; it never rewrites an existing entry's evidence.
 
 AI review is not part of this repository's CI.
 [`PalomarReviewer`](https://github.com/PalomarRegistry/PalomarReviewer) runs it
