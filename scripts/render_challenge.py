@@ -78,6 +78,15 @@ from scripts.verify_submission import (  # noqa: E402
 )
 
 VERSO_REPOSITORY = "leanprover/verso"
+# Upstream verso#1043 landed after these releases, on Lean 4.36. Apply its
+# conditional import level to the exact released source until a maintenance
+# release exists. The complete input digest prevents patching different code.
+VERSO_MODULE_IMPORT_BACKPORT_REVISIONS = frozenset({
+    "01a09f320122475119588526857a07d218aef600",
+    "304b8561790c50222551c937ce02928df0d5b445",
+})
+VERSO_MODULE_IMPORT_BACKPORT_SOURCE = "87f5acecca083d83edb8302bec588afacc47832459c5370323c813208530e608"
+VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM = "cb7dc84d54b69269254bf4390a2e53db49a0e26f"
 PROOFWIDGETS_REPOSITORY = "leanprover-community/proofwidgets4"
 PROOFWIDGETS_RELEASE_ARCHIVE = "ProofWidgets4.tar.gz"
 LEGACY_MATHLIB_CACHE_TOOL_ARCHIVE_SHA256 = {
@@ -625,6 +634,13 @@ def literate_failure(proc: subprocess.CompletedProcess[str]) -> VerificationErro
     log = (proc.stdout + "\n" + proc.stderr).strip()
     return VerificationError(
         f"lake build Challenge:literate failed ({proc.returncode})",
+        code="palomar.render_failed",
+        owner="palomar",
+        next_action=(
+            "Do not change the repository. Report the render workflow URL to Palomar "
+            "so its operators can inspect the quoted rendering error."
+        ),
+        retryable=True,
         detail=comparator_failure_excerpt(log),
     )
 
@@ -699,7 +715,10 @@ def render_failure_diagnostic(error: BaseException, stage: str) -> dict[str, Any
             "render workflow URL if this happens again."
         ),
         retryable=True,
-        detail=f"{type(error).__name__}: {message[:1_500]}",
+        detail=(
+            f"{type(error).__name__}: {message[:1_500]}"
+            + (f"\n\n{error.detail[:1_500]}" if isinstance(error, VerificationError) and error.detail else "")
+        ),
     ).diagnostic(stage)
 
 
@@ -1240,6 +1259,42 @@ def prepare_workspace(
         comparator=workspace_comparator,
         challenge_module=challenge_module,
     )
+
+
+def apply_verso_module_import_backport(
+    project: Path, checkout: Path, revision: str
+) -> dict[str, str] | None:
+    """Backport upstream's module/server import fix to two exact releases."""
+    if revision not in VERSO_MODULE_IMPORT_BACKPORT_REVISIONS:
+        return None
+    package = next(item for item in manifest_packages(project) if item["name"] == "verso")
+    if package["revision"] != revision or github_repository(package["url"]) != VERSO_REPOSITORY:
+        raise VerificationError("Verso backport package identity does not match the selected release")
+    package_dir = package_checkout(project, package, checkout=checkout)
+    relative = PurePosixPath("src/verso-literate/VersoLiterateMain.lean")
+    source = resolve_repository_path(package_dir, relative, "Verso backport source", kind="file")
+    original = source.read_bytes()
+    if hashlib.sha256(original).hexdigest() != VERSO_MODULE_IMPORT_BACKPORT_SOURCE:
+        raise VerificationError("Verso backport source differs from the authenticated release")
+    before = (
+        "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
+        "(loadExts := true) (arts := importArts)\n"
+    ).encode()
+    after = (
+        "    let level := if HeaderSyntax.isModule headerStx then .server else .private\n"
+        "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
+        "(loadExts := true) (level := level) (arts := importArts)\n"
+    ).encode()
+    if original.count(before) != 1:
+        raise VerificationError("Verso backport import call is not unique")
+    patched = original.replace(before, after)
+    replace_workspace_file(source, patched)
+    return {
+        "upstream_commit": VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM,
+        "path": relative.as_posix(),
+        "before_sha256": VERSO_MODULE_IMPORT_BACKPORT_SOURCE,
+        "after_sha256": hashlib.sha256(patched).hexdigest(),
+    }
 
 
 def tree_bytes(root: Path, *, stop_after: int | None = None) -> int:
@@ -2923,6 +2978,11 @@ def execute(args: argparse.Namespace) -> int:
         writable_directories = materialize_packages(
             workspace, checkout=workspace_checkout, base_env=env
         )
+        verso_backport = apply_verso_module_import_backport(
+            workspace, workspace_checkout, prepared.verso_commit
+        )
+        if verso_backport is not None:
+            report["verso_backport"] = verso_backport
         readable_paths = [workspace_checkout.resolve()]
         sandbox_home = workspace / ".lake" / "config" / "home"
         sandbox_tmp = workspace / ".lake" / "config" / "tmp"
