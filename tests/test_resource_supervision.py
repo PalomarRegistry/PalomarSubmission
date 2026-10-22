@@ -228,7 +228,8 @@ class CgroupSupervisorCommandTests(unittest.TestCase):
                 liveness_path=Path("/s/liveness"),
             )
         self.assertEqual(argv[:4], ["/usr/bin/systemd-run", "--user", "--scope", "--"])
-        self.assertTrue(argv[5].endswith("scripts/supervise_cgroup.py"))
+        self.assertEqual(argv[5], "-I")
+        self.assertTrue(argv[6].endswith("scripts/supervise_cgroup.py"))
         self.assertEqual(argv[argv.index("--deadline") + 1], "120")
         self.assertEqual(argv[argv.index("--name") + 1], "palomar-" + "a" * 24)
         self.assertIn("--limit", argv)

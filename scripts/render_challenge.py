@@ -50,6 +50,7 @@ from scripts.verify_submission import (  # noqa: E402
     configure_bwrap,
     ensure_lake_manifest,
     github_repository,
+    isolated_python,
     lake_environment_value,
     load_comparator_config,
     manifest_packages,
@@ -1827,6 +1828,12 @@ def static_html_sanitize(
     head_pattern = r"(<head\b[^>]*>)"
     if len(re.findall(head_pattern, text, flags=re.IGNORECASE)) != 1:
         raise VerificationError("generated HTML does not contain exactly one head element")
+    head_start = re.search(head_pattern, text, flags=re.IGNORECASE).start()
+    if not re.fullmatch(
+        r"[ \t\r\n\f]*(?:<!doctype html>[ \t\r\n\f]*)?"
+        r"<html(?:[ \t\r\n\f]+[^<>]*)?>[ \t\r\n\f]*", text[:head_start],
+    ):
+        raise VerificationError("generated HTML has a noncanonical document prefix")
     text = re.sub(
         head_pattern,
         rf"\1\n    {meta}\n    {stylesheet}\n    {scripts}",
@@ -1836,7 +1843,8 @@ def static_html_sanitize(
     )
     surface_style = f'<style id="palomar-declaration-style">{SURFACE_STYLES}</style>'
     text, closed_heads = re.subn(
-        r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
+        r"(</head\s*>)", lambda match: f"    {surface_style}\n  {match[1]}",
+        text, count=1, flags=re.IGNORECASE
     )
     if closed_heads != 1:
         raise VerificationError("generated HTML does not close its head element")
@@ -3225,9 +3233,8 @@ def execute(args: argparse.Namespace) -> int:
         )
 
         raw_output = workspace / ".lake" / "build" / "palomar-render-raw"
-        clean_output = workspace / ".lake" / "build" / "palomar-render-clean"
+        clean_output = work / "palomar-render-clean"
         raw_output.mkdir()
-        clean_output.mkdir()
         report["stage"] = "verso-html"
         write_json(output, report)
         sandboxed_run(
@@ -3251,12 +3258,19 @@ def execute(args: argparse.Namespace) -> int:
 
         report["stage"] = "sanitize"
         write_json(output, report)
+        clean_output.mkdir()
+        sanitize_state = Path(tempfile.mkdtemp(prefix="sanitize-state-", dir=work))
+        sanitize_home = sanitize_state / "home"
+        sanitize_tmp = sanitize_state / "tmp"
+        sanitize_home.mkdir()
+        sanitize_tmp.mkdir()
+        require_protected_paths([clean_output, sanitize_state], writable_directories)
+        sanitize_env = {**env, "HOME": str(sanitize_home), "TMPDIR": str(sanitize_tmp)}
         sanitize_diagnostic = clean_output / ".palomar-sanitize-diagnostic.json"
         sanitize_diagnostic.unlink(missing_ok=True)
         sanitized = sandboxed_run(
             [
-                str(python),
-                str(renderer),
+                *isolated_python(python, str(renderer)),
                 "sanitize",
                 "--input-dir",
                 str(raw_output),
@@ -3278,9 +3292,8 @@ def execute(args: argparse.Namespace) -> int:
                 str(audit_declarations_path),
             ],
             cwd=workspace,
-            environment=env,
-            writable_directories=writable_directories,
-            writable_files=writable_files,
+            environment=sanitize_env,
+            writable_directories=[clean_output, sanitize_home, sanitize_tmp],
             readable_paths=[*readable_paths, audit_declarations_path],
             executable_paths=allowed_exec,
             tools=tools,

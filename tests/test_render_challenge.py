@@ -1546,6 +1546,15 @@ end Audit.Task
             hashlib.sha256(_injected_surface_style().encode()).hexdigest(),
             "d8ec37ef050d7574db046aa9c8ea8a7d551e85b3d074d86c0d2d55f66530f285",
         )
+        page = static_html_sanitize(
+            '<html><head><base href="../"></head><body></body></html>',
+            "../palomar-sanitize.js", "../palomar-verso.js",
+        )
+        head = re.search(r"<head>.*?</head>", page, re.DOTALL)[0]
+        self.assertEqual(
+            hashlib.sha256(head.encode()).hexdigest(),
+            "f2e330b784bd915146b05201140bd2ea9b4dae32a938a90e10c158c81d1665a1",
+        )
 
     def test_the_renderer_prefers_the_toolchains_exact_release(self):
         """No table to keep current: first try the toolchain's own version."""
@@ -2398,6 +2407,11 @@ console.log(JSON.stringify(nodes.map(node => node.removed)));
         for markup in ["<![CDATA[<style>body{display:none}</style>]]>", "<?probe?>"]:
             with self.subTest(markup=markup), self.assertRaises(VerificationError):
                 sanitize("", markup)
+        with self.assertRaises(VerificationError):
+            static_html_sanitize(
+                '<html><textarea><head><base href="../"></head></textarea><body></body></html>',
+                "../palomar-sanitize.js", "../palomar-verso.js",
+            )
 
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:
