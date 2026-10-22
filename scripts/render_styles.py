@@ -12,6 +12,7 @@ supported historical toolchain version. No remote fonts or CSS imports.
 """
 
 RENDER_STYLES = r"""/*
+Adapted and combined by Palomar; Lean string escapes decoded.
 Verso styles: Copyright (c) 2024 Lean FRO LLC. All rights reserved.
 Author: David Thrane Christiansen. Apache License 2.0.
 Tippy border styles: Copyright (c) 2017-present atomiks. MIT License.

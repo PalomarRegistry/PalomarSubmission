@@ -234,7 +234,10 @@ RUNTIME_SANITIZER = r'''(() => {
 
   function sanitize(root) {
     for (const element of Array.from(root.querySelectorAll("*"))) {
-      if (blocked.has(element.tagName.toUpperCase()) && !trustedStyles.has(element)) {
+      // Renderer-owned nodes already have trusted attributes, including the
+      // relative CSS URL on root and deeply nested auxiliary pages.
+      if (trustedStyles.has(element)) continue;
+      if (blocked.has(element.tagName.toUpperCase())) {
         element.remove();
         continue;
       }
@@ -1791,28 +1794,10 @@ def static_html_sanitize(
         flags=re.IGNORECASE,
     )
     surface_style = """<style id="palomar-declaration-style">
-      /* The registry page that frames this document follows the browser's
-         light and dark preference, so this document has to follow with it.
-         Nothing is passed across the origin boundary to make that happen: the
-         frame is laid out by the same browser, so the query below answers the
-         same way the page's does.
-
-         Verso's stylesheets name light colours directly, and a published
-         bundle is immutable, so the answers are frozen here as a palette
-         rather than read from the page. The dark values are the page's own, so
-         the frame sits on the paper it is drawn on. Every rule below this block
-         spends a token, never a literal.
-
-         The light values are Verso's own wherever a reader meets them: the
-         code surface, the docstring frames, the signature popup and the tactic
-         marks all render exactly as before. Where Verso reached for a colour
-         off its own scale — `black` popup borders, a `red` error underline,
-         `#e5e5e5` message panels, Bootstrap greys in the page shell — the
-         token takes over and light shifts a shade. Those are the diagnostic
-         panels and the shell a reader sees only with scripts disabled.
-         Carrying a second light value for each of them would have doubled a
-         palette that every future bundle is stuck with, to preserve choices
-         that were incidental. */
+      /* The frame follows the browser's light/dark preference independently
+         of its parent document. These tokens also bind Verso's colour API,
+         including token hovers, messages and proof states. Severity fills
+         keep foreground text readable in both modes. */
       :root {
         color-scheme: light dark;
         --palomar-paper: #ffffff;
@@ -1826,7 +1811,9 @@ def static_html_sanitize(
         --palomar-alarm: #b42318;
         --palomar-alarm-paper: #ffb3b3;
         --palomar-info: #4777ff;
-        --palomar-info-paper: #4777ff;
+        --palomar-info-paper: #dbe8ff;
+        --palomar-warning: #8a5b00;
+        --palomar-warning-paper: #fff0cc;
         --palomar-mark: #bbbbbb;
         --palomar-mark-on: #999999;
         --palomar-shadow: rgb(0 0 0 / 22%);
@@ -1845,10 +1832,63 @@ def static_html_sanitize(
           --palomar-alarm-paper: #3a1c1a;
           --palomar-info: #8ab4f8;
           --palomar-info-paper: #1c3a6b;
+          --palomar-warning: #ffd580;
+          --palomar-warning-paper: #3b2b14;
           --palomar-mark: #686f7c;
           --palomar-mark-on: #8e96a3;
           --palomar-shadow: rgb(0 0 0 / 55%);
         }
+      }
+      /* Bind the shipped Verso stylesheet's colour API to the same palette.
+         Its more specific hover/tooltip selectors then follow the theme too. */
+      :root {
+        --verso-code-color: var(--palomar-ink);
+        --verso-text-color: var(--palomar-ink);
+        --verso-structure-color: var(--palomar-ink);
+        --verso-selected-color: var(--palomar-raise);
+        --verso-tooltip-color: var(--palomar-ink);
+        --verso-tooltip-bg-color: var(--palomar-panel);
+        --verso-tooltip-border-color: var(--palomar-edge);
+        --verso-tooltip-separator-color: var(--palomar-rule);
+        --verso-tactic-state-color: var(--palomar-ink);
+        --verso-tactic-state-bg-color: var(--palomar-panel);
+        --verso-tactic-state-border-color: var(--palomar-edge);
+        --verso-tactic-toggle-color: var(--palomar-mark);
+        --verso-tactic-toggle-checked-color: var(--palomar-mark-on);
+        --verso-code-const-color: var(--palomar-ink);
+        --verso-code-keyword-color: var(--palomar-ink);
+        --verso-code-var-color: var(--palomar-ink);
+        --verso-code-hover-bg-color: var(--palomar-raise);
+        --verso-code-info-color: var(--palomar-ink);
+        --verso-code-info-bg-color: transparent;
+        --verso-code-info-hover-color: var(--palomar-ink);
+        --verso-code-info-hover-bg-color: var(--palomar-info-paper);
+        --verso-info-indicator-color: var(--palomar-info);
+        --verso-message-info-color: var(--palomar-ink);
+        --verso-tooltip-info-color: var(--palomar-ink);
+        --verso-tooltip-info-bg-color: var(--palomar-panel);
+        --verso-tooltip-info-border-color: var(--palomar-info);
+        --verso-output-info-color: var(--palomar-info);
+        --verso-code-warning-color: var(--palomar-ink);
+        --verso-code-warning-bg-color: transparent;
+        --verso-code-warning-hover-color: var(--palomar-ink);
+        --verso-code-warning-hover-bg-color: var(--palomar-warning-paper);
+        --verso-warning-indicator-color: var(--palomar-warning);
+        --verso-message-warning-color: var(--palomar-ink);
+        --verso-tooltip-warning-color: var(--palomar-ink);
+        --verso-tooltip-warning-bg-color: var(--palomar-panel);
+        --verso-tooltip-warning-border-color: var(--palomar-warning);
+        --verso-output-warning-color: var(--palomar-warning);
+        --verso-code-error-color: var(--palomar-ink);
+        --verso-code-error-bg-color: transparent;
+        --verso-code-error-hover-color: var(--palomar-ink);
+        --verso-code-error-hover-bg-color: var(--palomar-alarm-paper);
+        --verso-error-indicator-color: var(--palomar-alarm);
+        --verso-message-error-color: var(--palomar-alarm);
+        --verso-tooltip-error-color: var(--palomar-ink);
+        --verso-tooltip-error-bg-color: var(--palomar-panel);
+        --verso-tooltip-error-border-color: var(--palomar-alarm);
+        --verso-output-error-color: var(--palomar-alarm);
       }
       html { height: auto !important; min-height: 100%; overflow: auto !important;
         overscroll-behavior: contain; }
@@ -1865,12 +1905,8 @@ def static_html_sanitize(
       .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
       .code-content .verso-text,
       .code-content .md-text { border-color: var(--palomar-line); }
-      /* Each of these repeats a Verso selector exactly rather than writing a
-         shorter one that happens to reach the same elements. `:has()` and
-         `:not()` take the specificity of their argument, so a hand-shortened
-         selector loses to the original and the rule silently does nothing;
-         repeating it makes source order the only thing that decides, and this
-         stylesheet is last. */
+      /* Fallback rules cover historical markup. The shipped modern selectors,
+         including their more specific hover rules, use the aliases above. */
       @media (hover: hover) {
         .hl.lean .token.binding-hl,
         .hl.lean .literal:hover,
@@ -1928,12 +1964,9 @@ def static_html_sanitize(
       .palomar-hover .hover-info,
       .palomar-hover .docstring { background: var(--palomar-panel) !important;
         color: var(--palomar-ink) !important; }
-      /* Verso separates a signature from its docstring with an empty span and
-         leaves the spacing to a stylesheet we do not ship, so the two ran
-         together: "... : Type (max u_7 u_8)The standard real/complex Euclidean
-         space ...". The docstring is also still an inline <code>, because the
-         Markdown renderer that would have made it a block is not loaded here. */
-      .palomar-hover .sep { display: block; height: 0; }
+      /* Give the block docstring one separator of its own, hiding Verso's
+         empty separator span so the popup does not acquire a second rule. */
+      .palomar-hover .sep { display: block; height: 0 !important; border: none !important; }
       .palomar-hover .docstring {
         display: block;
         margin-top: .55rem;

@@ -49,6 +49,7 @@ from scripts.render_challenge import (
     write_core_notation_audit_handoff,
 )
 from scripts.render_report import AcceptedRenderPaths
+from scripts.render_styles import RENDER_STYLES
 from scripts.verification_errors import VerificationError
 
 # Inline style values and whether the sanitizers are meant to keep them. Both
@@ -1531,11 +1532,19 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "7f5cea2896743f584f7397ddea879b4af8c9424d8ae5e8f81b14243c0bef5eb2",
+            "64ae1242cd0d318a3e264b66d9455ed3173f2609672c1597ec3d3e0050564892",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
             "332773edafa3ac712ec3fba31d4c6ece2339693958873a9020a9be1bddb22538",
+        )
+        self.assertEqual(
+            hashlib.sha256(RENDER_STYLES.encode()).hexdigest(),
+            "f16b4aa1e470cb136215b68cf37d60122ed4cfb3daf1ff3d761f87867a24f8d7",
+        )
+        self.assertEqual(
+            hashlib.sha256(_injected_surface_style().encode()).hexdigest(),
+            "d8ec37ef050d7574db046aa9c8ea8a7d551e85b3d074d86c0d2d55f66530f285",
         )
 
     def test_the_renderer_prefers_the_toolchains_exact_release(self):
@@ -2350,6 +2359,8 @@ function element(tagName) {
   return {tagName, attributes: [], removed: false, remove() {this.removed = true;}};
 }
 const ownedStyle = element("STYLE"), ownedLink = element("LINK");
+ownedLink.attributes = [{name:"href", value:"palomar-render.css"}];
+ownedLink.removeAttribute = () => {throw new Error("trusted stylesheet URL was rewritten");};
 globalThis.document = {
   head: {querySelectorAll() {return [ownedStyle, ownedLink];}},
   addEventListener() {}
@@ -2784,7 +2795,6 @@ instPartialOrderElement</span></body></html>'''
             self.assertEqual(metadata["declarations"], [])
             self.assertFalse((output / "marked.js").exists())
             self.assertFalse((output / "code.css").exists())
-            from scripts.render_styles import RENDER_STYLES
             self.assertEqual((output / "palomar-render.css").read_text(), RENDER_STYLES)
             self.assertNotIn("display:none", RENDER_STYLES)
 
@@ -3046,9 +3056,11 @@ def _is_palette(body: str) -> bool:
 def _palettes(css: str) -> tuple[dict[str, str], dict[str, str]]:
     """The light palette, and the dark block that overrides it. Tokens only."""
     blocks = [
-        {name: value for name, value in _declarations(body) if name.startswith("--")}
+        {name: value for name, value in _declarations(body) if name.startswith("--palomar-")}
         for body in _blocks(css)
-        if _is_palette(body)
+        if _is_palette(body) and any(
+            name.startswith("--palomar-") for name, _ in _declarations(body)
+        )
     ]
     if len(blocks) != 2:
         raise AssertionError(f"expected a light and a dark palette, found {len(blocks)}")
@@ -3067,7 +3079,7 @@ _PAINTS = re.compile(
 )
 
 
-def _painting_selectors(css: str) -> set[str]:
+def _painting_selectors(css: str, bound_variables: set[str] = frozenset()) -> set[str]:
     """Every single selector in `css` that gives some element a literal colour.
 
     Comma groups are split, because a group is answered one selector at a time.
@@ -3083,6 +3095,16 @@ def _painting_selectors(css: str) -> set[str]:
         ):
             if not separator or not _PAINTS.match(name.strip().lower()):
                 continue
+            # A bound variable's literal fallback is unreachable. Strip inner
+            # calls first so nested fallback expressions are handled as well.
+            previous = None
+            while value != previous:
+                previous = value
+                value = re.sub(
+                    r"var\((--[\w-]+)(?:,[^()]*)?\)",
+                    lambda match: "" if match[1] in bound_variables else match[0],
+                    value,
+                )
             if _NAMES_A_COLOUR.search(value):
                 found.update(part.strip() for part in group.split(",") if part.strip())
                 break
@@ -3136,17 +3158,14 @@ class RenderSurfaceAppearanceTests(unittest.TestCase):
         ("--palomar-ink", "--palomar-panel"),
         ("--palomar-ink", "--palomar-raise"),
         ("--palomar-ink", "--palomar-alarm-paper"),
+        ("--palomar-ink", "--palomar-warning-paper"),
+        ("--palomar-ink", "--palomar-info-paper"),
         ("--palomar-link", "--palomar-paper"),
         # The selected node in Verso's module tree reverses the two.
         ("--palomar-paper", "--palomar-link"),
         ("--palomar-alarm", "--palomar-paper"),
     )
     # Indicators, and what they are drawn on. WCAG AA for non-text.
-    #
-    # `--palomar-info-paper` is here rather than in READABLE because it is a
-    # saturated fill Verso already used, and ink on it clears 3.74:1 in light.
-    # This change does not move a light value, so asserting 4.5 would be
-    # asserting a change that was deliberately not made.
     #
     # `--palomar-mark` and `--palomar-mark-on` are absent on purpose: they are
     # the tactic-toggle pill, which Verso draws at 1.94:1 in light because a
@@ -3232,20 +3251,47 @@ class RenderSurfaceAppearanceTests(unittest.TestCase):
         """
         fixtures = pathlib.Path(__file__).parent / "fixtures" / "verso-render-css"
         answered = _answered_selectors(_injected_surface_style())
+        aliases = self._verso_colour_aliases()
         unanswered = []
-        for stylesheet in sorted(fixtures.glob("*.css")):
-            for selector in _painting_selectors(stylesheet.read_text()):
+        stylesheets = [(p.name, p.read_text()) for p in sorted(fixtures.glob("*.css"))]
+        stylesheets.append(("RENDER_STYLES", RENDER_STYLES))
+        for name, css in stylesheets:
+            for selector in _painting_selectors(css, set(aliases)):
                 if selector in answered or selector in self.LEFT_TO_VERSO:
                     continue
                 if "tippy" in selector and "tippy" in self.LEFT_TO_VERSO:
                     continue
-                unanswered.append(f"{stylesheet.name}: {selector}")
+                unanswered.append(f"{name}: {selector}")
         self.assertEqual(
             [],
             sorted(unanswered),
             "Verso paints these and the injected stylesheet does not answer them; "
             "either answer them or record why they are left alone",
         )
+
+    @staticmethod
+    def _verso_colour_aliases():
+        return {
+            name: value
+            for body in _blocks(_injected_surface_style())
+            for name, value in _declarations(body)
+            if name.startswith("--verso-") and "color" in name
+        }
+
+    def test_every_shipped_verso_colour_variable_uses_the_surface_palette(self):
+        variables = {
+            name
+            for body in re.findall(
+                r":root\s*\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", RENDER_STYLES, flags=re.DOTALL)
+            )
+            for name, _ in _declarations(body)
+            if name.startswith("--verso-") and "color" in name
+        }
+        aliases = self._verso_colour_aliases()
+        self.assertTrue(variables)
+        self.assertEqual(variables, set(aliases))
+        for value in aliases.values():
+            self.assertTrue(value.startswith("var(--palomar-") or value == "transparent", value)
 
     def test_both_palettes_are_readable(self):
         light, override = _palettes(_injected_surface_style())
