@@ -14,6 +14,7 @@ from scripts.verify_submission import (
     comparator_preflight,
     comparator_verdict,
     compile_canonical_challenge,
+    isolated_python,
     judge_exports,
     primitive_targets,
     protected_kernels,
@@ -25,6 +26,17 @@ from scripts.verify_submission import (
     toolchain_tools,
     verify_sandbox_confinement,
 )
+
+
+def _python_startup_canary(home: Path) -> Path:
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site = home / ".local" / "lib" / version / "site-packages"
+    site.mkdir(parents=True)
+    marker = home / "python-startup-ran"
+    (site / "candidate.pth").write_text(
+        f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')\n"
+    )
+    return marker
 
 
 class SandboxIntegrationTests(unittest.TestCase):
@@ -207,6 +219,8 @@ supportInterpreter = true
             home.mkdir()
             tmp.mkdir()
 
+            startup_marker = _python_startup_canary(home)
+
             python = Path(sys.executable).resolve(strict=True)
             touch_command = shutil.which("touch")
             self.assertIsNotNone(touch_command)
@@ -251,6 +265,7 @@ supportInterpreter = true
                 executable_paths=sorted(set(executable_paths)),
                 tools=tool_snapshot([python, touch]),
             )
+            self.assertFalse(startup_marker.exists(), "untrusted Python startup code ran")
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_BWRAP"),
@@ -273,6 +288,7 @@ supportInterpreter = true
             tmp = config / "tmp"
             home.mkdir()
             tmp.mkdir()
+            startup_marker = _python_startup_canary(home)
 
             python = Path(sys.executable).resolve(strict=True)
             touch_command = shutil.which("touch")
@@ -312,7 +328,7 @@ supportInterpreter = true
             # verifier imports must work without access to host /proc or /sys.
             renderer = Path(__file__).resolve().parents[1] / "scripts" / "render_challenge.py"
             result = sandboxed_run(
-                [str(python), str(renderer), "sanitize", "--help"],
+                isolated_python(python, str(renderer), "sanitize", "--help"),
                 cwd=workspace_checkout,
                 environment=environment,
                 writable_directories=[build, config],
@@ -321,6 +337,7 @@ supportInterpreter = true
                 tools=tool_snapshot([python]),
             )
             self.assertIn("--input-dir", result.stdout)
+            self.assertFalse(startup_marker.exists(), "untrusted Python startup code ran")
 
     @unittest.skipUnless(
         os.environ.get("PALOMAR_BWRAP") and os.environ.get("PALOMAR_TEST_LEAN"),

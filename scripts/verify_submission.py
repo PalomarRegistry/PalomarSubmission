@@ -514,6 +514,11 @@ def resource_metrics(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def isolated_python(python: Path | str, *arguments: str) -> list[str]:
+    """Exclude writable HOME/user-site, PYTHON* variables and cwd at startup."""
+    return [str(python), "-I", *arguments]
+
+
 def run(
     command: list[str],
     *,
@@ -2786,7 +2791,8 @@ def supervisor_bootstrap(cwd: Path) -> list[str]:
         candidates.append([runner, "--user", "--scope", "--quiet", "--property=Delegate=yes", "--"])
     elif pid1 != "systemd" and sudo:
         candidates.append(
-            [sudo, "-n", python, delegate, f"--uid={os.getuid()}", f"--gid={os.getgid()}", "--"]
+            [sudo, "-n", *isolated_python(python, delegate),
+             f"--uid={os.getuid()}", f"--gid={os.getgid()}", "--"]
         )
     true = shutil.which("true")
     if not true:
@@ -2799,7 +2805,8 @@ def supervisor_bootstrap(cwd: Path) -> list[str]:
             # environment (systemd-run needs the user bus variables); the
             # payload receives only what the babysitter's --setenv names.
             probe = run(
-                [*candidate, python, babysitter, "--parent", "self", "--collect", "--deadline", "20",
+                [*candidate, *isolated_python(python, babysitter), "--parent", "self",
+                 "--collect", "--deadline", "20",
                  "--grace", "1", "--cwd", str(cwd), "--status", str(status), "--", true],
                 cwd=cwd, env=os.environ.copy(), timeout=60, check=False,
             )
@@ -2844,7 +2851,7 @@ def supervisor_command(
     babysitter = str((ROOT / "scripts" / "supervise_cgroup.py").resolve())
     result = [
         *supervisor_bootstrap(cwd),
-        python, babysitter,
+        *isolated_python(python, babysitter),
         "--parent", "self",
         "--name", unit_name,
         "--deadline", str(max(1, limits.deadline if limits.deadline is not None else timeout)),
@@ -3170,8 +3177,7 @@ def sandboxed_run(
         # The observer runs inside the phase cgroup, so its usage figures are
         # the workload's. If it dies, the babysitter's status still classifies.
         confined = [
-            str(python),
-            str(metrics_wrapper),
+            *isolated_python(python, str(metrics_wrapper)),
             "--output",
             str(_RESOURCE_METRICS_PATH),
             "--phase",
@@ -3476,7 +3482,7 @@ def verify_sandbox_confinement(
                 "sys.exit(1 if failures else 0)\n"
             )
             namespaces = sandboxed_run(
-                [str(python), "-c", namespace_script, host_userns, *(str(c) for c in canaries)],
+                [*isolated_python(python, "-c"), namespace_script, host_userns, *(str(c) for c in canaries)],
                 cwd=cwd,
                 environment=environment,
                 writable_directories=writable_directories,
@@ -3540,7 +3546,7 @@ def verify_sandbox_confinement(
             "\nsys.exit(1 if escaped else 0)"
         )
         frozen = sandboxed_run(
-            [str(python), "-c", frozen_script, *(str(path) for path in protected)],
+            [*isolated_python(python, "-c"), frozen_script, *(str(path) for path in protected)],
             cwd=cwd,
             environment=environment,
             writable_directories=writable_directories,
@@ -3558,7 +3564,7 @@ def verify_sandbox_confinement(
 
     read_script = "from pathlib import Path; import sys; Path(sys.argv[1]).read_bytes()"
     allowed_read = sandboxed_run(
-        [str(python), "-c", read_script, str(positive_read)],
+        [*isolated_python(python, "-c"), read_script, str(positive_read)],
         cwd=cwd,
         environment=environment,
         writable_directories=writable_directories,
@@ -3572,7 +3578,7 @@ def verify_sandbox_confinement(
         raise VerificationError("outer sandbox denied its readable source" + detail(allowed_read))
 
     denied_read = sandboxed_run(
-        [str(python), "-c", read_script, str(read_probe)],
+        [*isolated_python(python, "-c"), read_script, str(read_probe)],
         cwd=cwd,
         environment=environment,
         writable_directories=writable_directories,
@@ -3589,7 +3595,7 @@ def verify_sandbox_confinement(
     holder_env = os.environ.copy()
     holder_env["PALOMAR_PROCESS_SENTINEL"] = token
     holder = subprocess.Popen(
-        [str(python), "-c", "import time; time.sleep(120)"],
+        [*isolated_python(python, "-c"), "import time; time.sleep(120)"],
         env=holder_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -3608,7 +3614,7 @@ def verify_sandbox_confinement(
                 raise VerificationError("process-environment probe lacks a live positive control")
             time.sleep(0.01)
         proc_read = sandboxed_run(
-            [str(python), "-c", read_script, f"/proc/{holder.pid}/environ"],
+            [*isolated_python(python, "-c"), read_script, f"/proc/{holder.pid}/environ"],
             cwd=cwd,
             environment=environment,
             writable_directories=writable_directories,
@@ -3641,7 +3647,7 @@ def verify_sandbox_confinement(
             accepted, _ = listener.accept()
             accepted.close()
         network = sandboxed_run(
-            [str(python), "-c", network_script, str(port)],
+            [*isolated_python(python, "-c"), network_script, str(port)],
             cwd=cwd,
             environment=environment,
             writable_directories=writable_directories,

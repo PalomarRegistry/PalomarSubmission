@@ -32,6 +32,7 @@ from scripts.render_report import (  # noqa: E402
     intake_report,
     parse_prepared_report,
 )
+from scripts.render_styles import RENDER_STYLES, SURFACE_STYLES  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE, lake_package_name  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
@@ -49,6 +50,7 @@ from scripts.verify_submission import (  # noqa: E402
     configure_bwrap,
     ensure_lake_manifest,
     github_repository,
+    isolated_python,
     lake_environment_value,
     load_comparator_config,
     manifest_packages,
@@ -190,8 +192,31 @@ RUNTIME_SANITIZER = r'''(() => {
   // own case, so match on the folded one.
   const blocked = new Set([
     "APPLET", "BASE", "DIALOG", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
-    "MATH", "META", "OBJECT", "SCRIPT", "SVG"
+    "LINK", "MATH", "META", "OBJECT", "SCRIPT", "STYLE", "SVG"
   ]);
+  // Static sanitization drops every input stylesheet and injects only our own.
+  // Keep those exact nodes, never a later tooltip node with matching attributes.
+  // This script is deferred, so the complete sanitized head is already parsed.
+  const expectedSurface = __PALOMAR_SURFACE_STYLE__;
+  const runtimeUrl = document.currentScript?.src;
+  const expectedCss = runtimeUrl ? new URL("palomar-render.css", runtimeUrl).href : null;
+  const trustedStyles = new WeakSet();
+  for (const element of document.head?.querySelectorAll("style,link") ?? []) {
+    const style = element.tagName.toUpperCase() === "STYLE"
+      && element.attributes.length === 1
+      && element.getAttribute("id") === "palomar-declaration-style"
+      && element.textContent === expectedSurface;
+    let link = false;
+    if (element.tagName.toUpperCase() === "LINK" && element.attributes.length === 2
+        && element.getAttribute("rel") === "stylesheet") {
+      try {
+        link = expectedCss !== null
+          && new URL(element.getAttribute("href"), document.baseURI).href === expectedCss;
+      } catch (_) {}
+    }
+    if (style || link) trustedStyles.add(element);
+    else element.remove();
+  }
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
@@ -229,6 +254,9 @@ RUNTIME_SANITIZER = r'''(() => {
 
   function sanitize(root) {
     for (const element of Array.from(root.querySelectorAll("*"))) {
+      // Renderer-owned nodes already have trusted attributes, including the
+      // relative CSS URL on root and deeply nested auxiliary pages.
+      if (trustedStyles.has(element)) continue;
       if (blocked.has(element.tagName.toUpperCase())) {
         element.remove();
         continue;
@@ -267,7 +295,7 @@ RUNTIME_SANITIZER = r'''(() => {
   window.palomarSanitize = sanitize;
   document.addEventListener("DOMContentLoaded", () => sanitize(document), {once: true});
 })();
-'''
+'''.replace("__PALOMAR_SURFACE_STYLE__", json.dumps(SURFACE_STYLES))
 
 
 VERSO_RUNTIME = r'''(() => {
@@ -1538,7 +1566,10 @@ class _StaticHTMLSanitizer(HTMLParser):
     # only SVG is the manual genre's diagram files, `latexMath` renders to
     # nothing, and no genre emits a dialog), so their subtrees are dropped
     # whole.
-    _DROPPED_ELEMENTS = {"dialog", "math", "svg"}
+    # Every input stylesheet is untrusted, including Verso's own emitted style:
+    # we inject fixed renderer-owned CSS after parsing. LINK is void and is
+    # dropped separately without opening a suppressed subtree.
+    _DROPPED_ELEMENTS = {"dialog", "math", "style", "svg"}
 
     # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
     # submitter reaches is a free hand over the rendered page: fixed position,
@@ -1568,6 +1599,7 @@ class _StaticHTMLSanitizer(HTMLParser):
         # open and the drop is only apparent.
         self.dropped: list[str] = []
         self.mismatched_drop = False
+        self.head_start: int | None = None
 
     @property
     def _suppressed(self) -> bool:
@@ -1609,17 +1641,23 @@ class _StaticHTMLSanitizer(HTMLParser):
             if not closed:
                 self.script_depth = 1
             return
-        if tag == "meta":
+        if tag in {"link", "meta"}:
             return
         if tag == "base":
             self.bases.append(dict(attrs).get("href"))
+            return
+        if tag == "head":
+            if self.head_start is not None:
+                raise VerificationError("generated HTML nests head elements")
+            self.parts.append("<head>")
+            self.head_start = len(self.parts)
             return
 
         attr_names = {name.lower() for name, _value in attrs}
         binding = next(
             (value for name, value in attrs if name.lower() == "data-binding"), None
         )
-        if binding and binding.startswith("const-") and "id" in attr_names:
+        if self.head_start is None and binding and binding.startswith("const-") and "id" in attr_names:
             declaration = binding.removeprefix("const-")
             if declaration in self.declarations:
                 self.found_declarations.add(declaration)
@@ -1668,7 +1706,16 @@ class _StaticHTMLSanitizer(HTMLParser):
             if tag == "script":
                 self.script_depth = 0
             return
-        if tag not in {"base", "meta", "script"}:
+        if tag == "head":
+            if self.head_start is None:
+                raise VerificationError("generated HTML closes a head it did not open")
+            # The emitted head is entirely renderer-owned. Titles and other
+            # generated input metadata do not enter the frozen stylesheet head.
+            del self.parts[self.head_start:]
+            self.head_start = None
+            self.parts.append("</head>")
+            return
+        if tag not in {"base", "link", "meta", "script"}:
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
@@ -1684,16 +1731,22 @@ class _StaticHTMLSanitizer(HTMLParser):
             self.parts.append(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:
-        if not self._suppressed:
-            self.parts.append(f"<!--{data}-->")
+        # Python and HTML5 accept different comment endings. Never round-trip
+        # an input comment into markup a browser might tokenize differently.
+        pass
 
     def handle_decl(self, decl: str) -> None:
         if not self._suppressed:
-            self.parts.append(f"<!{decl}>")
+            if decl.lower() != "doctype html":
+                raise VerificationError("generated HTML contains an unsupported declaration")
+            self.parts.append("<!doctype html>")
 
     def handle_pi(self, data: str) -> None:
         if not self._suppressed:
-            self.parts.append(f"<?{data}>")
+            raise VerificationError("generated HTML contains a processing instruction")
+
+    def unknown_decl(self, data: str) -> None:
+        raise VerificationError("generated HTML contains a marked section")
 
 
 def static_html_sanitize(
@@ -1770,191 +1823,28 @@ def static_html_sanitize(
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
+    stylesheet_src = str(PurePosixPath(sanitizer_src).with_name("palomar-render.css"))
+    stylesheet = f'<link rel="stylesheet" href="{html.escape(stylesheet_src, quote=True)}">'
     head_pattern = r"(<head\b[^>]*>)"
     if len(re.findall(head_pattern, text, flags=re.IGNORECASE)) != 1:
         raise VerificationError("generated HTML does not contain exactly one head element")
+    head_start = re.search(head_pattern, text, flags=re.IGNORECASE).start()
+    if not re.fullmatch(
+        r"[ \t\r\n\f]*(?:<!doctype html>[ \t\r\n\f]*)?"
+        r"<html(?:[ \t\r\n\f]+[^<>]*)?>[ \t\r\n\f]*", text[:head_start],
+    ):
+        raise VerificationError("generated HTML has a noncanonical document prefix")
     text = re.sub(
         head_pattern,
-        rf"\1\n    {meta}\n    {scripts}",
+        rf"\1\n    {meta}\n    {stylesheet}\n    {scripts}",
         text,
         count=1,
         flags=re.IGNORECASE,
     )
-    surface_style = """<style id="palomar-declaration-style">
-      /* The registry page that frames this document follows the browser's
-         light and dark preference, so this document has to follow with it.
-         Nothing is passed across the origin boundary to make that happen: the
-         frame is laid out by the same browser, so the query below answers the
-         same way the page's does.
-
-         Verso's stylesheets name light colours directly, and a published
-         bundle is immutable, so the answers are frozen here as a palette
-         rather than read from the page. The dark values are the page's own, so
-         the frame sits on the paper it is drawn on. Every rule below this block
-         spends a token, never a literal.
-
-         The light values are Verso's own wherever a reader meets them: the
-         code surface, the docstring frames, the signature popup and the tactic
-         marks all render exactly as before. Where Verso reached for a colour
-         off its own scale — `black` popup borders, a `red` error underline,
-         `#e5e5e5` message panels, Bootstrap greys in the page shell — the
-         token takes over and light shifts a shade. Those are the diagnostic
-         panels and the shell a reader sees only with scripts disabled.
-         Carrying a second light value for each of them would have doubled a
-         palette that every future bundle is stuck with, to preserve choices
-         that were incidental. */
-      :root {
-        color-scheme: light dark;
-        --palomar-paper: #ffffff;
-        --palomar-ink: #24292e;
-        --palomar-line: #dddddd;
-        --palomar-edge: #888888;
-        --palomar-raise: #eeeeee;
-        --palomar-panel: #ffffff;
-        --palomar-rule: #e1e4e8;
-        --palomar-link: #0066cc;
-        --palomar-alarm: #b42318;
-        --palomar-alarm-paper: #ffb3b3;
-        --palomar-info: #4777ff;
-        --palomar-info-paper: #4777ff;
-        --palomar-mark: #bbbbbb;
-        --palomar-mark-on: #999999;
-        --palomar-shadow: rgb(0 0 0 / 22%);
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --palomar-paper: #101216;
-          --palomar-ink: #e8eaee;
-          --palomar-line: #686f7c;
-          --palomar-edge: #8e96a3;
-          --palomar-raise: #242933;
-          --palomar-panel: #1c2027;
-          --palomar-rule: #3a404b;
-          --palomar-link: #8ab4f8;
-          --palomar-alarm: #ff9e91;
-          --palomar-alarm-paper: #3a1c1a;
-          --palomar-info: #8ab4f8;
-          --palomar-info-paper: #1c3a6b;
-          --palomar-mark: #686f7c;
-          --palomar-mark-on: #8e96a3;
-          --palomar-shadow: rgb(0 0 0 / 55%);
-        }
-      }
-      html { height: auto !important; min-height: 100%; overflow: auto !important;
-        overscroll-behavior: contain; }
-      body { height: auto !important; min-height: 100%; margin: 0;
-        overflow: visible !important; }
-      html, body { background: var(--palomar-paper); color: var(--palomar-ink); }
-      .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
-      .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
-      .palomar-declaration-surface .md-text::before,
-      .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
-      /* code.css paints the code surface and its docstring frames outright,
-         and this stylesheet is the last one in the head, so restating them at
-         equal specificity is enough to take them over. */
-      .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
-      .code-content .verso-text,
-      .code-content .md-text { border-color: var(--palomar-line); }
-      /* Each of these repeats a Verso selector exactly rather than writing a
-         shorter one that happens to reach the same elements. `:has()` and
-         `:not()` take the specificity of their argument, so a hand-shortened
-         selector loses to the original and the rule silently does nothing;
-         repeating it makes source order the only thing that decides, and this
-         stylesheet is last. */
-      @media (hover: hover) {
-        .hl.lean .token.binding-hl,
-        .hl.lean .literal:hover,
-        .hl.lean .token.typed:hover { background-color: var(--palomar-raise); }
-        .hl.lean .has-info.error:hover { background-color: var(--palomar-alarm-paper); }
-        .hl.lean .has-info.information:hover { background-color: var(--palomar-info-paper); }
-        .hl.lean .tactic:has(> .tactic-toggle:not(:checked))
-          > label:hover:not(:has(.tactic > label:hover)) {
-          background-color: var(--palomar-raise); }
-      }
-      .hl.lean .token .hover-info,
-      .hl.lean .has-info .hover-info { background-color: var(--palomar-panel);
-        border-color: var(--palomar-edge); }
-      .hl.lean .hover-info code { color: inherit; }
-      .hl.lean .hover-info .sep { border-top-color: var(--palomar-rule); }
-      .hl.lean .hover-info.messages > code.error { background-color: var(--palomar-panel);
-        border-left-color: var(--palomar-alarm); }
-      .hl.lean .hover-info.messages > code.information { background-color: var(--palomar-panel);
-        border-left-color: var(--palomar-info); }
-      .hl.lean .has-info.error :not(.tactic-state):not(.tactic-state *) {
-        text-decoration-color: var(--palomar-alarm); }
-      /* Verso's own fallback here is the keyword `blue`, which on dark paper is
-         an underline nobody can see. */
-      .hl.lean .has-info.information :not(.tactic-state):not(.tactic-state *) {
-        text-decoration-color: var(--palomar-info); }
-      .hl.lean .tactic-state { background-color: var(--palomar-panel);
-        border-color: var(--palomar-edge); }
-      .hl.lean.popup .tactic-state { background-color: var(--palomar-panel); }
-      /* The pill that says a tactic block can be opened, and the triangle that
-         says a case can. Verso draws the pill faintly on purpose, so the two
-         marks keep their own tokens rather than borrowing the border ones; the
-         triangle it draws in `black`, which is text, so it spends the ink. */
-      .hl.lean .tactic > label::after { border-color: var(--palomar-mark); }
-      .hl.lean .tactic > label:has(+ .tactic-toggle:checked)::after {
-        border-color: var(--palomar-mark-on); background-color: var(--palomar-mark-on); }
-      .hl.lean .case-label:has(input[type="checkbox"])::before {
-        background-color: var(--palomar-ink); }
-      .palomar-hover {
-        padding: .65rem !important; border: 1px solid var(--palomar-edge) !important;
-        border-radius: .35rem; background: var(--palomar-panel) !important;
-        color: var(--palomar-ink) !important;
-        box-shadow: 0 .25rem 1rem var(--palomar-shadow);
-        /* The pointer must never land on the popup. If it does, it has left
-           the token, so the popup hides, so the pointer is over the token
-           again, so it shows: a flicker that sustains itself. */
-        pointer-events: none;
-        /* Lean signatures are long and were being cut off inside a 400px box.
-           Wrap them instead, and only where they can be broken. */
-        white-space: pre-wrap;
-        overflow-wrap: break-word;
-      }
-      .palomar-hover .hl.lean, .palomar-hover .popup,
-      .palomar-hover .hover-info { white-space: pre-wrap; }
-      .palomar-hover .popup,
-      .palomar-hover .hover-info,
-      .palomar-hover .docstring { background: var(--palomar-panel) !important;
-        color: var(--palomar-ink) !important; }
-      /* Verso separates a signature from its docstring with an empty span and
-         leaves the spacing to a stylesheet we do not ship, so the two ran
-         together: "... : Type (max u_7 u_8)The standard real/complex Euclidean
-         space ...". The docstring is also still an inline <code>, because the
-         Markdown renderer that would have made it a block is not loaded here. */
-      .palomar-hover .sep { display: block; height: 0; }
-      .palomar-hover .docstring {
-        display: block;
-        margin-top: .55rem;
-        padding-top: .55rem;
-        border-top: 1px solid var(--palomar-rule);
-      }
-      .palomar-render-error { margin: 1rem; font-family: sans-serif; }
-      /* Verso's page shell, which a reader sees only where this document's
-         scripts do not run: the runtime replaces the whole body on both its
-         success and its failure path. It is answered broadly rather than rule
-         by rule, because normalising a shell nobody reaches is not worth
-         freezing a dozen more declarations into every published bundle. */
-      .sidebar { background: var(--palomar-raise); }
-      .title-bar, .hamburger { background: var(--palomar-paper); }
-      .sidebar, .title-bar, .hamburger { border-color: var(--palomar-line); }
-      .hamburger span { background: var(--palomar-ink); }
-      .module-tree summary a, .module-tree .leaf a,
-      .breadcrumbs a { color: var(--palomar-link); }
-      .module-tree summary:hover,
-      .breadcrumbs a:hover { background-color: var(--palomar-raise); }
-      .module-tree summary::before { color: var(--palomar-ink); }
-      .module-tree summary.current,
-      .module-tree .current { background-color: var(--palomar-link);
-        color: var(--palomar-paper); }
-      .module-tree summary.current a,
-      .module-tree .current a { color: var(--palomar-paper); }
-      .breadcrumbs .current,
-      .breadcrumbs li:not(:last-child)::after { color: var(--palomar-ink); }
-    </style>"""
+    surface_style = f'<style id="palomar-declaration-style">{SURFACE_STYLES}</style>'
     text, closed_heads = re.subn(
-        r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
+        r"(</head\s*>)", lambda match: f"    {surface_style}\n  {match[1]}",
+        text, count=1, flags=re.IGNORECASE
     )
     if closed_heads != 1:
         raise VerificationError("generated HTML does not close its head element")
@@ -2045,9 +1935,10 @@ def sanitize_bundle(
     found_entrypoint = False
     (output_dir / "palomar-sanitize.js").write_text(RUNTIME_SANITIZER, encoding="utf-8")
     (output_dir / "palomar-verso.js").write_text(VERSO_RUNTIME, encoding="utf-8")
+    (output_dir / "palomar-render.css").write_text(RENDER_STYLES, encoding="utf-8")
     write_json(output_dir / "challenge-metadata.json", metadata)
     for source, relative in source_files:
-        if source.suffix.lower() == ".js":
+        if source.suffix.lower() in {".css", ".js"}:
             continue
         relative_path = PurePosixPath(relative)
         is_entrypoint = relative_path == source_entrypoint
@@ -3342,9 +3233,8 @@ def execute(args: argparse.Namespace) -> int:
         )
 
         raw_output = workspace / ".lake" / "build" / "palomar-render-raw"
-        clean_output = workspace / ".lake" / "build" / "palomar-render-clean"
+        clean_output = work / "palomar-render-clean"
         raw_output.mkdir()
-        clean_output.mkdir()
         report["stage"] = "verso-html"
         write_json(output, report)
         sandboxed_run(
@@ -3368,12 +3258,19 @@ def execute(args: argparse.Namespace) -> int:
 
         report["stage"] = "sanitize"
         write_json(output, report)
+        clean_output.mkdir()
+        sanitize_state = Path(tempfile.mkdtemp(prefix="sanitize-state-", dir=work))
+        sanitize_home = sanitize_state / "home"
+        sanitize_tmp = sanitize_state / "tmp"
+        sanitize_home.mkdir()
+        sanitize_tmp.mkdir()
+        require_protected_paths([clean_output, sanitize_state], writable_directories)
+        sanitize_env = {**env, "HOME": str(sanitize_home), "TMPDIR": str(sanitize_tmp)}
         sanitize_diagnostic = clean_output / ".palomar-sanitize-diagnostic.json"
         sanitize_diagnostic.unlink(missing_ok=True)
         sanitized = sandboxed_run(
             [
-                str(python),
-                str(renderer),
+                *isolated_python(python, str(renderer)),
                 "sanitize",
                 "--input-dir",
                 str(raw_output),
@@ -3395,9 +3292,8 @@ def execute(args: argparse.Namespace) -> int:
                 str(audit_declarations_path),
             ],
             cwd=workspace,
-            environment=env,
-            writable_directories=writable_directories,
-            writable_files=writable_files,
+            environment=sanitize_env,
+            writable_directories=[clean_output, sanitize_home, sanitize_tmp],
             readable_paths=[*readable_paths, audit_declarations_path],
             executable_paths=allowed_exec,
             tools=tools,
