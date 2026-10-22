@@ -79,6 +79,8 @@ INLINE_STYLE_CASES = (
 # is meant to remove the element. SVG and MathML keep the case they were
 # written in rather than being folded to upper case like HTML.
 RUNTIME_SANITIZER_ELEMENT_CASES = (
+    ("STYLE", True),
+    ("LINK", True),
     ("svg", True),
     ("math", True),
     ("DIALOG", True),
@@ -1529,7 +1531,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "c39c4bc61544b0c0b9b6f0605859aceb11a2bf9cbb5c9f22c492d938243dbea7",
+            "7f5cea2896743f584f7397ddea879b4af8c9424d8ae5e8f81b14243c0bef5eb2",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
@@ -2326,6 +2328,43 @@ end Audit.Task
             },
         )
 
+    def test_stylesheets_are_renderer_owned_in_static_and_dynamic_content(self):
+        source = '''<html><head><base href="../">
+<style id="palomar-declaration-style">body { display:none }</style>
+<LINK REL="stylesheet" href="evil.css"><link rel="preload" as="style" href="evil.css">
+</head><body><style>* { opacity:0 }</style><p>Visible</p></body></html>'''
+        sanitized = static_html_sanitize(source, "../palomar-sanitize.js", "../palomar-verso.js")
+        self.assertNotIn("display:none", sanitized)
+        self.assertNotIn("opacity:0", sanitized)
+        self.assertNotIn("evil.css", sanitized)
+        self.assertEqual(sanitized.count('<style id="palomar-declaration-style">'), 1)
+        self.assertIn('<link rel="stylesheet" href="../palomar-render.css">', sanitized)
+        self.assertIn("<p>Visible</p>", sanitized)
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is needed to run the browser sanitizer")
+        harness = r'''
+globalThis.window = {};
+function element(tagName) {
+  return {tagName, attributes: [], removed: false, remove() {this.removed = true;}};
+}
+const ownedStyle = element("STYLE"), ownedLink = element("LINK");
+globalThis.document = {
+  head: {querySelectorAll() {return [ownedStyle, ownedLink];}},
+  addEventListener() {}
+};
+''' + RUNTIME_SANITIZER + r'''
+const lookalikeStyle = element("STYLE"), lookalikeLink = element("LINK");
+lookalikeStyle.attributes = [{name:"id", value:"palomar-declaration-style"}];
+lookalikeLink.attributes = [{name:"href", value:"../palomar-render.css"}];
+const nodes = [ownedStyle, ownedLink, lookalikeStyle, lookalikeLink];
+window.palomarSanitize({querySelectorAll() {return nodes;}});
+console.log(JSON.stringify(nodes.map(node => node.removed)));
+'''
+        result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), [False, False, True, True])
+
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2733,6 +2772,7 @@ instPartialOrderElement</span></body></html>'''
             )
             (raw / "marked.js").write_text("window.marked = {parse: x => x};", encoding="utf-8")
             (raw / "code.css").write_text("code { color: black; }", encoding="utf-8")
+            (raw / "palomar-render.css").write_text("body { display:none }", encoding="utf-8")
             tree_hash = sanitize_bundle(raw, output, challenge_module="Challenge")
             manifest = json.loads((output / "artifact-manifest.json").read_text())
             self.assertEqual(manifest["artifact_tree_sha256"], tree_hash)
@@ -2743,6 +2783,10 @@ instPartialOrderElement</span></body></html>'''
             metadata = json.loads((output / "challenge-metadata.json").read_text())
             self.assertEqual(metadata["declarations"], [])
             self.assertFalse((output / "marked.js").exists())
+            self.assertFalse((output / "code.css").exists())
+            from scripts.render_styles import RENDER_STYLES
+            self.assertEqual((output / "palomar-render.css").read_text(), RENDER_STYLES)
+            self.assertNotIn("display:none", RENDER_STYLES)
 
     def test_bundle_maps_the_original_nested_module_to_the_stable_entrypoint(self):
         with tempfile.TemporaryDirectory() as directory:

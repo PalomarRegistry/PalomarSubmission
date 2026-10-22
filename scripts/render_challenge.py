@@ -32,6 +32,7 @@ from scripts.render_report import (  # noqa: E402
     intake_report,
     parse_prepared_report,
 )
+from scripts.render_styles import RENDER_STYLES  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE, lake_package_name  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
@@ -190,8 +191,12 @@ RUNTIME_SANITIZER = r'''(() => {
   // own case, so match on the folded one.
   const blocked = new Set([
     "APPLET", "BASE", "DIALOG", "EMBED", "FORM", "FRAME", "FRAMESET", "IFRAME",
-    "MATH", "META", "OBJECT", "SCRIPT", "SVG"
+    "LINK", "MATH", "META", "OBJECT", "SCRIPT", "STYLE", "SVG"
   ]);
+  // Static sanitization drops every input stylesheet and injects only our own.
+  // Keep those exact nodes, never a later tooltip node with matching attributes.
+  // This script is deferred, so the complete sanitized head is already parsed.
+  const trustedStyles = new WeakSet(document.head?.querySelectorAll("style,link") ?? []);
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
@@ -229,7 +234,7 @@ RUNTIME_SANITIZER = r'''(() => {
 
   function sanitize(root) {
     for (const element of Array.from(root.querySelectorAll("*"))) {
-      if (blocked.has(element.tagName.toUpperCase())) {
+      if (blocked.has(element.tagName.toUpperCase()) && !trustedStyles.has(element)) {
         element.remove();
         continue;
       }
@@ -1538,7 +1543,10 @@ class _StaticHTMLSanitizer(HTMLParser):
     # only SVG is the manual genre's diagram files, `latexMath` renders to
     # nothing, and no genre emits a dialog), so their subtrees are dropped
     # whole.
-    _DROPPED_ELEMENTS = {"dialog", "math", "svg"}
+    # Every input stylesheet is untrusted, including Verso's own emitted style:
+    # we inject fixed renderer-owned CSS after parsing. LINK is void and is
+    # dropped separately without opening a suppressed subtree.
+    _DROPPED_ELEMENTS = {"dialog", "math", "style", "svg"}
 
     # `style-src` has to keep `'unsafe-inline'`, so any inline declaration a
     # submitter reaches is a free hand over the rendered page: fixed position,
@@ -1609,7 +1617,7 @@ class _StaticHTMLSanitizer(HTMLParser):
             if not closed:
                 self.script_depth = 1
             return
-        if tag == "meta":
+        if tag in {"link", "meta"}:
             return
         if tag == "base":
             self.bases.append(dict(attrs).get("href"))
@@ -1668,7 +1676,7 @@ class _StaticHTMLSanitizer(HTMLParser):
             if tag == "script":
                 self.script_depth = 0
             return
-        if tag not in {"base", "meta", "script"}:
+        if tag not in {"base", "link", "meta", "script"}:
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
@@ -1770,12 +1778,14 @@ def static_html_sanitize(
         f'<script defer src="{sanitizer_src}"></script>\n'
         f'    <script defer src="{runtime_src}"></script>'
     )
+    stylesheet_src = str(PurePosixPath(sanitizer_src).with_name("palomar-render.css"))
+    stylesheet = f'<link rel="stylesheet" href="{html.escape(stylesheet_src, quote=True)}">'
     head_pattern = r"(<head\b[^>]*>)"
     if len(re.findall(head_pattern, text, flags=re.IGNORECASE)) != 1:
         raise VerificationError("generated HTML does not contain exactly one head element")
     text = re.sub(
         head_pattern,
-        rf"\1\n    {meta}\n    {scripts}",
+        rf"\1\n    {meta}\n    {stylesheet}\n    {scripts}",
         text,
         count=1,
         flags=re.IGNORECASE,
@@ -2045,9 +2055,10 @@ def sanitize_bundle(
     found_entrypoint = False
     (output_dir / "palomar-sanitize.js").write_text(RUNTIME_SANITIZER, encoding="utf-8")
     (output_dir / "palomar-verso.js").write_text(VERSO_RUNTIME, encoding="utf-8")
+    (output_dir / "palomar-render.css").write_text(RENDER_STYLES, encoding="utf-8")
     write_json(output_dir / "challenge-metadata.json", metadata)
     for source, relative in source_files:
-        if source.suffix.lower() == ".js":
+        if source.suffix.lower() in {".css", ".js"}:
             continue
         relative_path = PurePosixPath(relative)
         is_entrypoint = relative_path == source_entrypoint
