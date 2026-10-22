@@ -49,7 +49,7 @@ from scripts.render_challenge import (
     write_core_notation_audit_handoff,
 )
 from scripts.render_report import AcceptedRenderPaths
-from scripts.render_styles import RENDER_STYLES
+from scripts.render_styles import RENDER_STYLES, SURFACE_STYLES
 from scripts.verification_errors import VerificationError
 
 # Inline style values and whether the sanitizers are meant to keep them. Both
@@ -1532,7 +1532,7 @@ end Audit.Task
     def test_runtime_script_digests_match_database_contract(self):
         self.assertEqual(
             hashlib.sha256(RUNTIME_SANITIZER.encode()).hexdigest(),
-            "64ae1242cd0d318a3e264b66d9455ed3173f2609672c1597ec3d3e0050564892",
+            "37003e46e52ea8ca4ab4dc59e99a5fa35c4db8e029abddd7c4996df8b94815f6",
         )
         self.assertEqual(
             hashlib.sha256(VERSO_RUNTIME.encode()).hexdigest(),
@@ -2356,25 +2356,48 @@ end Audit.Task
         harness = r'''
 globalThis.window = {};
 function element(tagName) {
-  return {tagName, attributes: [], removed: false, remove() {this.removed = true;}};
+  return {tagName, attributes: [], removed: false, remove() {this.removed = true;},
+    getAttribute(name) {return this.attributes.find(a => a.name === name)?.value ?? null;}};
 }
 const ownedStyle = element("STYLE"), ownedLink = element("LINK");
-ownedLink.attributes = [{name:"href", value:"palomar-render.css"}];
+ownedStyle.attributes = [{name:"id", value:"palomar-declaration-style"}];
+ownedStyle.textContent = SURFACE_STYLE;
+ownedLink.attributes = [{name:"rel", value:"stylesheet"}, {name:"href", value:"palomar-render.css"}];
 ownedLink.removeAttribute = () => {throw new Error("trusted stylesheet URL was rewritten");};
+const forgedHeadStyle = element("STYLE");
+forgedHeadStyle.attributes = [{name:"id", value:"palomar-declaration-style"}];
+forgedHeadStyle.textContent = "body {display:none}";
 globalThis.document = {
-  head: {querySelectorAll() {return [ownedStyle, ownedLink];}},
+  currentScript: {src:"https://render.example/bundle/palomar-sanitize.js"},
+  baseURI: "https://render.example/bundle/index.html",
+  head: {querySelectorAll() {return [ownedStyle, ownedLink, forgedHeadStyle];}},
   addEventListener() {}
 };
 ''' + RUNTIME_SANITIZER + r'''
 const lookalikeStyle = element("STYLE"), lookalikeLink = element("LINK");
 lookalikeStyle.attributes = [{name:"id", value:"palomar-declaration-style"}];
 lookalikeLink.attributes = [{name:"href", value:"../palomar-render.css"}];
-const nodes = [ownedStyle, ownedLink, lookalikeStyle, lookalikeLink];
+const nodes = [ownedStyle, ownedLink, lookalikeStyle, lookalikeLink, forgedHeadStyle];
 window.palomarSanitize({querySelectorAll() {return nodes;}});
 console.log(JSON.stringify(nodes.map(node => node.removed)));
 '''
+        harness = "const SURFACE_STYLE = " + json.dumps(SURFACE_STYLES) + ";\n" + harness
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=True)
-        self.assertEqual(json.loads(result.stdout), [False, False, True, True])
+        self.assertEqual(json.loads(result.stdout), [False, False, True, True, True])
+
+    def test_the_head_is_fixed_and_ambiguous_input_markup_is_not_round_tripped(self):
+        def sanitize(head, body=""):
+            return static_html_sanitize(
+                f'<html><head><base href="../">{head}</head><body>{body}</body></html>',
+                "../palomar-sanitize.js", "../palomar-verso.js",
+            )
+        canonical = sanitize("")
+        self.assertEqual(canonical, sanitize('<title>candidate title</title><!-- harmless -->'))
+        mismatch = '<!-- hidden --!><style>body{display:none}</style>-->'
+        self.assertNotIn("display:none", sanitize("", mismatch))
+        for markup in ["<![CDATA[<style>body{display:none}</style>]]>", "<?probe?>"]:
+            with self.subTest(markup=markup), self.assertRaises(VerificationError):
+                sanitize("", markup)
 
     def test_module_doc_and_surface_metadata_are_parsed_from_lean(self):
         with tempfile.TemporaryDirectory() as directory:

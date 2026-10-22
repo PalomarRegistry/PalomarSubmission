@@ -32,7 +32,7 @@ from scripts.render_report import (  # noqa: E402
     intake_report,
     parse_prepared_report,
 )
-from scripts.render_styles import RENDER_STYLES  # noqa: E402
+from scripts.render_styles import RENDER_STYLES, SURFACE_STYLES  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE, lake_package_name  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
@@ -196,7 +196,26 @@ RUNTIME_SANITIZER = r'''(() => {
   // Static sanitization drops every input stylesheet and injects only our own.
   // Keep those exact nodes, never a later tooltip node with matching attributes.
   // This script is deferred, so the complete sanitized head is already parsed.
-  const trustedStyles = new WeakSet(document.head?.querySelectorAll("style,link") ?? []);
+  const expectedSurface = __PALOMAR_SURFACE_STYLE__;
+  const runtimeUrl = document.currentScript?.src;
+  const expectedCss = runtimeUrl ? new URL("palomar-render.css", runtimeUrl).href : null;
+  const trustedStyles = new WeakSet();
+  for (const element of document.head?.querySelectorAll("style,link") ?? []) {
+    const style = element.tagName.toUpperCase() === "STYLE"
+      && element.attributes.length === 1
+      && element.getAttribute("id") === "palomar-declaration-style"
+      && element.textContent === expectedSurface;
+    let link = false;
+    if (element.tagName.toUpperCase() === "LINK" && element.attributes.length === 2
+        && element.getAttribute("rel") === "stylesheet") {
+      try {
+        link = expectedCss !== null
+          && new URL(element.getAttribute("href"), document.baseURI).href === expectedCss;
+      } catch (_) {}
+    }
+    if (style || link) trustedStyles.add(element);
+    else element.remove();
+  }
   const activeAttributes = new Set([
     "action", "formaction", "ping", "srcdoc"
   ]);
@@ -275,7 +294,7 @@ RUNTIME_SANITIZER = r'''(() => {
   window.palomarSanitize = sanitize;
   document.addEventListener("DOMContentLoaded", () => sanitize(document), {once: true});
 })();
-'''
+'''.replace("__PALOMAR_SURFACE_STYLE__", json.dumps(SURFACE_STYLES))
 
 
 VERSO_RUNTIME = r'''(() => {
@@ -1579,6 +1598,7 @@ class _StaticHTMLSanitizer(HTMLParser):
         # open and the drop is only apparent.
         self.dropped: list[str] = []
         self.mismatched_drop = False
+        self.head_start: int | None = None
 
     @property
     def _suppressed(self) -> bool:
@@ -1625,12 +1645,18 @@ class _StaticHTMLSanitizer(HTMLParser):
         if tag == "base":
             self.bases.append(dict(attrs).get("href"))
             return
+        if tag == "head":
+            if self.head_start is not None:
+                raise VerificationError("generated HTML nests head elements")
+            self.parts.append("<head>")
+            self.head_start = len(self.parts)
+            return
 
         attr_names = {name.lower() for name, _value in attrs}
         binding = next(
             (value for name, value in attrs if name.lower() == "data-binding"), None
         )
-        if binding and binding.startswith("const-") and "id" in attr_names:
+        if self.head_start is None and binding and binding.startswith("const-") and "id" in attr_names:
             declaration = binding.removeprefix("const-")
             if declaration in self.declarations:
                 self.found_declarations.add(declaration)
@@ -1679,6 +1705,15 @@ class _StaticHTMLSanitizer(HTMLParser):
             if tag == "script":
                 self.script_depth = 0
             return
+        if tag == "head":
+            if self.head_start is None:
+                raise VerificationError("generated HTML closes a head it did not open")
+            # The emitted head is entirely renderer-owned. Titles and other
+            # generated input metadata do not enter the frozen stylesheet head.
+            del self.parts[self.head_start:]
+            self.head_start = None
+            self.parts.append("</head>")
+            return
         if tag not in {"base", "link", "meta", "script"}:
             self.parts.append(f"</{tag}>")
 
@@ -1695,16 +1730,22 @@ class _StaticHTMLSanitizer(HTMLParser):
             self.parts.append(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:
-        if not self._suppressed:
-            self.parts.append(f"<!--{data}-->")
+        # Python and HTML5 accept different comment endings. Never round-trip
+        # an input comment into markup a browser might tokenize differently.
+        pass
 
     def handle_decl(self, decl: str) -> None:
         if not self._suppressed:
-            self.parts.append(f"<!{decl}>")
+            if decl.lower() != "doctype html":
+                raise VerificationError("generated HTML contains an unsupported declaration")
+            self.parts.append("<!doctype html>")
 
     def handle_pi(self, data: str) -> None:
         if not self._suppressed:
-            self.parts.append(f"<?{data}>")
+            raise VerificationError("generated HTML contains a processing instruction")
+
+    def unknown_decl(self, data: str) -> None:
+        raise VerificationError("generated HTML contains a marked section")
 
 
 def static_html_sanitize(
@@ -1793,209 +1834,7 @@ def static_html_sanitize(
         count=1,
         flags=re.IGNORECASE,
     )
-    surface_style = """<style id="palomar-declaration-style">
-      /* The frame follows the browser's light/dark preference independently
-         of its parent document. These tokens also bind Verso's colour API,
-         including token hovers, messages and proof states. Severity fills
-         keep foreground text readable in both modes. */
-      :root {
-        color-scheme: light dark;
-        --palomar-paper: #ffffff;
-        --palomar-ink: #24292e;
-        --palomar-line: #dddddd;
-        --palomar-edge: #888888;
-        --palomar-raise: #eeeeee;
-        --palomar-panel: #ffffff;
-        --palomar-rule: #e1e4e8;
-        --palomar-link: #0066cc;
-        --palomar-alarm: #b42318;
-        --palomar-alarm-paper: #ffb3b3;
-        --palomar-info: #4777ff;
-        --palomar-info-paper: #dbe8ff;
-        --palomar-warning: #8a5b00;
-        --palomar-warning-paper: #fff0cc;
-        --palomar-mark: #bbbbbb;
-        --palomar-mark-on: #999999;
-        --palomar-shadow: rgb(0 0 0 / 22%);
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --palomar-paper: #101216;
-          --palomar-ink: #e8eaee;
-          --palomar-line: #686f7c;
-          --palomar-edge: #8e96a3;
-          --palomar-raise: #242933;
-          --palomar-panel: #1c2027;
-          --palomar-rule: #3a404b;
-          --palomar-link: #8ab4f8;
-          --palomar-alarm: #ff9e91;
-          --palomar-alarm-paper: #3a1c1a;
-          --palomar-info: #8ab4f8;
-          --palomar-info-paper: #1c3a6b;
-          --palomar-warning: #ffd580;
-          --palomar-warning-paper: #3b2b14;
-          --palomar-mark: #686f7c;
-          --palomar-mark-on: #8e96a3;
-          --palomar-shadow: rgb(0 0 0 / 55%);
-        }
-      }
-      /* Bind the shipped Verso stylesheet's colour API to the same palette.
-         Its more specific hover/tooltip selectors then follow the theme too. */
-      :root {
-        --verso-code-color: var(--palomar-ink);
-        --verso-text-color: var(--palomar-ink);
-        --verso-structure-color: var(--palomar-ink);
-        --verso-selected-color: var(--palomar-raise);
-        --verso-tooltip-color: var(--palomar-ink);
-        --verso-tooltip-bg-color: var(--palomar-panel);
-        --verso-tooltip-border-color: var(--palomar-edge);
-        --verso-tooltip-separator-color: var(--palomar-rule);
-        --verso-tactic-state-color: var(--palomar-ink);
-        --verso-tactic-state-bg-color: var(--palomar-panel);
-        --verso-tactic-state-border-color: var(--palomar-edge);
-        --verso-tactic-toggle-color: var(--palomar-mark);
-        --verso-tactic-toggle-checked-color: var(--palomar-mark-on);
-        --verso-code-const-color: var(--palomar-ink);
-        --verso-code-keyword-color: var(--palomar-ink);
-        --verso-code-var-color: var(--palomar-ink);
-        --verso-code-hover-bg-color: var(--palomar-raise);
-        --verso-code-info-color: var(--palomar-ink);
-        --verso-code-info-bg-color: transparent;
-        --verso-code-info-hover-color: var(--palomar-ink);
-        --verso-code-info-hover-bg-color: var(--palomar-info-paper);
-        --verso-info-indicator-color: var(--palomar-info);
-        --verso-message-info-color: var(--palomar-ink);
-        --verso-tooltip-info-color: var(--palomar-ink);
-        --verso-tooltip-info-bg-color: var(--palomar-panel);
-        --verso-tooltip-info-border-color: var(--palomar-info);
-        --verso-output-info-color: var(--palomar-info);
-        --verso-code-warning-color: var(--palomar-ink);
-        --verso-code-warning-bg-color: transparent;
-        --verso-code-warning-hover-color: var(--palomar-ink);
-        --verso-code-warning-hover-bg-color: var(--palomar-warning-paper);
-        --verso-warning-indicator-color: var(--palomar-warning);
-        --verso-message-warning-color: var(--palomar-ink);
-        --verso-tooltip-warning-color: var(--palomar-ink);
-        --verso-tooltip-warning-bg-color: var(--palomar-panel);
-        --verso-tooltip-warning-border-color: var(--palomar-warning);
-        --verso-output-warning-color: var(--palomar-warning);
-        --verso-code-error-color: var(--palomar-ink);
-        --verso-code-error-bg-color: transparent;
-        --verso-code-error-hover-color: var(--palomar-ink);
-        --verso-code-error-hover-bg-color: var(--palomar-alarm-paper);
-        --verso-error-indicator-color: var(--palomar-alarm);
-        --verso-message-error-color: var(--palomar-alarm);
-        --verso-tooltip-error-color: var(--palomar-ink);
-        --verso-tooltip-error-bg-color: var(--palomar-panel);
-        --verso-tooltip-error-border-color: var(--palomar-alarm);
-        --verso-output-error-color: var(--palomar-alarm);
-      }
-      html { height: auto !important; min-height: 100%; overflow: auto !important;
-        overscroll-behavior: contain; }
-      body { height: auto !important; min-height: 100%; margin: 0;
-        overflow: visible !important; }
-      html, body { background: var(--palomar-paper); color: var(--palomar-ink); }
-      .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
-      .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
-      .palomar-declaration-surface .md-text::before,
-      .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
-      /* code.css paints the code surface and its docstring frames outright,
-         and this stylesheet is the last one in the head, so restating them at
-         equal specificity is enough to take them over. */
-      .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
-      .code-content .verso-text,
-      .code-content .md-text { border-color: var(--palomar-line); }
-      /* Fallback rules cover historical markup. The shipped modern selectors,
-         including their more specific hover rules, use the aliases above. */
-      @media (hover: hover) {
-        .hl.lean .token.binding-hl,
-        .hl.lean .literal:hover,
-        .hl.lean .token.typed:hover { background-color: var(--palomar-raise); }
-        .hl.lean .has-info.error:hover { background-color: var(--palomar-alarm-paper); }
-        .hl.lean .has-info.information:hover { background-color: var(--palomar-info-paper); }
-        .hl.lean .tactic:has(> .tactic-toggle:not(:checked))
-          > label:hover:not(:has(.tactic > label:hover)) {
-          background-color: var(--palomar-raise); }
-      }
-      .hl.lean .token .hover-info,
-      .hl.lean .has-info .hover-info { background-color: var(--palomar-panel);
-        border-color: var(--palomar-edge); }
-      .hl.lean .hover-info code { color: inherit; }
-      .hl.lean .hover-info .sep { border-top-color: var(--palomar-rule); }
-      .hl.lean .hover-info.messages > code.error { background-color: var(--palomar-panel);
-        border-left-color: var(--palomar-alarm); }
-      .hl.lean .hover-info.messages > code.information { background-color: var(--palomar-panel);
-        border-left-color: var(--palomar-info); }
-      .hl.lean .has-info.error :not(.tactic-state):not(.tactic-state *) {
-        text-decoration-color: var(--palomar-alarm); }
-      /* Verso's own fallback here is the keyword `blue`, which on dark paper is
-         an underline nobody can see. */
-      .hl.lean .has-info.information :not(.tactic-state):not(.tactic-state *) {
-        text-decoration-color: var(--palomar-info); }
-      .hl.lean .tactic-state { background-color: var(--palomar-panel);
-        border-color: var(--palomar-edge); }
-      .hl.lean.popup .tactic-state { background-color: var(--palomar-panel); }
-      /* The pill that says a tactic block can be opened, and the triangle that
-         says a case can. Verso draws the pill faintly on purpose, so the two
-         marks keep their own tokens rather than borrowing the border ones; the
-         triangle it draws in `black`, which is text, so it spends the ink. */
-      .hl.lean .tactic > label::after { border-color: var(--palomar-mark); }
-      .hl.lean .tactic > label:has(+ .tactic-toggle:checked)::after {
-        border-color: var(--palomar-mark-on); background-color: var(--palomar-mark-on); }
-      .hl.lean .case-label:has(input[type="checkbox"])::before {
-        background-color: var(--palomar-ink); }
-      .palomar-hover {
-        padding: .65rem !important; border: 1px solid var(--palomar-edge) !important;
-        border-radius: .35rem; background: var(--palomar-panel) !important;
-        color: var(--palomar-ink) !important;
-        box-shadow: 0 .25rem 1rem var(--palomar-shadow);
-        /* The pointer must never land on the popup. If it does, it has left
-           the token, so the popup hides, so the pointer is over the token
-           again, so it shows: a flicker that sustains itself. */
-        pointer-events: none;
-        /* Lean signatures are long and were being cut off inside a 400px box.
-           Wrap them instead, and only where they can be broken. */
-        white-space: pre-wrap;
-        overflow-wrap: break-word;
-      }
-      .palomar-hover .hl.lean, .palomar-hover .popup,
-      .palomar-hover .hover-info { white-space: pre-wrap; }
-      .palomar-hover .popup,
-      .palomar-hover .hover-info,
-      .palomar-hover .docstring { background: var(--palomar-panel) !important;
-        color: var(--palomar-ink) !important; }
-      /* Give the block docstring one separator of its own, hiding Verso's
-         empty separator span so the popup does not acquire a second rule. */
-      .palomar-hover .sep { display: block; height: 0 !important; border: none !important; }
-      .palomar-hover .docstring {
-        display: block;
-        margin-top: .55rem;
-        padding-top: .55rem;
-        border-top: 1px solid var(--palomar-rule);
-      }
-      .palomar-render-error { margin: 1rem; font-family: sans-serif; }
-      /* Verso's page shell, which a reader sees only where this document's
-         scripts do not run: the runtime replaces the whole body on both its
-         success and its failure path. It is answered broadly rather than rule
-         by rule, because normalising a shell nobody reaches is not worth
-         freezing a dozen more declarations into every published bundle. */
-      .sidebar { background: var(--palomar-raise); }
-      .title-bar, .hamburger { background: var(--palomar-paper); }
-      .sidebar, .title-bar, .hamburger { border-color: var(--palomar-line); }
-      .hamburger span { background: var(--palomar-ink); }
-      .module-tree summary a, .module-tree .leaf a,
-      .breadcrumbs a { color: var(--palomar-link); }
-      .module-tree summary:hover,
-      .breadcrumbs a:hover { background-color: var(--palomar-raise); }
-      .module-tree summary::before { color: var(--palomar-ink); }
-      .module-tree summary.current,
-      .module-tree .current { background-color: var(--palomar-link);
-        color: var(--palomar-paper); }
-      .module-tree summary.current a,
-      .module-tree .current a { color: var(--palomar-paper); }
-      .breadcrumbs .current,
-      .breadcrumbs li:not(:last-child)::after { color: var(--palomar-ink); }
-    </style>"""
+    surface_style = f'<style id="palomar-declaration-style">{SURFACE_STYLES}</style>'
     text, closed_heads = re.subn(
         r"(</head\s*>)", rf"    {surface_style}\n  \1", text, count=1, flags=re.IGNORECASE
     )

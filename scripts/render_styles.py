@@ -1350,3 +1350,208 @@ pre,
 
 /* tippy-border.css */
 .tippy-box{border:1px transparent}.tippy-box[data-placement^=top]>.tippy-arrow:after{border-top-color:inherit;border-width:8px 8px 0;bottom:-8px;left:0}.tippy-box[data-placement^=bottom]>.tippy-arrow:after{border-bottom-color:inherit;border-width:0 8px 8px;top:-8px;left:0}.tippy-box[data-placement^=left]>.tippy-arrow:after{border-left-color:inherit;border-width:8px 0 8px 8px;right:-8px;top:0}.tippy-box[data-placement^=right]>.tippy-arrow:after{border-width:8px 8px 8px 0;left:-8px;top:0;border-right-color:inherit}.tippy-box[data-placement^=top]>.tippy-svg-arrow>svg:first-child:not(:last-child){top:17px}.tippy-box[data-placement^=bottom]>.tippy-svg-arrow>svg:first-child:not(:last-child){bottom:17px}.tippy-box[data-placement^=left]>.tippy-svg-arrow>svg:first-child:not(:last-child){left:12px}.tippy-box[data-placement^=right]>.tippy-svg-arrow>svg:first-child:not(:last-child){right:12px}.tippy-arrow{border-color:inherit}.tippy-arrow:after{content:"";z-index:-1;position:absolute;border-color:transparent;border-style:solid}"""
+
+
+SURFACE_STYLES = r"""
+      /* The frame follows the browser's light/dark preference independently
+         of its parent document. These tokens also bind Verso's colour API,
+         including token hovers, messages and proof states. Severity fills
+         keep foreground text readable in both modes. */
+      :root {
+        color-scheme: light dark;
+        --palomar-paper: #ffffff;
+        --palomar-ink: #24292e;
+        --palomar-line: #dddddd;
+        --palomar-edge: #888888;
+        --palomar-raise: #eeeeee;
+        --palomar-panel: #ffffff;
+        --palomar-rule: #e1e4e8;
+        --palomar-link: #0066cc;
+        --palomar-alarm: #b42318;
+        --palomar-alarm-paper: #ffb3b3;
+        --palomar-info: #4777ff;
+        --palomar-info-paper: #dbe8ff;
+        --palomar-warning: #8a5b00;
+        --palomar-warning-paper: #fff0cc;
+        --palomar-mark: #bbbbbb;
+        --palomar-mark-on: #999999;
+        --palomar-shadow: rgb(0 0 0 / 22%);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --palomar-paper: #101216;
+          --palomar-ink: #e8eaee;
+          --palomar-line: #686f7c;
+          --palomar-edge: #8e96a3;
+          --palomar-raise: #242933;
+          --palomar-panel: #1c2027;
+          --palomar-rule: #3a404b;
+          --palomar-link: #8ab4f8;
+          --palomar-alarm: #ff9e91;
+          --palomar-alarm-paper: #3a1c1a;
+          --palomar-info: #8ab4f8;
+          --palomar-info-paper: #1c3a6b;
+          --palomar-warning: #ffd580;
+          --palomar-warning-paper: #3b2b14;
+          --palomar-mark: #686f7c;
+          --palomar-mark-on: #8e96a3;
+          --palomar-shadow: rgb(0 0 0 / 55%);
+        }
+      }
+      /* Bind the shipped Verso stylesheet's colour API to the same palette.
+         Its more specific hover/tooltip selectors then follow the theme too. */
+      :root {
+        --verso-code-color: var(--palomar-ink);
+        --verso-text-color: var(--palomar-ink);
+        --verso-structure-color: var(--palomar-ink);
+        --verso-selected-color: var(--palomar-raise);
+        --verso-tooltip-color: var(--palomar-ink);
+        --verso-tooltip-bg-color: var(--palomar-panel);
+        --verso-tooltip-border-color: var(--palomar-edge);
+        --verso-tooltip-separator-color: var(--palomar-rule);
+        --verso-tactic-state-color: var(--palomar-ink);
+        --verso-tactic-state-bg-color: var(--palomar-panel);
+        --verso-tactic-state-border-color: var(--palomar-edge);
+        --verso-tactic-toggle-color: var(--palomar-mark);
+        --verso-tactic-toggle-checked-color: var(--palomar-mark-on);
+        --verso-code-const-color: var(--palomar-ink);
+        --verso-code-keyword-color: var(--palomar-ink);
+        --verso-code-var-color: var(--palomar-ink);
+        --verso-code-hover-bg-color: var(--palomar-raise);
+        --verso-code-info-color: var(--palomar-ink);
+        --verso-code-info-bg-color: transparent;
+        --verso-code-info-hover-color: var(--palomar-ink);
+        --verso-code-info-hover-bg-color: var(--palomar-info-paper);
+        --verso-info-indicator-color: var(--palomar-info);
+        --verso-message-info-color: var(--palomar-ink);
+        --verso-tooltip-info-color: var(--palomar-ink);
+        --verso-tooltip-info-bg-color: var(--palomar-panel);
+        --verso-tooltip-info-border-color: var(--palomar-info);
+        --verso-output-info-color: var(--palomar-info);
+        --verso-code-warning-color: var(--palomar-ink);
+        --verso-code-warning-bg-color: transparent;
+        --verso-code-warning-hover-color: var(--palomar-ink);
+        --verso-code-warning-hover-bg-color: var(--palomar-warning-paper);
+        --verso-warning-indicator-color: var(--palomar-warning);
+        --verso-message-warning-color: var(--palomar-ink);
+        --verso-tooltip-warning-color: var(--palomar-ink);
+        --verso-tooltip-warning-bg-color: var(--palomar-panel);
+        --verso-tooltip-warning-border-color: var(--palomar-warning);
+        --verso-output-warning-color: var(--palomar-warning);
+        --verso-code-error-color: var(--palomar-ink);
+        --verso-code-error-bg-color: transparent;
+        --verso-code-error-hover-color: var(--palomar-ink);
+        --verso-code-error-hover-bg-color: var(--palomar-alarm-paper);
+        --verso-error-indicator-color: var(--palomar-alarm);
+        --verso-message-error-color: var(--palomar-alarm);
+        --verso-tooltip-error-color: var(--palomar-ink);
+        --verso-tooltip-error-bg-color: var(--palomar-panel);
+        --verso-tooltip-error-border-color: var(--palomar-alarm);
+        --verso-output-error-color: var(--palomar-alarm);
+      }
+      html { height: auto !important; min-height: 100%; overflow: auto !important;
+        overscroll-behavior: contain; }
+      body { height: auto !important; min-height: 100%; margin: 0;
+        overflow: visible !important; }
+      html, body { background: var(--palomar-paper); color: var(--palomar-ink); }
+      .palomar-declaration-surface { box-sizing: border-box; padding: 1rem; }
+      .palomar-declaration-surface .code-content { margin: 0; max-width: none; padding: 0; }
+      .palomar-declaration-surface .md-text::before,
+      .palomar-declaration-surface .md-text::after { width: max-content; white-space: nowrap; }
+      /* code.css paints the code surface and its docstring frames outright,
+         and this stylesheet is the last one in the head, so restating them at
+         equal specificity is enough to take them over. */
+      .code-content { background: var(--palomar-paper); color: var(--palomar-ink); }
+      .code-content .verso-text,
+      .code-content .md-text { border-color: var(--palomar-line); }
+      /* Fallback rules cover historical markup. The shipped modern selectors,
+         including their more specific hover rules, use the aliases above. */
+      @media (hover: hover) {
+        .hl.lean .token.binding-hl,
+        .hl.lean .literal:hover,
+        .hl.lean .token.typed:hover { background-color: var(--palomar-raise); }
+        .hl.lean .has-info.error:hover { background-color: var(--palomar-alarm-paper); }
+        .hl.lean .has-info.information:hover { background-color: var(--palomar-info-paper); }
+        .hl.lean .tactic:has(> .tactic-toggle:not(:checked))
+          > label:hover:not(:has(.tactic > label:hover)) {
+          background-color: var(--palomar-raise); }
+      }
+      .hl.lean .token .hover-info,
+      .hl.lean .has-info .hover-info { background-color: var(--palomar-panel);
+        border-color: var(--palomar-edge); }
+      .hl.lean .hover-info code { color: inherit; }
+      .hl.lean .hover-info .sep { border-top-color: var(--palomar-rule); }
+      .hl.lean .hover-info.messages > code.error { background-color: var(--palomar-panel);
+        border-left-color: var(--palomar-alarm); }
+      .hl.lean .hover-info.messages > code.information { background-color: var(--palomar-panel);
+        border-left-color: var(--palomar-info); }
+      .hl.lean .has-info.error :not(.tactic-state):not(.tactic-state *) {
+        text-decoration-color: var(--palomar-alarm); }
+      /* Verso's own fallback here is the keyword `blue`, which on dark paper is
+         an underline nobody can see. */
+      .hl.lean .has-info.information :not(.tactic-state):not(.tactic-state *) {
+        text-decoration-color: var(--palomar-info); }
+      .hl.lean .tactic-state { background-color: var(--palomar-panel);
+        border-color: var(--palomar-edge); }
+      .hl.lean.popup .tactic-state { background-color: var(--palomar-panel); }
+      /* The pill that says a tactic block can be opened, and the triangle that
+         says a case can. Verso draws the pill faintly on purpose, so the two
+         marks keep their own tokens rather than borrowing the border ones; the
+         triangle it draws in `black`, which is text, so it spends the ink. */
+      .hl.lean .tactic > label::after { border-color: var(--palomar-mark); }
+      .hl.lean .tactic > label:has(+ .tactic-toggle:checked)::after {
+        border-color: var(--palomar-mark-on); background-color: var(--palomar-mark-on); }
+      .hl.lean .case-label:has(input[type="checkbox"])::before {
+        background-color: var(--palomar-ink); }
+      .palomar-hover {
+        padding: .65rem !important; border: 1px solid var(--palomar-edge) !important;
+        border-radius: .35rem; background: var(--palomar-panel) !important;
+        color: var(--palomar-ink) !important;
+        box-shadow: 0 .25rem 1rem var(--palomar-shadow);
+        /* The pointer must never land on the popup. If it does, it has left
+           the token, so the popup hides, so the pointer is over the token
+           again, so it shows: a flicker that sustains itself. */
+        pointer-events: none;
+        /* Lean signatures are long and were being cut off inside a 400px box.
+           Wrap them instead, and only where they can be broken. */
+        white-space: pre-wrap;
+        overflow-wrap: break-word;
+      }
+      .palomar-hover .hl.lean, .palomar-hover .popup,
+      .palomar-hover .hover-info { white-space: pre-wrap; }
+      .palomar-hover .popup,
+      .palomar-hover .hover-info,
+      .palomar-hover .docstring { background: var(--palomar-panel) !important;
+        color: var(--palomar-ink) !important; }
+      /* Give the block docstring one separator of its own, hiding Verso's
+         empty separator span so the popup does not acquire a second rule. */
+      .palomar-hover .sep { display: block; height: 0 !important; border: none !important; }
+      .palomar-hover .docstring {
+        display: block;
+        margin-top: .55rem;
+        padding-top: .55rem;
+        border-top: 1px solid var(--palomar-rule);
+      }
+      .palomar-render-error { margin: 1rem; font-family: sans-serif; }
+      /* Verso's page shell, which a reader sees only where this document's
+         scripts do not run: the runtime replaces the whole body on both its
+         success and its failure path. It is answered broadly rather than rule
+         by rule, because normalising a shell nobody reaches is not worth
+         freezing a dozen more declarations into every published bundle. */
+      .sidebar { background: var(--palomar-raise); }
+      .title-bar, .hamburger { background: var(--palomar-paper); }
+      .sidebar, .title-bar, .hamburger { border-color: var(--palomar-line); }
+      .hamburger span { background: var(--palomar-ink); }
+      .module-tree summary a, .module-tree .leaf a,
+      .breadcrumbs a { color: var(--palomar-link); }
+      .module-tree summary:hover,
+      .breadcrumbs a:hover { background-color: var(--palomar-raise); }
+      .module-tree summary::before { color: var(--palomar-ink); }
+      .module-tree summary.current,
+      .module-tree .current { background-color: var(--palomar-link);
+        color: var(--palomar-paper); }
+      .module-tree summary.current a,
+      .module-tree .current a { color: var(--palomar-paper); }
+      .breadcrumbs .current,
+      .breadcrumbs li:not(:last-child)::after { color: var(--palomar-ink); }
+    """
