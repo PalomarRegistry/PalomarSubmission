@@ -26,13 +26,21 @@ class PreparationReportingTests(unittest.TestCase):
 
     def test_invalid_calls_keep_the_original_preparation_failure(self):
         path = json.dumps({"comparator_config_path": "comparator.json"})
+        complete = {
+            "comparator_config_path": "comparator.json",
+            "authorization_relationship": "I am a responsible author or maintainer",
+        }
         cases = (
             ({"request_id": "magma1518-preflight-20260927"}, "request_id", "twelve"),
             ({"request_id": "magma1518-preflight-retry-1"}, "request_id", "twelve"),
             ({"request_id": ""}, "request_id", "twelve"),
             ({"request_id": "a" * 101}, "request_id", "twelve"),
             ({"repository": "not-a-repository"}, "repository", "owner/name"),
+            ({"repository": "../repo"}, "repository", "dot segments"),
+            ({"repository": "owner/repo.git"}, "repository", ".git suffix"),
             ({"commit": "bad-commit"}, "commit", "40 lowercase"),
+            ({"execution_attempt": "bad"}, "execution_attempt", "32 lowercase"),
+            ({"mode": "Full", "options": json.dumps(complete)}, "mode", "unsupported"),
             ({}, "options.comparator_config_path", "supplied explicitly"),
             ({"options": path}, "options.authorization_relationship", "must be declared"),
             ({"options": "{"}, "options", "not valid JSON"),
@@ -42,6 +50,13 @@ class PreparationReportingTests(unittest.TestCase):
             ({"options": json.dumps({
                 "comparator_config_path": "comparator.json", "authorization_relationship": "guess",
             })}, "options.authorization_relationship", "not recognized"),
+            ({"options": json.dumps({**complete, "existing_id": "bad"})}, "options.existing_id", "form"),
+            ({"options": json.dumps({**complete, "authorization_evidence": "x" * 4001})},
+             "options.authorization_evidence", "4,000"),
+            ({"options": json.dumps({**complete, "project_path": "../outside"})},
+             "options.project_path", "safe repository-relative"),
+            ({"options": json.dumps({**complete, "registry_correction": "{}"})},
+             "options.registry_correction", "Registry correction"),
         )
         # Both triggers materialize the same inputs context; their event
         # payloads must not replace it. Exercise both preparation modes too.
@@ -142,12 +157,40 @@ class PreparationReportingTests(unittest.TestCase):
             self.assertEqual(result["status"], "pass")
             self.assertEqual(result["schema_version"], schema)
 
+    def test_attempt_validation_and_failed_finalization_cannot_pass(self):
+        report = {
+            "schema_version": 2, "status": "pass", "errors": [],
+            "source": {"repository": self.inputs["repository"], "commit": self.inputs["commit"]},
+            "submission": {"submission_id": self.inputs["request_id"]},
+        }
+        for attempt in ("bad", "A" * 32, 7):
+            result = workflow_report.finalize(
+                report, {**self.inputs, "execution_attempt": attempt}, {}, workflow_url="run",
+            )
+            self.assertEqual(result["status"], "fail")
+            self.assertEqual(result["diagnostics"][0]["field"], "execution_attempt")
+            self.assertNotIn("execution_attempt", result)
+        valid = workflow_report.finalize(
+            report, {**self.inputs, "execution_attempt": "b" * 32}, {}, workflow_url="run",
+        )
+        self.assertEqual(valid["status"], "pass")
+        self.assertEqual(valid["execution_attempt"], "b" * 32)
+        self.assertFalse(workflow_report.gate(valid, "full", "true", {
+            "upload1": {"outcome": "success"}, "finalize": {"outcome": "failure"},
+        }))
+        result = workflow_report.finalize(
+            None, {**self.inputs, "request_id": "bad"},
+            {"dependencies": {"outcome": "failure"}}, workflow_url="run",
+        )
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["diagnostics"][0]["field"], "request_id")
+
     def test_summary_is_bounded_and_candidate_text_stays_inert(self):
-        hostile = '</pre><img src=x>\n::error::fake\n```\n' + "x" * 5000
+        hostile = '</pre><img src=x>\n::error::fake\n```\n' + '"<&\u2603' * 5000
         report = {
             "status": "fail", "phase": "preparation",
             "errors": [hostile] * 20,
-            "diagnostics": [{"next_action": hostile}] * 20,
+            "diagnostics": [{"next_action": str(index) + hostile} for index in range(20)],
         }
         with tempfile.TemporaryDirectory() as raw:
             destination = Path(raw) / "summary.md"
@@ -156,7 +199,30 @@ class PreparationReportingTests(unittest.TestCase):
         self.assertNotIn("<img", summary)
         self.assertNotIn("\n::error::", summary)
         self.assertEqual(summary.count("</pre>"), 1)
-        self.assertLess(len(summary), 32_000)
+        self.assertEqual(summary.count("Next action:"), 10)
+        self.assertLess(len(summary), 250_000)
+        # Exercise the CLI log path too; every output line must remain a JSON
+        # string even if a diagnostic contains workflow-command syntax.
+        report.update({
+            "schema_version": 1,
+            "source": {"repository": self.inputs["repository"], "commit": self.inputs["commit"]},
+            "submission": {"submission_id": self.inputs["request_id"]},
+        })
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            destination = directory / "report.json"
+            destination.write_text(json.dumps(report))
+            result = subprocess.run([
+                sys.executable, "-S", str(ROOT / "scripts/workflow_report.py"),
+                "finalize", "--report", str(destination),
+            ], cwd=directory, env={
+                **os.environ, "PALOMAR_INPUTS": json.dumps(self.inputs), "PALOMAR_STEPS": "{}",
+                "PALOMAR_WORKFLOW_URL": "run", "GITHUB_STEP_SUMMARY": str(directory / "summary.md"),
+            }, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(result.stdout.splitlines()), 10)
+            for line in result.stdout.splitlines():
+                self.assertEqual(json.loads(line), hostile[:2000])
 
 
 if __name__ == "__main__":

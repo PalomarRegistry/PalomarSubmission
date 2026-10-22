@@ -10,6 +10,7 @@ from scripts.verification_errors import VerificationError
 SUBMISSION_ID_RE = re.compile(r"^[0-9a-z]{12}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+EXECUTION_ATTEMPT_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 class WorkflowInputError(VerificationError):
@@ -28,7 +29,7 @@ class WorkflowInputError(VerificationError):
 
 
 def request_identity(inputs: dict[str, Any]) -> tuple[str, str, str]:
-    """Validate one identity contract in both preparation and finalization."""
+    """Validate request and attempt identity in preparation and finalization."""
     for field, pattern, message in (
         ("request_id", SUBMISSION_ID_RE, "Submission id must be twelve lowercase alphanumeric characters"),
         ("repository", REPOSITORY_RE, "Repository must be given as owner/name"),
@@ -37,6 +38,18 @@ def request_identity(inputs: dict[str, Any]) -> tuple[str, str, str]:
         value = inputs.get(field, "")
         if not isinstance(value, str) or not pattern.fullmatch(value):
             raise WorkflowInputError(message, field=field)
+    repository = inputs["repository"]
+    if any(part in {".", ".."} for part in repository.split("/")) or repository.endswith(".git"):
+        raise WorkflowInputError(
+            "Repository must be given as owner/name without dot segments or a .git suffix",
+            field="repository",
+        )
+    attempt = inputs.get("execution_attempt", "")
+    if not isinstance(attempt, str) or (attempt and not EXECUTION_ATTEMPT_RE.fullmatch(attempt)):
+        raise WorkflowInputError(
+            "Execution attempt must be empty or 32 lowercase hexadecimal characters",
+            field="execution_attempt",
+        )
     return inputs["repository"], inputs["commit"], inputs["request_id"]
 
 

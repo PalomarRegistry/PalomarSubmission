@@ -11,7 +11,6 @@ import datetime as dt
 import html
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,12 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.workflow_inputs import WorkflowInputError, report_identity, request_identity  # noqa: E402
+from scripts.workflow_inputs import (  # noqa: E402
+    EXECUTION_ATTEMPT_RE,
+    WorkflowInputError,
+    report_identity,
+    request_identity,
+)
 
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 SETUP_STEPS = (
@@ -34,6 +38,7 @@ SETUP_STEPS = (
     "toolchain",
     "bwrap",
     "execute",
+    "finalize",
 )
 
 
@@ -139,9 +144,7 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
             result["phase"] = "preparation"
     result["workflow_url"] = workflow_url
     attempt = inputs.get("execution_attempt", "")
-    if attempt:
-        if not re.fullmatch(r"[0-9a-f]{32}", attempt):
-            raise ValueError("invalid execution attempt")
+    if isinstance(attempt, str) and EXECUTION_ATTEMPT_RE.fullmatch(attempt):
         result["execution_attempt"] = attempt
     result["execution_profile"] = inputs.get("execution_profile") or resolved_profile(report)
     return result

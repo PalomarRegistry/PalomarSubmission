@@ -241,6 +241,7 @@ jobs:
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Finalize interrupted mechanical report
+        id: finalize
         if: always()
         env:
           PALOMAR_INPUTS: ${{ toJSON(inputs) }}

@@ -101,11 +101,12 @@ root, and `formalization_metadata_path` when the metadata is not at the default
 `formalization.yaml` within that project. All paths are repository-relative.
 
 External callers must select `execution_profile: palomar-standard-v1`, since
-the default profile uses Palomar's own runner labels. Invalid workflow inputs
-are reported as preparation failures with the field to correct. Correct the
-workflow inputs and rerun against the same source commit; these errors do not
-require a source change. The job summary shows the bounded failure and next
-action, and the complete report remains available as an artifact.
+the default profile uses Palomar's own runner labels. When preparation rejects
+an input, correct the indicated field and rerun against the same source commit;
+these errors do not require a source change. The job summary shows the bounded
+failure and next action, and the complete report remains available as an artifact.
+Profile resolution and pipeline-checkout errors occur before preparation; use
+their Actions job logs to correct the profile or pinned pipeline revision.
 
 The `inputs` context is materialized as the verifier's request for either trigger,
 so a caller's push or pull-request event cannot replace the supplied inputs.
