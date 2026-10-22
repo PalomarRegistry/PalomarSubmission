@@ -28,7 +28,7 @@ on:
         required: true
         type: string
       request_id:
-        description: Caller-chosen lowercase identifier for the preflight artifact
+        description: Exactly 12 lowercase alphanumeric characters identifying the preflight artifact
         required: true
         type: string
       mode:
@@ -46,7 +46,7 @@ on:
         required: false
         type: string
       options:
-        description: JSON object of optional submission fields
+        description: Submission settings JSON; comparator_config_path and authorization_relationship are required
         required: false
         default: "{}"
         type: string
@@ -82,7 +82,7 @@ on:
         required: false
         type: string
       options:
-        description: JSON object of optional submission fields
+        description: Submission settings JSON; comparator_config_path and authorization_relationship are required
         required: false
         type: string
 

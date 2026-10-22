@@ -51,6 +51,7 @@ from scripts.verification_profile import (  # noqa: E402
     load_profile,
     profile_digest,
 )
+from scripts.workflow_inputs import WorkflowInputError, report_identity  # noqa: E402
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 GIT_NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
@@ -1275,8 +1276,13 @@ def prepare(args: argparse.Namespace) -> int:
         "warnings": [],
     }
     try:
-        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
+        inputs = event.get("inputs")
+        if isinstance(inputs, dict):
+            # Record the workflow's identity before any validation can fail.
+            # These fields bind an error; they do not assert authorization.
+            report.update(report_identity(inputs))
+        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         values, submission_id = submission_contract.submission_request(event)
         mode = str(event.get("inputs", {}).get("mode") or "full")
         if mode not in {"preflight", "full", "correction"}:
@@ -1301,12 +1307,14 @@ def prepare(args: argparse.Namespace) -> int:
                 raw_relationship
             )
             if authorization_relationship is None:
-                raise VerificationError(
-                    "Relationship to the substantive formalization is not recognized"
+                raise WorkflowInputError(
+                    "Relationship to the substantive formalization is not recognized",
+                    field="options.authorization_relationship",
                 )
         else:
-            raise VerificationError(
-                "Relationship to the substantive formalization must be declared"
+            raise WorkflowInputError(
+                "Relationship to the substantive formalization must be declared",
+                field="options.authorization_relationship",
             )
         if (correction is not None) != (authorization_relationship == "palomar-maintainer"):
             raise VerificationError(

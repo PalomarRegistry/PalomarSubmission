@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.workflow_inputs import WorkflowInputError, report_identity, request_identity  # noqa: E402
 
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 SETUP_STEPS = (
@@ -34,17 +41,17 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
     repository = inputs.get("repository", "")
     commit = inputs.get("commit", "")
     identifier = inputs.get("request_id", "")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ValueError("invalid workflow repository")
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise ValueError("invalid workflow commit")
-    if not re.fullmatch(r"[a-z0-9_-]{1,100}", identifier):
-        raise ValueError("invalid workflow request identifier")
+    input_error = None
+    try:
+        request_identity(inputs)
+    except WorkflowInputError as error:
+        input_error = error
     bound = (
         isinstance(report, dict)
         # 1 until the verifier starts, 2 once it has (a correction report is
         # 2 throughout); the finalizer binds either.
-        and report.get("schema_version") in {1, 2}
+        and type(report.get("schema_version")) is int
+        and report.get("schema_version") in (1, 2)
         and isinstance(report.get("source"), dict)
         and isinstance(report.get("submission"), dict)
         and report.get("source", {}).get("repository") == repository
@@ -56,7 +63,7 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
     )
     terminal = (
         bound
-        and report.get("status") in {"pass", "fail", "error"}
+        and report.get("status") in ("pass", "fail", "error")
         and isinstance(report.get("errors"), list)
         and isinstance(report.get("diagnostics", []), list)
         and (report["status"] == "pass" or bool(report["errors"]))
@@ -68,7 +75,22 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
         and steps.get("prepare", {}).get("outputs", {}).get("ready") == "true"
         and failed is None
     )
-    if terminal or preflight:
+    if input_error is not None:
+        # Re-derive this diagnostic from trusted inputs. Even an identity-
+        # matching report cannot establish a pass for an invalid invocation.
+        result = {
+            "schema_version": 1,
+            **report_identity(inputs),
+            "status": "fail",
+            "phase": "preparation",
+            "stage": "intake",
+            "checked_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "errors": [str(input_error)],
+            "warnings": [],
+            "diagnostics_schema_version": 1,
+            "diagnostics": [input_error.diagnostic("intake")],
+        }
+    elif terminal or preflight:
         # Preserve valid verifier diagnostics. A workflow step failing after a
         # pass is still caught by the final job gate, not rewritten as a proof failure.
         result = dict(report)
@@ -123,6 +145,26 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
         result["execution_attempt"] = attempt
     result["execution_profile"] = inputs.get("execution_profile") or resolved_profile(report)
     return result
+
+
+def summarize_failure(report: dict, destination: Path) -> None:
+    """Render bounded, inert diagnostics in the Actions job summary."""
+    if report.get("status") not in {"fail", "error"}:
+        return
+    phase = "preparation" if report.get("phase") == "preparation" else "verification"
+    lines = [f"### Palomar {phase} failed", "", "<pre>"]
+    for error in report.get("errors", [])[:10]:
+        lines.append(html.escape(json.dumps(str(error)[:2000])))
+    actions = dict.fromkeys(
+        str(item["next_action"])[:1000]
+        for item in report.get("diagnostics", [])[:10]
+        if isinstance(item, dict) and item.get("next_action")
+    )
+    for action in actions:
+        lines.append("Next action: " + html.escape(json.dumps(action)))
+    lines.extend(["</pre>", ""])
+    with destination.open("a", encoding="utf-8") as output:
+        output.write("\n".join(lines))
 
 
 def resolved_profile(report: Any) -> str:
@@ -188,6 +230,12 @@ def main() -> int:
         json.dump(result, handle, indent=2)
         handle.write("\n")
     temporary.replace(args.report)
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        summarize_failure(result, Path(summary))
+    if result.get("status") in {"fail", "error"}:
+        for error in result.get("errors", [])[:10]:
+            # JSON keeps newlines and workflow-command syntax inert in logs.
+            print(json.dumps(str(error)[:2000]))
     return 0
 
 
