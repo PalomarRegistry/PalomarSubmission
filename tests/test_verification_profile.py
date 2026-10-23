@@ -57,6 +57,17 @@ class VerificationProfileTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"PALOMAR_EXECUTION_PROFILE": "palomar-standard-v1"}):
             self.assertEqual(load_profile()["id"], "palomar-standard-v1")
 
+    def test_larger_profile_requires_32_effective_cpus_and_64_gib_class_memory(self):
+        profile = load_profile("palomar-namespace-32x64-v1")
+        self.assertEqual(profile["limits"]["execution_budget_seconds"], 19800)
+        self.assertEqual(profile["limits"]["minimum_host_memory_bytes"], 60 * 1024**3)
+        self.assertIn("32x64", profile["runner"]["label"])
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch("scripts.verification_profile.platform.machine", return_value="x86_64"), \
+             mock.patch("scripts.verification_profile.effective_cpu_count", return_value=16), \
+             self.assertRaisesRegex(VerificationProfileError, "requires 32"):
+            check_host(profile, Path(raw))
+
     def test_resolver_outputs_carry_the_render_timeout(self):
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "out"

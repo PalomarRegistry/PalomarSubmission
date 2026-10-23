@@ -845,8 +845,29 @@ class VerifySubmissionTests(unittest.TestCase):
             self.assertEqual(report["stage"], "resource-exhausted")
             self.assertEqual(report["phase"], "verification")
             self.assertEqual(report["error_kind"], "infrastructure/resource-exhausted")
+            self.assertNotIn("resource_failure", report)
             self.assertTrue(report["retryable"])
-            self.assertIn("retry on a longer-running worker", report["errors"][0])
+            self.assertIn("outside the supervised workload", report["errors"][0])
+
+    def test_supervised_resource_failure_is_recorded_for_authenticated_retry(self):
+        for kind in ("oom", "timeout", "other"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                (root / "work" / "source" / ".git").mkdir(parents=True)
+                output = root / "report.json"
+                output.write_text(json.dumps({"status": "pending", "errors": []}))
+                args = Namespace(output=output, work_dir=root / "work", bwrap=sys.executable,
+                                 bwrap_source_tag="v0.12.0", workflow_url="https://example.test/run")
+                with mock.patch.object(
+                    verifier, "install_execution_deadline",
+                    side_effect=ResourceExhausted("trusted supervisor telemetry", kind=kind),
+                ):
+                    execute(args)
+                report = json.loads(output.read_text())
+                if kind == "other":
+                    self.assertNotIn("resource_failure", report)
+                else:
+                    self.assertEqual(report["resource_failure"], {"kind": kind})
 
     def test_default_capacity_supports_ten_hour_verification(self):
         self.assertGreaterEqual(EXECUTION_BUDGET_SECONDS, 10 * 60 * 60)

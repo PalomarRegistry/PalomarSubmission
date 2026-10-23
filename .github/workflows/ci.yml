@@ -191,9 +191,19 @@ jobs:
     # and lake comparator boundary on the hosted image; this proves it where
     # verification actually runs, with the root cgroup bootstrap that runner
     # needs. It never accepts candidate source.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: palomar-namespace-16x32-v1
+            label: nscloud-ubuntu-24.04-amd64-16x32-with-features
+          - profile: palomar-namespace-32x64-v1
+            label: nscloud-ubuntu-24.04-amd64-32x64-with-features
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-16x32-with-features
+      - ${{ matrix.label }}
       - namespace-features:container.privileged=true
+    env:
+      PALOMAR_EXECUTION_PROFILE: ${{ matrix.profile }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -205,7 +215,7 @@ jobs:
       - name: Install verifier dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r requirements.txt
       - name: Record effective capacity
-        run: python scripts/verification_profile.py --profile palomar-namespace-16x32-v1 --disk-path "$RUNNER_TEMP"
+        run: python scripts/verification_profile.py --profile "${{ matrix.profile }}" --disk-path "$RUNNER_TEMP"
       - name: Exercise the real bubblewrap, cgroup and lake comparator boundary
         run: |
           sudo apt-get update -qq >/dev/null

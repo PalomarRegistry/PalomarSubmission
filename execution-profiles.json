@@ -17,6 +17,22 @@
         "job_timeout_minutes": 350,
         "execution_budget_seconds": 19800
       }
+    },
+    "palomar-namespace-32x64-v1": {
+      "runner": {
+        "provider": "namespace",
+        "label": "nscloud-ubuntu-24.04-amd64-32x64-with-features",
+        "labels": [
+          "nscloud-ubuntu-24.04-amd64-32x64-with-features",
+          "namespace-features:container.privileged=true"
+        ],
+        "architecture": "x86_64"
+      },
+      "limits": {
+        "minimum_host_memory_bytes": 64424509440,
+        "job_timeout_minutes": 350,
+        "execution_budget_seconds": 19800
+      }
     }
   }
 }
