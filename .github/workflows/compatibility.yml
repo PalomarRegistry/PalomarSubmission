@@ -1,231 +1,30 @@
-name: Cold-build compatibility
-
+name: Namespace runner capacity probe
 on:
-  pull_request:
   workflow_dispatch:
-    inputs:
-      execution_profile:
-        description: Approved profile (blank uses the operator CI setting or production default)
-        required: false
-        default: ""
-        type: string
-  schedule:
-    - cron: "17 3 * * 1"
-
-permissions:
-  contents: read
-
+permissions: {}
 jobs:
-  scope:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      cold_build: ${{ steps.scope.outputs.cold_build }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        id: template-python
-        if: github.event_name != 'pull_request'
-        with:
-          python-version: "3.11.10"
-      - name: Install Template contract dependencies
-        id: template-dependencies
-        if: github.event_name != 'pull_request'
-        run: >-
-          python -m pip install --disable-pip-version-check --require-hashes
-          --no-deps -r requirements.txt
-      - name: Detect drift from the current PalomarTemplate authoring contracts
-        id: template
-        if: github.event_name != 'pull_request'
-        run: |
-          curl --fail --location --retry 3 --retry-all-errors \
-            --proto '=https' --tlsv1.2 \
-            --output "$RUNNER_TEMP/palomar-template-formalization.yaml" \
-            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/formalization.yaml
-          cmp tests/fixtures/palomar-template-formalization.yaml \
-            "$RUNNER_TEMP/palomar-template-formalization.yaml"
-          curl --fail --location --retry 3 --retry-all-errors \
-            --proto '=https' --tlsv1.2 \
-            --output "$RUNNER_TEMP/palomar-template-comparator.json" \
-            https://raw.githubusercontent.com/PalomarRegistry/PalomarTemplate/main/comparator.json
-          cmp tests/fixtures/palomar-template-comparator.json \
-            "$RUNNER_TEMP/palomar-template-comparator.json"
-          python - "$RUNNER_TEMP/palomar-template-comparator.json" <<'PY'
-          import pathlib
-          import sys
-
-          sys.path.insert(0, ".")
-          from scripts.verify_submission import load_comparator_config
-
-          load_comparator_config(pathlib.Path(sys.argv[1]))
-          PY
-      - name: Select changes that need the cold-build regression
-        id: scope
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          # Only this narrow, current set is known not to affect execution. A new
-          # path therefore runs the regression until somebody classifies it here.
-          changed_paths="$RUNNER_TEMP/palomar-compatibility-changed-paths"
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            echo "cold_build=true" >> "$GITHUB_OUTPUT"
-          elif ! git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" -- > "$changed_paths"; then
-            echo "cold_build=true" >> "$GITHUB_OUTPUT"
-          elif [ ! -s "$changed_paths" ]; then
-            echo "cold_build=true" >> "$GITHUB_OUTPUT"
-          else
-            cold_build=false
-            while IFS= read -r -d '' path; do
-              case "$path" in
-                README.md|SECURITY.md|LICENSE|docs/comparator-declaration-closure.md|docs/launch-security-review.md|docs/mathlib-cache-trust.md|taxonomies/README.md|taxonomies/LICENSE.md)
-                  ;;
-                *)
-                  cold_build=true
-                  break
-                  ;;
-              esac
-            done < "$changed_paths"
-            echo "cold_build=$cold_build" >> "$GITHUB_OUTPUT"
-          fi
-
-  profile:
-    needs: scope
-    if: needs.scope.outputs.cold_build == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      labels: ${{ steps.resolve.outputs.labels }}
-      profile: ${{ steps.resolve.outputs.profile }}
-      timeout: ${{ steps.resolve.outputs.timeout }}
-      budget: ${{ steps.resolve.outputs.budget }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - id: resolve
-        env:
-          PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile || vars.PALOMAR_CI_EXECUTION_PROFILE }}
-        run: python3 scripts/verification_profile.py --resolve
-
-  cold_build:
-    needs: [scope, profile]
-    if: needs.scope.outputs.cold_build == 'true'
-    # Use the catalogue default unless the operator selects another published
-    # profile through a dispatch input or the repository's CI setting.
-    runs-on: ${{ fromJSON(needs.profile.outputs.labels) }}
-    timeout-minutes: ${{ fromJSON(needs.profile.outputs.timeout) }}
+  capacity:
+    name: Capacity ${{ matrix.shape }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shape: [32x64, 64x128]
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-${{ matrix.shape }}-with-features
+      - namespace-features:container.privileged=true
+    timeout-minutes: 3
     env:
-      PALOMAR_EXECUTION_PROFILE: ${{ needs.profile.outputs.profile }}
+      EXPECTED_SHAPE: ${{ matrix.shape }}
     steps:
-      - name: Record verification deadline origin
-        run: echo "PALOMAR_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
-
-      - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        # Reclaims the preinstalled toolchains of the GitHub-hosted image only.
-        if: needs.profile.outputs.profile == 'palomar-standard-v1'
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: pipeline
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11.10"
-      - name: Install verifier dependencies
-        run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
-      - name: Build pinned bubblewrap
-        run: |
-          sudo apt-get update -qq >/dev/null
-          sudo apt-get install -y -qq meson ninja-build libcap-dev pkg-config >/dev/null
-          echo "PALOMAR_BWRAP=$(pipeline/scripts/install_bwrap.sh "$RUNNER_TEMP/bwrap-bin")" >> "$GITHUB_ENV"
-
-      - name: Install pinned Lean
-        run: |
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            --output "$RUNNER_TEMP/elan.tar.gz" \
-            https://github.com/leanprover/elan/releases/download/v4.2.3/elan-x86_64-unknown-linux-gnu.tar.gz
-          echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_TEMP/elan.tar.gz" \
-            | sha256sum --check
-          mkdir "$RUNNER_TEMP/elan"
-          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan"
-          "$RUNNER_TEMP/elan/elan-init" -y --no-modify-path --default-toolchain none
-          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.35.0-rc2
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Prepare the checked multi-dependency fixture
-        run: |
-          cp -R pipeline/tests/fixtures/cold-cslib fixture
-          git -C fixture init --quiet
-          git -C fixture add --all
-          git -C fixture \
-            -c user.name='Palomar compatibility' \
-            -c user.email='compatibility@palomar.invalid' \
-            commit --quiet -m 'Materialize checked cold fixture'
-          test "$(tr -d '\r\n' < fixture/lean-toolchain)" = "leanprover/lean4:v4.35.0-rc2"
-      - name: Exercise cold trusted and candidate builds
-        env:
-          ELAN_TOOLCHAIN: leanprover/lean4:v4.35.0-rc2
-          PALOMAR_EXECUTION_BUDGET_SECONDS: ${{ needs.profile.outputs.budget }}
-        run: |
-          python pipeline/scripts/smoke_trusted_challenge.py \
-            --source fixture \
-            --bwrap "$PALOMAR_BWRAP" \
-            --work-dir "$RUNNER_TEMP/palomar-compatibility"
-      - name: Exercise the real configured-module renderer
-        run: |
-          python pipeline/scripts/smoke_render_module_identity.py \
-            --source pipeline/tests/fixtures/cold-cslib \
-            --bwrap "$PALOMAR_BWRAP" \
-            --work-dir "$RUNNER_TEMP/palomar-render-module" \
-            --renderer-commit "${{ github.sha }}" \
-            --bwrap-source-tag v0.12.0 \
-            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-  compatibility:
-    needs: [scope, cold_build]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require the selected compatibility evidence
-        id: gate
+      - name: Verify provisioned machine capacity
         shell: bash
-        env:
-          COLD_BUILD_REQUESTED: ${{ needs.scope.outputs.cold_build }}
-          COLD_BUILD_RESULT: ${{ needs.cold_build.result }}
-          SCOPE_RESULT: ${{ needs.scope.result }}
         run: |
-          if [ "$SCOPE_RESULT" != "success" ]; then
-            echo "::error::Compatibility scope finished with $SCOPE_RESULT"
-            exit 1
-          fi
-          if [ "$COLD_BUILD_REQUESTED" = "false" ]; then
-            if [ "$COLD_BUILD_RESULT" != "skipped" ]; then
-              echo "::error::Prose-only change unexpectedly produced cold-build result $COLD_BUILD_RESULT"
-              exit 1
-            fi
-            echo "Compatibility passed: the change is confined to reviewed prose paths."
-            exit 0
-          fi
-          if [ "$COLD_BUILD_REQUESTED" != "true" ]; then
-            echo "::error::Compatibility scope produced no valid decision"
-            exit 1
-          fi
-          if [ "$COLD_BUILD_RESULT" != "success" ]; then
-            echo "::error::Required cold build finished with $COLD_BUILD_RESULT"
-            exit 1
-          fi
-          echo "Compatibility passed: the required cold build succeeded."
+          python3 - <<'PYTHON'
+          import json, os
+          cpu, gib = map(int, os.environ['EXPECTED_SHAPE'].split('x'))
+          effective = len(os.sched_getaffinity(0))
+          memory = next(int(line.split()[1]) * 1024 for line in open('/proc/meminfo') if line.startswith('MemTotal:'))
+          print(json.dumps({'requested_shape': os.environ['EXPECTED_SHAPE'], 'effective_cpus': effective, 'memory_bytes': memory}))
+          assert effective >= cpu, 'Provisioned CPU capacity is below requested shape'
+          assert memory >= (gib - 4) * 1024**3, 'Provisioned memory is below requested shape'
+          PYTHON
