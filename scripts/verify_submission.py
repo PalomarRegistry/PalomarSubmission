@@ -332,7 +332,8 @@ class LicenseDetectorError(VerificationError):
 class ResourceExhausted(VerificationError):
     """The available worker could not complete a verification phase."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, kind: str = "other") -> None:
+        self.kind = kind
         super().__init__(
             message,
             code="provider.resource_exhausted",
@@ -3246,7 +3247,12 @@ def _classify_confined_result(
     ):
         raise ResourceExhausted(
             f"worker resource ceiling reached while running {Path(command[0]).name} "
-            f"(exit {proc.returncode}, result {outcome.get('Result')})"
+            f"(exit {proc.returncode}, result {outcome.get('Result')})",
+            kind=(
+                "oom" if outcome.get("Result") == "oom-kill" or int(memory_events.get("oom_kill", 0)) > 0
+                else "timeout" if outcome.get("Result") in {"timeout", "watchdog"}
+                else "other"
+            ),
         )
     if check and proc.returncode:
         detail = "\n".join(
@@ -3311,7 +3317,7 @@ def _cgroup_supervised_run(
                     confined_command, cwd=cwd, env=os.environ.copy(),
                     timeout=deadline + grace + SUPERVISOR_PARENT_MARGIN_SECONDS, check=False,
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
                 # The babysitter itself overran its deadline plus grace; the
                 # verifier tears the cgroup down from the started-record and
                 # records that its own deadline fired first.
@@ -3323,7 +3329,9 @@ def _cgroup_supervised_run(
                         )
                 except VerificationError:
                     pass  # The parent's observed wall-clock expiry is already sufficient.
-                raise
+                raise ResourceExhausted(
+                    "supervised workload exceeded its deadline and cleanup grace", kind="timeout"
+                ) from error
         finally:
             os.close(liveness)
         # Every phase is classified from the status file, success included: a
@@ -6517,10 +6525,15 @@ def execute(args: argparse.Namespace) -> int:
         report["retryable"] = True
         if isinstance(error, subprocess.TimeoutExpired):
             bounded = ResourceExhausted(
-                "worker wall-clock capacity was exhausted; retry on a longer-running worker"
+                "verification timed out outside the supervised workload; "
+                "report the workflow URL so Palomar can inspect it",
             )
         else:
             bounded = error
+        if bounded.kind in {"oom", "timeout"}:
+            # Only trusted cgroup telemetry or a supervisor deadline may
+            # authorize a larger runner. Candidate output is never a signal.
+            report["resource_failure"] = {"kind": bounded.kind}
         report["errors"].append(str(bounded))
         report_diagnostic(report, bounded, stage="resource-exhausted")
         guarded_write()

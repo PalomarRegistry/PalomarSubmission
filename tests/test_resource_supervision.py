@@ -15,6 +15,19 @@ from scripts.verification_profile import VerificationProfileError
 
 
 class CapacityReportTests(unittest.TestCase):
+    def test_only_trusted_oom_and_deadline_telemetry_are_escalation_kinds(self):
+        completed = subprocess.CompletedProcess(["payload"], 137, "OOM timed out", "")
+        for outcome, kind in (({"Result": "oom-kill"}, "oom"),
+                              ({"Result": "exit-code", "memory_events": {"oom_kill": 1}}, "oom"),
+                              ({"Result": "timeout"}, "timeout"),
+                              ({"Result": "watchdog"}, "timeout"),
+                              ({"Result": "resources"}, "other")):
+            with self.subTest(outcome=outcome), self.assertRaises(verifier.ResourceExhausted) as raised:
+                verifier._classify_confined_result(["payload"], completed, outcome, check=False)
+            self.assertEqual(raised.exception.kind, kind)
+        self.assertIs(verifier._classify_confined_result(
+            ["payload"], completed, {"Result": "exit-code", "memory_events": {}}, check=False), completed)
+
     def test_renderer_helpers_import_without_host_capacity_access(self):
         # The real sanitizer's mount namespace omits /proc and /sys. Importing
         # shared helpers must not try to calculate the outer supervisor's limits.
@@ -150,19 +163,21 @@ class RealResourceBoundaryTests(unittest.TestCase):
             memory="64M", expected=verifier.ResourceExhausted,
         )
         self.assertEqual(error.code, "provider.resource_exhausted")
+        self.assertEqual(error.kind, "oom")
         self.assertTrue(any(row.get("systemd_result") == "oom-kill" for row in records), records)
 
     def test_real_timeout_is_inconclusive_and_stops_the_unit(self):
         # The verifier's own budget expires while the babysitter still has a
-        # long deadline: the parent's TimeoutExpired stands, nothing is
-        # inferred about the workload, and the cgroup is torn down anyway.
+        # long deadline: the parent's trusted deadline identifies a workload
+        # timeout, and the cgroup is torn down anyway.
         started = time.monotonic()
         with mock.patch.object(verifier, "_EXECUTION_DEADLINE", time.monotonic() + 3):
-            records, _ = self.run_phase(
+            records, error = self.run_phase(
                 "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
                 timeout=60, extra_properties=("RuntimeMaxSec=60s", "TimeoutStopSec=60s"),
-                expected=subprocess.TimeoutExpired,
+                expected=verifier.ResourceExhausted,
             )
+        self.assertEqual(error.kind, "timeout")
         self.assertLess(time.monotonic() - started, 30)
         timeout_records = [row for row in records if row.get("supervisor_timeout")]
         self.assertTrue(timeout_records, records)

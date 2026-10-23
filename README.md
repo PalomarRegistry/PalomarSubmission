@@ -61,6 +61,16 @@ runs the same verifier under the checked-in `palomar-standard-v1` profile, but
 has no Palomar state or credentials and is not itself a registry submission.
 Every mechanical report records the profile id and digest.
 
+Production normally uses `palomar-namespace-16x32-v1` (16 CPU / 32 GiB).
+The approved `palomar-namespace-32x64-v1` profile provides 32 CPU / 64 GiB
+with the same execution budget. PalomarServer may authorize one automatic retry
+on that tier for an allowlisted authenticated GitHub account after Reviewer has
+validated an OOM or timeout. Accounts without access are told to contact Kim
+Morrison (@kim-em on GitHub) with their workflow URL. Candidate log text and exit
+code 137 do not authorize a retry; trusted cgroup telemetry and supervisor
+deadlines supply the structured resource evidence. Both Namespace profiles run
+the real sandbox boundary tests in CI.
+
 The profile is workflow/report metadata, not a field in `comparator.json`.
 It records the existing 95%/98% memory pressure/ceiling policy and the
 19,800-second production budget, without adding a CPU quota or changing swap

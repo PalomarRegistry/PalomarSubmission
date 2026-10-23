@@ -186,8 +186,12 @@ def check_host(profile: dict[str, Any], disk_path: Path) -> dict[str, int | floa
             f"runner architecture {architecture!r} does not satisfy {runner['architecture']}"
         )
     cpus = effective_cpu_count()
-    if profile["id"] == "palomar-namespace-16x32-v1" and cpus < 16:
-        raise VerificationProfileError(f"runner has {cpus} effective CPUs; Namespace profile requires 16")
+    if runner["provider"] == "namespace":
+        required_cpus = int(runner["label"].split("-amd64-", 1)[1].split("x", 1)[0])
+        if cpus < required_cpus:
+            raise VerificationProfileError(
+                f"runner has {cpus} effective CPUs; Namespace profile requires {required_cpus}"
+            )
     memory = effective_memory_bytes()
     if memory < limits["minimum_host_memory_bytes"]:
         raise VerificationProfileError(
