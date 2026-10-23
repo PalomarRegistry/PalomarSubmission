@@ -16,6 +16,13 @@ from scripts.orcid_validation import (
     valid_checksum,
 )
 from scripts.verification_errors import FormalizationValidationError, VerificationError
+from scripts.workflow_inputs import (
+    REPOSITORY_RE,
+    SHA_RE,
+    SUBMISSION_ID_RE,
+    WorkflowInputError,
+    request_identity,
+)
 
 __all__ = (
     "ARXIV_CATEGORIES",
@@ -99,12 +106,9 @@ OPTIONAL_FIELDS = frozenset(
         "registry_correction",
     }
 )
-SUBMISSION_ID_RE = re.compile(r"^[0-9a-z]{12}$")
-REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 GITHUB_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LAKE_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 LAKE_ESCAPED_NAME_RE = re.compile(r"^\u00ab([^\u00ab\u00bb]*)\u00bb$")
 LEAN_PLAIN_NAME_RE = re.compile(
@@ -346,21 +350,13 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
     """
     inputs = event.get("inputs")
     if not isinstance(inputs, dict):
-        raise VerificationError("workflow dispatch carried no submission inputs")
+        raise WorkflowInputError("workflow dispatch carried no submission inputs", field="inputs")
 
-    submission_id = str(inputs.get("request_id", "")).strip()
-    if not SUBMISSION_ID_RE.fullmatch(submission_id):
-        raise VerificationError(
-            "Submission id must be twelve lowercase alphanumeric characters"
-        )
-
-    repository = str(inputs.get("repository", "")).strip()
-    if not REPOSITORY_RE.fullmatch(repository):
-        raise VerificationError("Repository must be given as owner/name")
+    repository, commit, submission_id = request_identity(inputs)
 
     values = {
         "repository_url": f"https://github.com/{repository}",
-        "commit_sha": str(inputs.get("commit", "")).strip(),
+        "commit_sha": commit,
     }
     # The optional source fields retain one closed JSON-object contract.
     # Execution-profile and attempt inputs are separate trusted workflow fields.
@@ -371,29 +367,28 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
         try:
             options = json.loads(raw_options)
         except json.JSONDecodeError as error:
-            raise VerificationError(
-                f"Submission options are not valid JSON: {error}"
+            raise WorkflowInputError(
+                f"Submission options are not valid JSON: {error}", field="options",
             ) from error
         if not isinstance(options, dict):
-            raise VerificationError("Submission options must be a JSON object")
+            raise WorkflowInputError("Submission options must be a JSON object", field="options")
         unknown = sorted(set(options) - OPTIONAL_FIELDS)
         if unknown:
-            raise VerificationError(
-                f"Unrecognized submission options: {', '.join(unknown)}"
+            raise WorkflowInputError(
+                f"Unrecognized submission options: {', '.join(unknown)}", field="options",
             )
         for key, value in options.items():
             if not isinstance(value, str):
-                raise VerificationError(f"Submission option {key} must be a string")
+                raise WorkflowInputError(
+                    f"Submission option {key} must be a string", field=f"options.{key}",
+                )
             values[key] = value
 
     if not values.get("comparator_config_path", "").strip():
-        raise VerificationError(
+        raise WorkflowInputError(
             "Comparator configuration path must be supplied explicitly for this submission",
+            field="options.comparator_config_path",
             code="comparator.path_missing",
-            next_action=(
-                "Choose the repository-relative Comparator configuration for this submission, "
-                "then submit the same commit again."
-            ),
         )
 
     return values, submission_id

@@ -371,7 +371,9 @@ and reset everything else.
 There is no longer a second job to compromise. Verification writes a bounded
 JSON report outside every sandbox-writable directory and uploads it as the
 `mechanical-report-<request_id>` artifact, and the submission server collects it
-out of band. That removed a whole class of question the second job used to
+out of band. Failed runs also render a bounded, HTML-escaped diagnostic summary
+and JSON-escaped log messages without posting comments or using a write token.
+That removed a whole class of question the second job used to
 raise: it held a write token, and every argument about comment ownership and
 inert diagnostics existed because hostile text was being rendered by something
 holding one. Nothing in this repository now holds a credential that can write

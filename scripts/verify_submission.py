@@ -51,6 +51,7 @@ from scripts.verification_profile import (  # noqa: E402
     load_profile,
     profile_digest,
 )
+from scripts.workflow_inputs import WorkflowInputError, report_identity  # noqa: E402
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 GIT_NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
@@ -597,6 +598,14 @@ def normalized_repository_path(value: str, field: str) -> pathlib.PurePosixPath:
     ):
         raise VerificationError(f"{field} must be a safe repository-relative POSIX path")
     return pathlib.PurePosixPath(*segments)
+
+
+def workflow_repository_path(value: str, label: str, field: str) -> pathlib.PurePosixPath:
+    """Invalid invocation paths need a corrected input, not a source change."""
+    try:
+        return normalized_repository_path(value, label)
+    except VerificationError as error:
+        raise WorkflowInputError(str(error), field=field) from error
 
 
 def joined_repository_path(
@@ -1275,15 +1284,23 @@ def prepare(args: argparse.Namespace) -> int:
         "warnings": [],
     }
     try:
-        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
+        inputs = event.get("inputs")
+        if isinstance(inputs, dict):
+            # Record the workflow's identity before any validation can fail.
+            # These fields bind an error; they do not assert authorization.
+            report.update(report_identity(inputs))
+        install_execution_deadline(os.environ.get("PALOMAR_JOB_STARTED_AT"))
         values, submission_id = submission_contract.submission_request(event)
         mode = str(event.get("inputs", {}).get("mode") or "full")
         if mode not in {"preflight", "full", "correction"}:
-            raise VerificationError("Submission mode is unsupported")
-        correction = submission_contract.registry_correction(
-            values.get("registry_correction", "").strip()
-        )
+            raise WorkflowInputError("Submission mode is unsupported", field="mode")
+        try:
+            correction = submission_contract.registry_correction(
+                values.get("registry_correction", "").strip()
+            )
+        except VerificationError as error:
+            raise WorkflowInputError(str(error), field="options.registry_correction") from error
         repository, url = submission_contract.normalize_repository(
             values.get("repository_url", "")
         )
@@ -1292,8 +1309,9 @@ def prepare(args: argparse.Namespace) -> int:
             raise VerificationError("Commit SHA must be 40 lowercase hexadecimal characters")
         existing_id = values.get("existing_id", "").strip().upper()
         if existing_id and not submission_contract.PALOMAR_ID_RE.fullmatch(existing_id):
-            raise VerificationError(
-                "Existing Palomar ID must have the form PALOMAR-2026-07-29-000123"
+            raise WorkflowInputError(
+                "Existing Palomar ID must have the form PALOMAR-2026-07-29-000123",
+                field="options.existing_id",
             )
         raw_relationship = values.get("authorization_relationship", "").strip()
         if raw_relationship:
@@ -1301,23 +1319,28 @@ def prepare(args: argparse.Namespace) -> int:
                 raw_relationship
             )
             if authorization_relationship is None:
-                raise VerificationError(
-                    "Relationship to the substantive formalization is not recognized"
+                raise WorkflowInputError(
+                    "Relationship to the substantive formalization is not recognized",
+                    field="options.authorization_relationship",
                 )
         else:
-            raise VerificationError(
-                "Relationship to the substantive formalization must be declared"
+            raise WorkflowInputError(
+                "Relationship to the substantive formalization must be declared",
+                field="options.authorization_relationship",
             )
         if (correction is not None) != (authorization_relationship == "palomar-maintainer"):
-            raise VerificationError(
-                "Registry correction data and Palomar-maintainer authorization must appear together"
+            raise WorkflowInputError(
+                "Registry correction data and Palomar-maintainer authorization must appear together",
+                field="options.registry_correction",
             )
         if correction is not None and (
             mode != "correction" or existing_id != correction["based_on"]["id"]
         ):
-            raise VerificationError("Registry correction mode or target is inconsistent")
+            raise WorkflowInputError(
+                "Registry correction mode or target is inconsistent", field="options.registry_correction",
+            )
         if correction is None and mode == "correction":
-            raise VerificationError("Correction mode carried no registry correction")
+            raise WorkflowInputError("Correction mode carried no registry correction", field="mode")
         if correction is not None:
             report["schema_version"] = 2
             server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
@@ -1335,13 +1358,15 @@ def prepare(args: argparse.Namespace) -> int:
         }
         authorization_evidence = values.get("authorization_evidence", "").strip()
         if len(authorization_evidence) > 4_000:
-            raise VerificationError("Authorization evidence exceeds 4,000 characters")
+            raise WorkflowInputError(
+                "Authorization evidence exceeds 4,000 characters", field="options.authorization_evidence",
+            )
         if authorization_evidence:
             authorization["evidence"] = authorization_evidence
 
         raw_project_path = values.get("project_path", "").strip()
         project_relative = (
-            normalized_repository_path(raw_project_path, "Project path")
+            workflow_repository_path(raw_project_path, "Project path", "options.project_path")
             if raw_project_path
             else None
         )
@@ -1407,12 +1432,17 @@ def prepare(args: argparse.Namespace) -> int:
 
         raw_metadata_path = values.get("formalization_metadata_path", "").strip()
         metadata_relative = (
-            normalized_repository_path(raw_metadata_path, "Formalization metadata path")
+            workflow_repository_path(
+                raw_metadata_path, "Formalization metadata path", "options.formalization_metadata_path",
+            )
             if raw_metadata_path
             else joined_repository_path(project_relative, "formalization.yaml")
         )
         if metadata_relative.name != "formalization.yaml":
-            raise VerificationError("Formalization metadata path must name formalization.yaml")
+            raise WorkflowInputError(
+                "Formalization metadata path must name formalization.yaml",
+                field="options.formalization_metadata_path",
+            )
         metadata_path = resolve_repository_path(
             source, metadata_relative, "Formalization metadata path", kind="file"
         )
@@ -1554,8 +1584,8 @@ def prepare(args: argparse.Namespace) -> int:
                         "Enter the repository-relative comparator.json path and submit again."
                     ),
                 )
-            config_relative = normalized_repository_path(
-                raw_config_path, "Comparator configuration path"
+            config_relative = workflow_repository_path(
+                raw_config_path, "Comparator configuration path", "options.comparator_config_path",
             )
             if config_relative.suffix.lower() != ".json":
                 raise VerificationError(

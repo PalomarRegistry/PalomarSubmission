@@ -83,6 +83,7 @@ jobs:
       pipeline_commit: <same-full-commit-as-the-uses-reference>
       request_id: preflight001
       mode: full
+      execution_profile: palomar-standard-v1
       options: '{"comparator_config_path":"comparator.json","authorization_relationship":"I am a responsible author or maintainer"}'
 ```
 
@@ -90,6 +91,23 @@ Keep `pipeline_commit` equal to the workflow's `uses` SHA. This explicit input
 is for reusable callers only; server dispatches check out their workflow revision.
 The caller asserts this pairing: the workflow validates the SHA format but
 cannot check that it matches `uses`. Third-party preflight reports are advisory.
+`request_id` must be exactly 12 lowercase alphanumeric characters, such as
+`preflight001`; hyphens and underscores are not accepted. `options` must include
+the repository-relative `comparator_config_path` and an explicit
+`authorization_relationship`. The example declares that the caller is a
+responsible author or maintainer; choose the truthful supported relationship
+for your case. Include `project_path` when the project is not at the repository
+root, and `formalization_metadata_path` when the metadata is not at the default
+`formalization.yaml` within that project. All paths are repository-relative.
+
+External callers must select `execution_profile: palomar-standard-v1`, since
+the default profile uses Palomar's own runner labels. When preparation rejects
+an input, correct the indicated field and rerun against the same source commit;
+these errors do not require a source change. The job summary shows the bounded
+failure and next action, and the complete report remains available as an artifact.
+Profile resolution and pipeline-checkout errors occur before preparation; use
+their Actions job logs to correct the profile or pinned pipeline revision.
+
 The `inputs` context is materialized as the verifier's request for either trigger,
 so a caller's push or pull-request event cannot replace the supplied inputs.
 

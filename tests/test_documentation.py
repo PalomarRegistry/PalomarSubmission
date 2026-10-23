@@ -1,14 +1,21 @@
+import argparse
 import json
+import os
+import re
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
+from scripts import verify_submission
 from scripts.submission_contract import (
     OPTIONAL_FIELDS,
     PROJECT_NAME_MAXIMUM,
     REPAIRABLE_FORMALIZATION_FIELDS,
 )
+from scripts.verification_errors import VerificationError
 
 ROOT = Path(__file__).resolve().parent.parent
 SECURITY = (ROOT / "SECURITY.md").read_text()
@@ -31,6 +38,28 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
             set(triggers(WORKFLOW)), {"workflow_call", "workflow_dispatch"}
         )
         self.assertIn("`workflow_dispatch` and `workflow_call`", SECURITY)
+
+    def test_documented_reusable_call_reaches_source_fetch(self):
+        readme = (ROOT / "README.md").read_text()
+        example = re.search(r"```yaml\n(.*?)```", readme, re.S).group(1)
+        inputs = yaml.safe_load(example)["jobs"]["palomar-preflight"]["with"]
+        inputs.update(repository="owner/repo", commit="a" * 40, pipeline_commit="b" * 40)
+        self.assertEqual(inputs["execution_profile"], "palomar-standard-v1")
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            event = directory / "event.json"
+            event.write_text(json.dumps({"inputs": inputs}))
+            report = directory / "report.json"
+            with patch.object(
+                verify_submission, "clone_commit", side_effect=VerificationError("source fetch reached"),
+            ) as clone, patch.dict(os.environ, {
+                "PALOMAR_JOB_STARTED_AT": "1", "GITHUB_OUTPUT": str(directory / "outputs"),
+            }), patch.object(verify_submission, "install_execution_deadline"):
+                verify_submission.prepare(argparse.Namespace(
+                    event=event, work_dir=directory / "work", output=report, licensee="/not-invoked",
+                ))
+            clone.assert_called_once()
+            self.assertEqual(json.loads(report.read_text())["errors"], ["source fetch reached"])
 
     def test_profile_and_verification_jobs_only_read(self):
         self.assertEqual(list(WORKFLOW["jobs"]), ["profile", "verify"])
