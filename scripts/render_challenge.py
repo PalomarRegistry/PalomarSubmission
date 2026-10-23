@@ -1473,6 +1473,38 @@ def prepare_workspace(
     )
 
 
+
+# Private integration candidate: requires official review/adoption before use.
+# Exact-source opt-in keeps all other submissions on the existing two-argument API.
+HODGE_PAGINATION_SOURCE = "ba4281cef86cbe6946478c926c03f22ffc52a83d"
+HODGE_PAGINATION_CHALLENGE = "fa12ed722b4444ddd20ea2608d688ed196cc1b731bc4266cd7afdef24e08981c"
+HODGE_PAGINATION_VERSO = "9f8096e40b31715b1d8d5997f15a0bd832f7e37d"
+
+def apply_hodge_pagination_backport(project, checkout, prepared, module):
+    if prepared.source.commit != HODGE_PAGINATION_SOURCE:
+        return None
+    if (module != "HodgeChallenge" or prepared.source.challenge_sha256 != HODGE_PAGINATION_CHALLENGE
+            or prepared.verso_commit != HODGE_PAGINATION_VERSO):
+        raise VerificationError("frozen Hodge pagination source/pin mismatch")
+    package = next(item for item in manifest_packages(project) if item["name"] == "verso")
+    if package["revision"] != HODGE_PAGINATION_VERSO or github_repository(package["url"]) != VERSO_REPOSITORY:
+        raise VerificationError("Hodge pagination dependency identity mismatch")
+    directory = package_checkout(project, package, checkout=checkout)
+    path = resolve_repository_path(directory, PurePosixPath("src/verso-html/VersoHtmlMain.lean"),
+                                   "pagination backport source", kind="file")
+    before = sha256(path)
+    if before != "c22911fcc5ed1a46558cb1229efd66d4e8816f34ce3959aa689595c99a02e233":
+        raise VerificationError("pagination emitter base differs from authenticated release")
+    replacement = ROOT / "scripts/renderer_backports/VersoHtmlMain-4.35.0-rc2.lean"
+    after = sha256(replacement)
+    if after != "63698f6c937f260803ca91d830fcb22231a58a4e1107eab74443528b11b291fb":
+        raise VerificationError("pagination emitter replacement digest mismatch")
+    replace_workspace_file(path, replacement.read_bytes())
+    return {"base_commit": HODGE_PAGINATION_VERSO, "before_sha256": before,
+            "after_sha256": after, "module": module, "source_commit": prepared.source.commit,
+            "challenge_sha256": prepared.source.challenge_sha256}
+
+
 def apply_verso_module_import_backport(
     project: Path, checkout: Path, revision: str
 ) -> dict[str, str] | None:
@@ -2003,12 +2035,23 @@ def sanitize_command(args: argparse.Namespace) -> int:
             environment=os.environ.copy(),
             audit_declarations=audit_declarations,
         )
-        sanitize_bundle(
-            Path(args.input_dir).resolve(),
-            Path(args.output_dir).resolve(),
-            challenge_module=args.challenge_module,
-            metadata=metadata,
-        )
+        input_dir = Path(args.input_dir).resolve()
+        page_manifest = input_dir / args.challenge_module.replace(".", "/") / "source-pages.json"
+        if getattr(args, "pagination", False):
+            if not page_manifest.is_file() or page_manifest.is_symlink():
+                raise VerificationError("authenticated pagination did not emit its manifest")
+            # This command already runs in the existing sanitizer sandbox.
+            # Its TMPDIR is writable; raw input is read-only and producer has exited.
+            from scripts.render_pagination import prepare as route_pages
+            with tempfile.TemporaryDirectory(prefix="palomar-pagination-", dir=os.environ["TMPDIR"]) as temporary:
+                routed = Path(temporary) / "routed"
+                route_pages(input_dir, routed, args.challenge_module,
+                            expected_selected=metadata["declarations"])
+                sanitize_bundle(routed, Path(args.output_dir).resolve(),
+                                challenge_module=args.challenge_module, metadata=metadata)
+        else:
+            sanitize_bundle(input_dir, Path(args.output_dir).resolve(),
+                            challenge_module=args.challenge_module, metadata=metadata)
     except ComparedDeclarationsNotRendered as error:
         write_json(diagnostic_out, sanitize_diagnostic_document(error))
         return MISSING_DECLARATION_EXIT
@@ -3061,6 +3104,11 @@ def execute(args: argparse.Namespace) -> int:
         )
         if verso_backport is not None:
             report["verso_backport"] = verso_backport
+        pagination_backport = apply_hodge_pagination_backport(
+            workspace, workspace_checkout, prepared, render_workspace.challenge_module
+        )
+        if pagination_backport is not None:
+            report["verso_pagination_backport"] = pagination_backport
         readable_paths = [workspace_checkout.resolve()]
         sandbox_home = workspace / ".lake" / "config" / "home"
         sandbox_tmp = workspace / ".lake" / "config" / "tmp"
@@ -3232,6 +3280,16 @@ def execute(args: argparse.Namespace) -> int:
             writable_directories,
         )
 
+        html_arguments = []
+        html_readable_paths = readable_paths
+        if pagination_backport is not None:
+            selected_path = work / "palomar-pagination-declarations.json"
+            require_protected_paths([selected_path], writable_directories)
+            if selected_path.exists() or selected_path.is_symlink():
+                raise VerificationError("pagination selected-name handoff already exists")
+            replace_workspace_file(selected_path, (json.dumps(declarations, ensure_ascii=False) + "\n").encode())
+            html_arguments = [str(selected_path)]
+            html_readable_paths = [*readable_paths, selected_path]
         raw_output = workspace / ".lake" / "build" / "palomar-render-raw"
         clean_output = work / "palomar-render-clean"
         raw_output.mkdir()
@@ -3244,12 +3302,13 @@ def execute(args: argparse.Namespace) -> int:
                 "verso-html",
                 str(workspace / ".lake" / "build" / "literate"),
                 str(raw_output),
+                *html_arguments,
             ],
             cwd=workspace,
             environment=env,
             writable_directories=writable_directories,
             writable_files=writable_files,
-            readable_paths=readable_paths,
+            readable_paths=html_readable_paths,
             executable_paths=allowed_exec,
             tools=tools,
             timeout=HTML_TIMEOUT_SECONDS,
@@ -3272,6 +3331,7 @@ def execute(args: argparse.Namespace) -> int:
             [
                 *isolated_python(python, str(renderer)),
                 "sanitize",
+                *(["--pagination"] if pagination_backport is not None else []),
                 "--input-dir",
                 str(raw_output),
                 "--output-dir",
@@ -3385,6 +3445,7 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.set_defaults(func=execute)
     sanitize_parser = commands.add_parser("sanitize")
+    sanitize_parser.add_argument("--pagination", action="store_true")
     sanitize_parser.add_argument("--input-dir", required=True)
     sanitize_parser.add_argument("--output-dir", required=True)
     sanitize_parser.add_argument("--challenge", required=True)
