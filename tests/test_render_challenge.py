@@ -2943,6 +2943,50 @@ class LiterateFailureTests(unittest.TestCase):
         self.assertLess(len(error.detail), 5_000)
 
 
+class VersoHtmlFailureTests(unittest.TestCase):
+    # The stderr of fpvandoorn/carleson's render: Lake's warnings and progress
+    # first, Verso's reason last.
+    CARLESON_STDERR = (
+        "warning: manifest out of date: git revision of dependency 'checkdecls' changed; "
+        "use `lake update checkdecls` to update it\n"
+        "warning: manifest out of date: git revision of dependency 'mathlib' changed; "
+        "use `lake update mathlib` to update it\n"
+        "warning: verso: repository has local changes:\n"
+        "  /home/runner/work/_temp/palomar-render/workspace/.lake/packages/verso\n"
+        "✔ [238/243] Built VersoLiterateCode (2.4s)\n"
+        "✔ [243/243] Built «verso-html»:exe (804ms)\n"
+        "Duplicate document ID: /PalomarChallenge/#MeasureTheory___Measure___IsDoubling___"
+        "measure_ball_two_le_same\n"
+        "An error was encountered!\n"
+    )
+
+    def test_verso_reason_leads_and_is_not_offered_as_a_retry(self):
+        from scripts.render_challenge import render_failure_diagnostic, verso_html_failure
+
+        proc = subprocess.CompletedProcess(["lake"], 1, "", self.CARLESON_STDERR)
+        diagnostic = render_failure_diagnostic(verso_html_failure(proc), "verso-html")
+        self.assertEqual(diagnostic["owner"], "palomar")
+        self.assertFalse(diagnostic["retryable"])
+        self.assertNotIn("Retry", diagnostic["next_action"])
+        self.assertIn("Duplicate document ID", diagnostic["explanation"][:200])
+        self.assertNotIn("manifest out of date", diagnostic["explanation"])
+        self.assertNotIn("repository has local changes", diagnostic["explanation"])
+
+    def test_a_killed_generator_may_be_retried(self):
+        from scripts.render_challenge import verso_html_failure
+
+        proc = subprocess.CompletedProcess(["lake"], 137, "", self.CARLESON_STDERR)
+        self.assertTrue(verso_html_failure(proc).retryable)
+
+    def test_output_with_only_lake_chatter_still_says_something(self):
+        from scripts.render_challenge import verso_html_failure
+
+        proc = subprocess.CompletedProcess(
+            ["lake"], 1, "", "warning: manifest out of date\nerror: build failed\n"
+        )
+        self.assertIn("build failed", verso_html_failure(proc).detail)
+
+
 class VersoModuleImportBackportTests(unittest.TestCase):
     def test_only_authenticated_releases_and_source_are_patched(self):
         for revision in (

@@ -685,6 +685,42 @@ def literate_failure(proc: subprocess.CompletedProcess[str]) -> VerificationErro
     )
 
 
+# Lake's own chatter around `lake exe verso-html`: progress, warnings about the
+# workspace Palomar assembled, and the indented paths those warnings list.
+LAKE_PROGRESS_RE = re.compile(r"^(?:(?:warning|info|trace): |[✔⚠ℹ] \[|\s)")
+
+
+def verso_html_failure(proc: subprocess.CompletedProcess[str]) -> VerificationError:
+    """Say why Verso's HTML generator stopped, in Verso's words.
+
+    Verso reports an error in a line or two at the end of its output, after
+    Lake's manifest warnings and build progress. Those come first, so a
+    bounded copy of the output kept only the warnings; Verso's lines are
+    carried instead. Verso exiting on its own fails the same way for the same
+    source and renderer, so retrying it does not help; a process killed by a
+    signal may have run out of resources and can be retried.
+    """
+    log = (proc.stdout + "\n" + proc.stderr).strip()
+    reported = [
+        line.rstrip()[:400] for line in log.splitlines()
+        if line.strip() and not LAKE_PROGRESS_RE.match(line)
+    ]
+    deterministic = 0 < proc.returncode < 128
+    return VerificationError(
+        f"Verso could not generate the Challenge HTML ({proc.returncode})",
+        code="palomar.render_failed",
+        owner="palomar",
+        next_action=(
+            "Do not change the repository. Palomar must fix its renderer for this Challenge; "
+            "report the render workflow URL to Palomar."
+            if deterministic
+            else "Do not change the repository. Retry the same commit later."
+        ),
+        retryable=not deterministic,
+        detail="\n".join(reported[-10:]) or comparator_failure_excerpt(log),
+    )
+
+
 def compared_declarations_not_rendered(declarations: list[str]) -> VerificationError:
     """Describe a publication-contract failure without guessing an HTML anchor.
 
@@ -3237,7 +3273,7 @@ def execute(args: argparse.Namespace) -> int:
         raw_output.mkdir()
         report["stage"] = "verso-html"
         write_json(output, report)
-        sandboxed_run(
+        verso_html = sandboxed_run(
             [
                 str(lake),
                 "exe",
@@ -3254,7 +3290,10 @@ def execute(args: argparse.Namespace) -> int:
             tools=tools,
             timeout=HTML_TIMEOUT_SECONDS,
             resource_properties=RESOURCE_PROPERTIES,
+            check=False,
         )
+        if verso_html.returncode:
+            raise verso_html_failure(verso_html)
 
         report["stage"] = "sanitize"
         write_json(output, report)
