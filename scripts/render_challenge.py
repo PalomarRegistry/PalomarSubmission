@@ -1507,16 +1507,16 @@ def apply_verso_backports(
     if original.count(before) != 1:
         raise VerificationError("Verso backport import call is not unique")
     match_before = (
-        "  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
-        "    normIdent stx1 == normIdent stx2\n"
-    ).encode()
+        b"  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
+        b"    normIdent stx1 == normIdent stx2\n"
+    )
     match_after = (
-        "  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
-        "    let stx1 := normIdent stx1\n"
-        "    let stx2 := normIdent stx2\n"
-        "    stx1 == stx2 || (stx1.getPos?.isSome && stx1.getPos? == stx2.getPos? "
-        "&& stx1.getTailPos? == stx2.getTailPos?)\n"
-    ).encode()
+        b"  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
+        b"    let stx1 := normIdent stx1\n"
+        b"    let stx2 := normIdent stx2\n"
+        b"    stx1 == stx2 || (stx1.getPos?.isSome && stx1.getPos? == stx2.getPos? "
+        b"&& stx1.getTailPos? == stx2.getTailPos?)\n"
+    )
     if original.count(match_before) != 1:
         raise VerificationError("Verso backport identifier match is not unique")
     patched = original.replace(before, after).replace(match_before, match_after)
