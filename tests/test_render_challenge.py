@@ -2943,7 +2943,7 @@ class LiterateFailureTests(unittest.TestCase):
         self.assertLess(len(error.detail), 5_000)
 
 
-class VersoModuleImportBackportTests(unittest.TestCase):
+class VersoBackportTests(unittest.TestCase):
     def test_only_authenticated_releases_and_source_are_patched(self):
         for revision in (
             "01a09f320122475119588526857a07d218aef600",
@@ -2954,11 +2954,13 @@ class VersoModuleImportBackportTests(unittest.TestCase):
                 self.check_authenticated_release(revision)
 
     def check_authenticated_release(self, revision):
-        from scripts.render_challenge import apply_verso_module_import_backport
+        from scripts.render_challenge import apply_verso_backports
 
         original = (
             "    let env ← importModules (extraImports.map ({module := ·}) ++ imports) {} "
             "(loadExts := true) (arts := importArts)\n"
+            "  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
+            "    normIdent stx1 == normIdent stx2\n"
         ).encode()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2971,23 +2973,36 @@ class VersoModuleImportBackportTests(unittest.TestCase):
                               "rev": revision}],
             }
             (root / "lake-manifest.json").write_text(json.dumps(manifest))
-            self.assertIsNone(apply_verso_module_import_backport(root, root, "f" * 40))
+            self.assertIsNone(apply_verso_backports(root, root, "f" * 40))
             self.assertEqual(target.read_bytes(), original)
             with self.assertRaisesRegex(VerificationError, "differs from"):
-                apply_verso_module_import_backport(root, root, revision)
+                apply_verso_backports(root, root, revision)
             with mock.patch.dict("scripts.render_challenge.VERSO_MODULE_IMPORT_BACKPORT_SOURCES",
                                  {revision: hashlib.sha256(original).hexdigest()}):
-                evidence = apply_verso_module_import_backport(root, root, revision)
+                evidence = apply_verso_backports(root, root, revision)
                 self.assertIn("if HeaderSyntax.isModule headerStx then .server else .private",
                               target.read_text())
                 self.assertIn("(level := level)", target.read_text())
+                self.assertIn("stx1.getPos? == stx2.getPos? && stx1.getTailPos? == stx2.getTailPos?",
+                              target.read_text())
+                self.assertNotIn("    normIdent stx1 == normIdent stx2\n", target.read_text())
+                self.assertEqual(evidence["fixes"], ["dotted-declaration-docstring-attribution"])
                 self.assertEqual(evidence["after_sha256"], hashlib.sha256(target.read_bytes()).hexdigest())
                 target.write_bytes(original)
                 manifest["packages"][0]["url"] = "https://github.com/attacker/verso"
                 (root / "lake-manifest.json").write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(VerificationError, "identity"):
-                    apply_verso_module_import_backport(root, root, revision)
+                    apply_verso_backports(root, root, revision)
                 self.assertEqual(target.read_bytes(), original)
+            without_match = original.replace(b"    normIdent stx1 == normIdent stx2\n", b"")
+            target.write_bytes(without_match)
+            manifest["packages"][0]["url"] = "https://github.com/leanprover/verso"
+            (root / "lake-manifest.json").write_text(json.dumps(manifest))
+            with mock.patch.dict("scripts.render_challenge.VERSO_MODULE_IMPORT_BACKPORT_SOURCES",
+                                 {revision: hashlib.sha256(without_match).hexdigest()}):
+                with self.assertRaisesRegex(VerificationError, "identifier match is not unique"):
+                    apply_verso_backports(root, root, revision)
+            self.assertEqual(target.read_bytes(), without_match)
 
 
 class CallSignatureTests(unittest.TestCase):

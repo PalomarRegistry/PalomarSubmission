@@ -19,9 +19,13 @@ revisions explicitly listed in the renderer may share a package pin.
 For Challenge rendering on Lean 4.35.0-rc4, 4.35.0, and 4.36.0-rc1, Palomar backports
 [Verso #1043](https://github.com/leanprover/verso/pull/1043) to the exact released
 Verso sources. The complete source digest is checked before applying the
-conditional server/private import-level fix. Render reports record the upstream
-fix and before/after source digests in `verso_backport`; `verso_commit` identifies
-the unpatched release, and `renderer_commit` identifies the backport implementation.
+conditional server/private import-level fix. The same authenticated source also
+gets a Palomar fix to docstring attribution: Verso missed the definition site of a
+structure or class with a dotted name (such as `structure A.B`), gave its docstring
+to the first documented field, and then failed with `Duplicate document ID`. Render
+reports record the upstream fix, the Palomar `fixes`, and before/after source
+digests in `verso_backport`; `verso_commit` identifies the unpatched release, and
+`renderer_commit` identifies the backport implementation.
 
 [**Submit a Lean-verified result →**](https://submit.palomar-registry.org)
 

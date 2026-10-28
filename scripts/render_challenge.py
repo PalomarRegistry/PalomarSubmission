@@ -94,6 +94,11 @@ VERSO_MODULE_IMPORT_BACKPORT_SOURCES = {
         "4cf5328851f57d3d9b13a00247f9857a7261b69f544a29851dcecf99fead8db1",
 }
 VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM = "cb7dc84d54b69269254bf4390a2e53db49a0e26f"
+# Lean elaborates `structure A.B` with a synthesized `declId B` spanning the
+# source `A.B`, which Verso's literate docstring heuristic compares structurally
+# and so misses; the structure's docstring then goes to its first documented
+# field, whose search document Verso's HTML index sees twice and rejects.
+VERSO_DOTTED_DECL_DOCSTRING_FIX = "dotted-declaration-docstring-attribution"
 # Only CI workflow changes separate these immutable revisions. Preserve the
 # submitted revision because Mathlib's cache checks shared-dependency pins.
 SOURCE_IDENTICAL_PLAUSIBLE_REVISIONS = frozenset({
@@ -1473,10 +1478,11 @@ def prepare_workspace(
     )
 
 
-def apply_verso_module_import_backport(
+def apply_verso_backports(
     project: Path, checkout: Path, revision: str
-) -> dict[str, str] | None:
-    """Backport upstream's module/server import fix to authenticated releases."""
+) -> dict[str, Any] | None:
+    """Patch authenticated Verso releases: upstream's module/server import fix,
+    and docstring attribution for declarations with dotted names."""
     expected_source = VERSO_MODULE_IMPORT_BACKPORT_SOURCES.get(revision)
     if expected_source is None:
         return None
@@ -1500,10 +1506,24 @@ def apply_verso_module_import_backport(
     ).encode()
     if original.count(before) != 1:
         raise VerificationError("Verso backport import call is not unique")
-    patched = original.replace(before, after)
+    match_before = (
+        b"  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
+        b"    normIdent stx1 == normIdent stx2\n"
+    )
+    match_after = (
+        b"  identMatch (stx1 stx2 : Syntax) : Bool :=\n"
+        b"    let stx1 := normIdent stx1\n"
+        b"    let stx2 := normIdent stx2\n"
+        b"    stx1 == stx2 || (stx1.getPos?.isSome && stx1.getPos? == stx2.getPos? "
+        b"&& stx1.getTailPos? == stx2.getTailPos?)\n"
+    )
+    if original.count(match_before) != 1:
+        raise VerificationError("Verso backport identifier match is not unique")
+    patched = original.replace(before, after).replace(match_before, match_after)
     replace_workspace_file(source, patched)
     return {
         "upstream_commit": VERSO_MODULE_IMPORT_BACKPORT_UPSTREAM,
+        "fixes": [VERSO_DOTTED_DECL_DOCSTRING_FIX],
         "path": relative.as_posix(),
         "before_sha256": expected_source,
         "after_sha256": hashlib.sha256(patched).hexdigest(),
@@ -3056,7 +3076,7 @@ def execute(args: argparse.Namespace) -> int:
         writable_directories = materialize_packages(
             workspace, checkout=workspace_checkout, base_env=env
         )
-        verso_backport = apply_verso_module_import_backport(
+        verso_backport = apply_verso_backports(
             workspace, workspace_checkout, prepared.verso_commit
         )
         if verso_backport is not None:
