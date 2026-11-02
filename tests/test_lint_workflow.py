@@ -48,7 +48,7 @@ class LintWorkflowTests(unittest.TestCase):
         )
         checkout, python, install, lint = self.job["steps"]
         self.assertEqual(checkout["with"]["persist-credentials"], False)
-        self.assertEqual(python["with"]["python-version"], "3.11.10")
+        self.assertEqual(python["with"]["python-version"], "3.11.18")
         self.assertIn("--require-hashes", install["run"])
         self.assertIn("--no-deps", install["run"])
         self.assertIn("--only-binary=:all:", install["run"])
