@@ -272,7 +272,7 @@ class ColdBuildWorkflowTests(unittest.TestCase):
             python_step["uses"],
             "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
         )
-        self.assertEqual(python_step["with"]["python-version"], "3.11.10")
+        self.assertEqual(python_step["with"]["python-version"], "3.11.18")
         self.assertEqual(python_step["if"], "github.event_name != 'pull_request'")
         self.assertEqual(dependency_step["if"], "github.event_name != 'pull_request'")
         self.assertIn("--require-hashes", dependency_step["run"])
