@@ -231,7 +231,11 @@ The submitted `enable_nanoda` field is non-authoritative and a submitted
 `external_kernels` is rejected: the runner writes a protected configuration
 that registers the toolchain's bundled `nanoda_bin` as an external kernel
 and replaces only the Challenge module name with
-the per-run protected alias. The comparator's exit code is read the way it is
+the per-run protected alias. The optional profile field
+`nanoda_worker_stack_kib` is maintainer-owned. A formalization, comparator,
+or dispatch options key of that name is rejected. An in-range integer on the
+profile is evidence only: the judge does not raise the worker stack, and
+NanoDa and con-ron both remain mandatory. The comparator's exit code is read the way it is
 meant: 2 is a run that could not start, and 1 is a rejection only when the
 transcript carries one of the comparator's own comparison or axiom verdicts,
 or Lean's own kernel refused the proof. The comparator says "rejected" for

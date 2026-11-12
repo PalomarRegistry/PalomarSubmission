@@ -209,6 +209,16 @@ false, or any other JSON value does not disable or block verification, and a
 submitted `external_kernels` is rejected. The trusted runner writes a separate
 protected configuration that registers the toolchain's bundled NanoDa kernel
 and passes that copy to `lake comparator`. Lean and NanoDa must both accept.
+
+The verification profile may record an optional maintainer field,
+`nanoda_worker_stack_kib`, an integer from 256 through 65536. The published
+profile omits it, which leaves the platform stack default unchanged. When a
+maintainer profile sets the field, the integer is copied onto
+verification-profile evidence and is not passed to `lake comparator`, NanoDa,
+or con-ron. A submission that places that key in `formalization.yaml`,
+`comparator.json`, or the dispatch options is rejected. Both kernels stay
+mandatory.
+
 The runner then replays the exact protected Solution export with con-ron in a
 separate sandbox. A recognized inductive-support decline, fuel exhaustion, or
 authenticated capacity limit can leave that advisory replay inconclusive;

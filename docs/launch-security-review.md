@@ -183,7 +183,9 @@ own. The submitted `enable_nanoda` compatibility field is non-authoritative
 and a submitted `external_kernels` is rejected: the verifier's protected
 configuration registers the toolchain's bundled `nanoda_bin`,
 replaces the submitted Challenge module name with the canonical alias, and
-leaves the Solution and declaration selection unchanged. The comparator's
+leaves the Solution and declaration selection unchanged. A maintainer may
+record `nanoda_worker_stack_kib` on the verification profile. That integer
+is evidence, not a live stack increase, and a submission cannot set the key. The comparator's
 nested sandboxes sit inside Palomar's outer judge policy, which binds no
 candidate tree, so they can narrow but not widen it. The from-export form does
 not check that the exports belong to the project; Palomar produced both, from
