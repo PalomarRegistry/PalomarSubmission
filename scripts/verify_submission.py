@@ -1761,6 +1761,25 @@ def github_repository(url: str) -> str | None:
     return f"{parts[0]}/{parts[1]}"
 
 
+def git_package_subdirectory(value: Any) -> str:
+    """A contained, canonical Lake project path, never a Git or build-state path."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise VerificationError("Git package subDir must be a relative directory string")
+    if value in {"", "."}:
+        return ""
+    path = pathlib.PurePosixPath(value)
+    if (
+        len(value) > 4096 or path.is_absolute() or value != path.as_posix()
+        or pathlib.PureWindowsPath(value).drive or "\\" in value
+        or any(part in {"..", ".git", ".lake"} for part in path.parts)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise VerificationError(f"unsafe Git package subdirectory: {value!r}")
+    return value
+
+
 def manifest_packages(source: Path) -> list[dict[str, str]]:
     path = source / "lake-manifest.json"
     if not path.is_file():
@@ -1778,6 +1797,8 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
             raise VerificationError(f"duplicate package name in Lake manifest: {name!r}")
         seen_names.add(name)
         package_type = package.get("type")
+        subdirectory = (git_package_subdirectory(package.get("subDir"))
+                        if package_type == "git" else "")
         url = package.get("url")
         if package_type == "git":
             repository = github_repository(url) if isinstance(url, str) else None
@@ -1808,6 +1829,8 @@ def manifest_packages(source: Path) -> list[dict[str, str]]:
                 "revision": revision,
             }
         )
+        if subdirectory:
+            packages[-1]["sub_dir"] = subdirectory
     return packages
 
 
@@ -2174,6 +2197,10 @@ def package_allowlist(
                 f"repository {display}: {names}"
             )
         for root_package in matching:
+            if root_package.get("sub_dir"):
+                raise VerificationError(
+                    f"allowlisted root {display!r} must use its canonical repository-root project"
+                )
             package_dir = package_checkout(source, root_package, checkout=checkout)
             verify_official_revision(
                 package_dir,
@@ -2200,6 +2227,7 @@ def package_allowlist(
                 if (
                     actual_repository.lower() != expected_repository.lower()
                     or actual["revision"] != expected["revision"]
+                    or actual.get("sub_dir", "") != expected.get("sub_dir", "")
                 ):
                     raise VerificationError(
                         f"submitted manifest substitutes {display}'s pinned dependency {name!r}"
@@ -2224,6 +2252,18 @@ def package_checkout(source: Path, package: dict[str, str], *, checkout: Path) -
     ).resolve()
 
 
+def package_project_directory(source: Path, package: dict[str, str], *, checkout: Path) -> Path:
+    """Keep repository provenance at the clone root and Lake state at its project root."""
+    clone = package_checkout(source, package, checkout=checkout)
+    subdirectory = git_package_subdirectory(package.get("sub_dir"))
+    if not subdirectory:
+        return clone
+    return resolve_repository_path(
+        clone, pathlib.PurePosixPath(subdirectory),
+        f"Git package {package['name']!r} subdirectory", kind="directory",
+    )
+
+
 def shadowing_dependency(
     module: str, packages: list[dict[str, str]], *, source: Path, checkout: Path
 ) -> str | None:
@@ -2241,7 +2281,7 @@ def shadowing_dependency(
     """
     root = module.split(".", 1)[0]
     for package in packages:
-        directory = package_checkout(source, package, checkout=checkout)
+        directory = package_project_directory(source, package, checkout=checkout)
         if (directory / root).is_dir() or (directory / f"{root}.lean").is_file():
             return package["name"]
     return None
@@ -2335,6 +2375,10 @@ def trusted_package_url_map(
             raise VerificationError(
                 f"trusted package {name!r} revision does not match its verified manifest"
             )
+        if actual.get("sub_dir", "") != expected.get("sub_dir", ""):
+            raise VerificationError(
+                f"trusted package {name!r} subdirectory does not match its verified manifest"
+            )
         if actual["manifest_name"] != expected["manifest_name"]:
             raise VerificationError(f"trusted package {name!r} has a different manifest spelling")
         urls[expected["manifest_name"]] = actual["url"]
@@ -2348,7 +2392,7 @@ def package_lake_directories(
     if package is None:
         raise VerificationError(f"trusted package {name!r} is absent from the manifest")
     boundary = checkout.resolve()
-    package_dir = package_checkout(source, package, checkout=boundary)
+    package_dir = package_project_directory(source, package, checkout=boundary)
     return _validated_package_lake_directories(package_dir, name, boundary)
 
 
@@ -2398,7 +2442,6 @@ def reset_trusted_lake_state(
     """Validate, then recreate each trusted package's writable Lake state."""
     requested = set(names)
     boundary = checkout.resolve()
-    packages_directory = manifest_packages_directory(source, checkout=boundary)
     package_directories: list[Path] = []
     selected: set[str] = set()
     for package in packages:
@@ -2412,7 +2455,7 @@ def reset_trusted_lake_state(
             raise VerificationError(f"trusted package {name!r} may not use a path dependency")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
             raise VerificationError(f"unsafe trusted package name: {name!r}")
-        package_dir = (packages_directory / name).resolve()
+        package_dir = package_project_directory(source, package, checkout=boundary)
         # Validate every target before deleting any state. A redirected or
         # malformed package therefore fails without touching another package.
         _validated_package_lake_directories(package_dir, name, boundary)
@@ -2453,6 +2496,7 @@ def nested_package_links(
         if (
             actual["repository"].lower() != expected["repository"].lower()
             or actual["revision"] != expected["revision"]
+            or actual.get("sub_dir", "") != expected.get("sub_dir", "")
         ):
             raise VerificationError(
                 f"trusted root dependency {name!r} does not match its pinned manifest"
@@ -3841,7 +3885,9 @@ def materialize_packages(
             f"Git package {name!r}",
             allow_inert_submodules=True,
         )
-        writable.extend(remove_untrusted_lake_state(package_dir))
+        project_dir = package_project_directory(source, package, checkout=boundary)
+        purge_untrusted_lake_state(package_dir)
+        writable.extend(remove_untrusted_lake_state(project_dir))
     return validate_writable_directories(boundary, writable)
 
 
