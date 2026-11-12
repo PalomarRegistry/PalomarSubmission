@@ -165,6 +165,12 @@ profile carries the multiline `project.description` used as the public
 registry abstract and structured `sources[].contributors` entries for
 non-author source credits.
 
+Git dependencies may use a contained Lake `subDir`. The verifier keeps Git
+provenance at the clone root and creates writable `.lake/build` and
+`.lake/config` only under the validated project directory. Symlinks, traversal,
+and Git/build-state subdirectories are refused. Statement dependencies retain
+their canonical root and authenticated manifest layout.
+
 The proof project may use arbitrary pinned **public GitHub** Git dependencies
 at full 40-character commit SHAs. They build from source inside Palomar's fresh
 Lake build directories. Submitted or substantive source repositories containing
