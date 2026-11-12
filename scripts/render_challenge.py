@@ -2152,6 +2152,61 @@ class PreparedMathlibCacheTool:
     sha256: str
 
 
+# curl exits that mean the endpoint was not asked a cache question: name
+# resolution, connection, timeout, TLS. HTTP 404 is exit 22 and is a miss.
+CACHE_ENDPOINT_UNAVAILABLE = {6, 7, 28, 35}
+
+
+def cache_readiness(requested: set[str], attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Say whether official hosts answered, without predicting a later build.
+
+    `attempts` record only the fixed official base URLs this process actually
+    called. A digest is a hit only when one of those calls left its archive.
+    No responding host means unknown, which is not the same as a 404.
+    """
+    allowed = set(MATHLIB_CACHE_BASE_URLS)
+    hits: set[str] = set()
+    responded = False
+    unavailable: list[str] = []
+    recorded: list[dict[str, Any]] = []
+    for attempt in attempts:
+        base_url = attempt.get("base_url")
+        if base_url not in allowed:
+            raise VerificationError("cache readiness saw an endpoint outside the official chain")
+        code = attempt.get("curl_exit")
+        found = attempt.get("hits", [])
+        if not isinstance(found, list) or any(not isinstance(item, str) for item in found):
+            raise VerificationError("cache readiness hits must be digest strings")
+        hits.update(found)
+        if code in CACHE_ENDPOINT_UNAVAILABLE or code is None:
+            unavailable.append(base_url)
+        else:
+            responded = True
+        recorded.append({"base_url": base_url, "curl_exit": code, "hits": sorted(found)})
+    objects = []
+    for digest in sorted(requested):
+        if digest in hits:
+            status = "hit"
+        elif responded:
+            status = "absent"
+        else:
+            status = "unknown"
+        objects.append({"digest": digest, "status": status})
+    return {
+        "schema_version": 1,
+        "hosts": list(MATHLIB_CACHE_BASE_URLS),
+        "attempts": recorded,
+        "unavailable_hosts": unavailable,
+        "objects": objects,
+        "predicts_build_resources": False,
+        "note": (
+            "absent means every responding official host lacked the object. "
+            "unknown means no official host answered. Neither number is a prediction "
+            "of compile time or disk use."
+        ),
+    }
+
+
 def download_mathlib_cache(
     hashes: set[str],
     cache_dir: Path,
@@ -2213,6 +2268,7 @@ def download_mathlib_cache(
     }
     downloaded: set[str] = set()
     total = 0
+    attempts: list[dict[str, Any]] = []
     try:
         for base_url in MATHLIB_CACHE_BASE_URLS:
             remaining = sorted(hashes - downloaded)
@@ -2254,7 +2310,7 @@ def download_mathlib_cache(
             # Trusted curl, fixed hosts, but still the full boundary: only the
             # cache directory is writable and only the download configuration
             # and the certificate and name-service files are readable.
-            sandboxed_run(
+            proc = sandboxed_run(
                 command,
                 cwd=download_dir,
                 environment=environment,
@@ -2267,6 +2323,7 @@ def download_mathlib_cache(
                 unrestricted_network=True,
                 resource_properties=CACHE_DOWNLOAD_PROPERTIES,
             )
+            before = set(downloaded)
             downloaded = set()
             total = 0
             for path in cache_dir.iterdir():
@@ -2294,6 +2351,16 @@ def download_mathlib_cache(
                 total += size
                 if total > MAX_CACHE_BYTES:
                     raise VerificationError("Mathlib cache downloads exceed the byte cap")
+            attempts.append({
+                "base_url": base_url,
+                "curl_exit": getattr(proc, "returncode", None),
+                "hits": sorted(downloaded - before),
+            })
+        readiness_path = trusted_work / "mathlib-cache-readiness.json"
+        readiness_path.write_text(
+            json.dumps(cache_readiness(set(hashes), attempts), sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
     finally:
         config.unlink(missing_ok=True)
         held_tool.unlink(missing_ok=True)
@@ -2800,7 +2867,11 @@ def hydrate_mathlib_cache(
             resource_properties=RESOURCE_PROPERTIES,
         )
     shutil.rmtree(cache_dir)
-    return {"requested": len(hashes), "downloaded": downloaded, "bytes": total}
+    result = {"requested": len(hashes), "downloaded": downloaded, "bytes": total}
+    readiness_path = trusted_work / "mathlib-cache-readiness.json"
+    if readiness_path.is_file() and not readiness_path.is_symlink():
+        result["readiness"] = json.loads(readiness_path.read_text(encoding="utf-8"))
+    return result
 
 
 def prepare_build_metadata_files(
