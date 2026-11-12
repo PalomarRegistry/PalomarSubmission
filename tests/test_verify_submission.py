@@ -2953,18 +2953,53 @@ review:
 
     def test_an_independent_kernel_alone_does_not_reject(self):
         # `runExternalKernel` says "rejected" for every nonzero exit, a crash
-        # included; Lean's own kernel is the arbiter.
-        for log in (
-            "con-ron kernel rejected the solution\nLean default kernel accepts the solution\n"
-            "error: con-ron exited with 139",
+        # included; Lean's own kernel is the arbiter. A non-signal exit stays
+        # a disagreement. A signal-style exit is a crash, classified below.
+        log = (
             "nanoda kernel rejected the solution\ncon-ron kernel accepts the solution\n"
-            "Lean default kernel accepts the solution\nerror: nanoda exited with 101",
-        ):
-            with self.subTest(log=log[:24]):
-                error = comparator_verdict(1, log)
-                self.assertEqual(error.code, "palomar.kernel_disagreement")
-                self.assertEqual(error.owner, "palomar")
-                self.assertTrue(error.retryable)
+            "Lean default kernel accepts the solution\nerror: nanoda exited with 101"
+        )
+        error = comparator_verdict(1, log)
+        self.assertEqual(error.code, "palomar.kernel_disagreement")
+        self.assertEqual(error.owner, "palomar")
+        self.assertTrue(error.retryable)
+
+    def test_signal_exit_is_a_checker_crash_not_a_rejection(self):
+        # #193: NanoDa aborted with exit 134 after Lean's kernel accepted.
+        # The words "stack overflow" are not the evidence; the trusted exit line is.
+        log = (
+            "Lean default kernel accepts the solution\n"
+            "thread 'thread_2' (5) has overflowed its stack\n"
+            "fatal runtime error: stack overflow, aborting\n"
+            "nanoda kernel rejected the solution\n"
+            "error: nanoda exited with 134"
+        )
+        error = comparator_verdict(1, log)
+        self.assertEqual(error.code, "palomar.checker_crashed")
+        self.assertEqual(error.owner, "palomar")
+        self.assertTrue(error.retryable)
+        self.assertNotIn("accepted", error.code)
+        diagnostic = error.diagnostic("comparator")
+        self.assertEqual(diagnostic["code"], "palomar.checker_crashed")
+        self.assertIn("134", diagnostic["summary"])
+
+        # A declaration that merely contains the crash sentence cannot override
+        # a real statement mismatch, and a non-anchored line is not a crash.
+        forged = comparator_verdict(
+            1,
+            "error: Challenge and solution theorem statement do not match: "
+            "'«error: nanoda exited with 134»'",
+        )
+        self.assertEqual(forged.code, "comparator.rejected")
+        self.assertEqual(forged.owner, "submitter")
+
+        signal = comparator_verdict(
+            1,
+            "con-ron kernel rejected the solution\n"
+            "Lean default kernel accepts the solution\n"
+            "error: con-ron exited with 139",
+        )
+        self.assertEqual(signal.code, "palomar.checker_crashed")
 
     def test_a_marker_quoted_inside_a_declaration_name_is_not_a_marker(self):
         # The transcript quotes names the submitter chose; only a line of the

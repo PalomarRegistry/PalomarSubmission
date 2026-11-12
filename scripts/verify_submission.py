@@ -104,6 +104,16 @@ COMPARATOR_LEAN_KERNEL = "Lean default"
 COMPARATOR_INFRASTRUCTURE_RE = re.compile(
     r"^(?:bwrap: |Error while interacting with |error: Error while interacting with )", re.MULTILINE
 )
+# `runExternalKernel` prints "exited with N" for the process status it observed.
+# N >= 128 is the usual shell encoding of a fatal signal (134 is SIGABRT, the
+# NanoDa stack overflow in #193). That is a checker abort, not a proof verdict.
+# The marker is line-anchored, same as the other comparator lines, so a
+# declaration name cannot invent it.
+COMPARATOR_CHECKER_EXIT_RE = re.compile(
+    r"^error: (?P<kernel>nanoda|con-ron|Lean default) exited with (?P<code>[0-9]+)$",
+    re.MULTILINE,
+)
+CHECKER_CRASH_EXIT_MIN = 128
 COMPARATOR_REQUIRED_KEYS = {
     "challenge_module",
     "solution_module",
@@ -5116,6 +5126,30 @@ def comparator_verdict(returncode: int, log: str) -> VerificationError | None:
             next_action=RETRY_SAME_COMMIT,
             retryable=True,
         )
+    # A real statement/axiom verdict stays a rejection even if a later line
+    # mentions an exit code. Without that verdict, a signal-style exit is a
+    # crash: the checker did not judge the proof.
+    if COMPARATOR_VERDICT_RE.search(log) is None:
+        crashes = [
+            (match.group("kernel"), int(match.group("code")))
+            for match in COMPARATOR_CHECKER_EXIT_RE.finditer(log)
+            if int(match.group("code")) >= CHECKER_CRASH_EXIT_MIN
+        ]
+        if crashes:
+            described = ", ".join(f"{kernel} (exit {code})" for kernel, code in crashes)
+            return VerificationError(
+                f"a checker aborted instead of judging the proof: {described}",
+                code="palomar.checker_crashed",
+                owner="palomar",
+                detail=excerpt,
+                next_action=(
+                    "Do not edit the proof to chase a different verdict. "
+                    "The checker aborted (stack overflow, fatal signal, or internal fault) "
+                    "and this run is a failed verification, not an acceptance and not a "
+                    "proof rejection. Report the workflow URL."
+                ),
+                retryable=True,
+            )
     rejecting_kernels = COMPARATOR_KERNEL_REJECTED_RE.findall(log)
     if returncode == 1 and (
         COMPARATOR_VERDICT_RE.search(log) or COMPARATOR_LEAN_KERNEL in rejecting_kernels
