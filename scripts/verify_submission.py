@@ -5903,6 +5903,8 @@ def execute(args: argparse.Namespace) -> int:
         global _RESOURCE_PHASE
         _RESOURCE_PHASE = str(report.get("stage") or "verification")
         report["resource_usage"] = resource_metrics(metrics_path)
+        from scripts.stage_performance import stage_performance
+        report["resource_summary"] = stage_performance(report["resource_usage"])
         if tools:
             try:
                 verify_tool_snapshot(tools)
