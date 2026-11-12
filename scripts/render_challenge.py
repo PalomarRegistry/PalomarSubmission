@@ -160,12 +160,13 @@ CACHE_TOOL_DOWNLOAD_PROPERTIES = (
     f"LimitFSIZE={MAX_CACHE_TOOL_ARCHIVE_BYTES}",
 )
 
-# Mathlib's canonical cache moved new master-built artifacts to the
-# ``mathlib4-master`` container. The old flat ``mathlib4`` container remains a
-# read-only legacy fallback for artifacts from before the cutover. Keep this
+# Mathlib's canonical cache moved to cache.mathlib.org. Preserve the official
+# master and legacy containers on both hosts for historical revisions. Keep this
 # fixed, trusted chain local rather than executing submitted cache policy; in
 # particular, do not read fork containers whose writers are not trusted.
 MATHLIB_CACHE_BASE_URLS = (
+    "https://cache.mathlib.org/mathlib4-master",
+    "https://cache.mathlib.org/mathlib4",
     "https://lakecache.blob.core.windows.net/mathlib4-master",
     "https://lakecache.blob.core.windows.net/mathlib4",
 )
