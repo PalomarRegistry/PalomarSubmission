@@ -19,8 +19,6 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from scripts.verification_errors import VerificationError
-
 ROOT = Path(__file__).resolve().parent.parent
 PROFILE_PATH = ROOT / "verification-profile.json"
 CATALOGUE_PATH = ROOT / "execution-profiles.json"
@@ -98,6 +96,10 @@ def reject_submission_stack_override(
         prefix = "formalization.yaml"
     else:
         raise VerificationProfileError(f"unknown submission document {where}")
+    # Imported lazily so `python scripts/verification_profile.py` does not need
+    # the package path that the submission loader uses.
+    from scripts.verification_errors import VerificationError
+
     raise VerificationError(
         f"{prefix} cannot set {NANODA_WORKER_STACK_FIELD}; {NANODA_STACK_SUBMISSION_MESSAGE}",
         code=code,
