@@ -50,6 +50,8 @@ from scripts.verification_profile import (  # noqa: E402
     effective_memory_bytes,
     load_profile,
     profile_digest,
+    profile_evidence,
+    reject_submission_stack_override,
 )
 from scripts.workflow_inputs import WorkflowInputError, report_identity  # noqa: E402
 
@@ -670,15 +672,18 @@ def sha256(path: Path) -> str:
 
 
 def verification_profile_evidence() -> dict[str, Any]:
-    """Record the published policy; the capacity check adds observed host limits."""
-    return {
-        "id": VERIFICATION_PROFILE["id"],
-        "sha256": (sha256(PROFILE_PATH) if VERIFICATION_PROFILE["id"] == "palomar-standard-v1"
-                   else profile_digest(VERIFICATION_PROFILE)),
-        "runner": dict(VERIFICATION_PROFILE["runner"]),
-        "limits": dict(VERIFICATION_LIMITS),
-        "trusted_tools": dict(VERIFICATION_PROFILE["trusted_tools"]),
-    }
+    """Record the published policy; the capacity check adds observed host limits.
+
+    An approved stack size is copied from the profile when a maintainer set
+    one. The judge does not read that integer, so the worker stack stays the
+    platform default.
+    """
+    digest = (
+        sha256(PROFILE_PATH)
+        if VERIFICATION_PROFILE["id"] == "palomar-standard-v1"
+        else profile_digest(VERIFICATION_PROFILE)
+    )
+    return profile_evidence(VERIFICATION_PROFILE, digest=digest)
 
 
 def correction_source_evidence(
@@ -1151,6 +1156,7 @@ def load_comparator_config(path: Path) -> dict[str, Any]:
         ) from error
     if not isinstance(config, dict):
         raise VerificationError("Comparator configuration must contain one JSON object")
+    reject_submission_stack_override(config, where="comparator", path=path.name)
     missing = COMPARATOR_REQUIRED_KEYS - config.keys()
     if missing:
         raise VerificationError(
@@ -5191,7 +5197,11 @@ def tool_digests(tools: dict[str, Path], bwrap: Path) -> dict[str, str]:
 
 
 def protected_kernels(tools: dict[str, Path]) -> dict[str, list[str]]:
-    """The external kernels the protected configuration registers, by name."""
+    """The external kernels the protected configuration registers, by name.
+
+    NanoDa and con-ron are both mandatory. A recorded stack size is not
+    appended to either command.
+    """
     kernels = {name: [str(tools[binary])] for name, binary in PROTECTED_KERNELS}
     kernels["con-ron"].append(f"--jobs={CON_RON_JOBS}")
     return kernels
@@ -5418,6 +5428,25 @@ def verify_export(output: Path) -> None:
         raise VerificationError(f"export does not start with the exporter's header: {output.name}")
 
 
+def comparator_launch_command(
+    lake: Path,
+    config: Path,
+    challenge_export: Path,
+    solution_export: Path,
+) -> list[str]:
+    """The `lake comparator` argv. A recorded worker stack is not an argument."""
+    return [
+        str(lake),
+        "comparator",
+        "--config",
+        str(config),
+        "--challenge-from-export",
+        str(challenge_export),
+        "--solution-from-export",
+        str(solution_export),
+    ]
+
+
 def judge_exports(
     *,
     lake: Path,
@@ -5432,6 +5461,9 @@ def judge_exports(
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
     """Run `lake comparator` over two exports under the judge-only policy.
+
+    The worker stack stays the platform default. This phase does not take a
+    stack size from the verification profile.
 
     Nothing of the candidate is bound in: the two exports, the protected
     configuration, the toolchain, the system directories and a fresh scratch
@@ -5471,11 +5503,7 @@ def judge_exports(
         }
     )
     return sandboxed_run(
-        [
-            str(lake), "comparator", "--config", str(config),
-            "--challenge-from-export", str(challenge_export),
-            "--solution-from-export", str(solution_export),
-        ],
+        comparator_launch_command(lake, config, challenge_export, solution_export),
         cwd=project,
         environment=env,
         writable_directories=[scratch.resolve()],

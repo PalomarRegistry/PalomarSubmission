@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Load and validate Palomar's published verification resource policy."""
+"""Load and validate Palomar's published verification resource policy.
+
+``nanoda_worker_stack_kib`` is an optional maintainer field on this profile.
+When it is absent, NanoDa keeps the platform stack default. When it is set,
+the integer is recorded on verification-profile evidence and is not applied
+to the live worker: the judge does not raise NanoDa's stack, and both
+external kernels stay mandatory.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,8 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any
+
+from scripts.verification_errors import VerificationError
 
 ROOT = Path(__file__).resolve().parent.parent
 PROFILE_PATH = ROOT / "verification-profile.json"
@@ -25,6 +34,91 @@ HOSTED_PROFILE = "palomar-standard-v1"
 NAMESPACE_LABEL_RE = re.compile(r"^nscloud-ubuntu-24\.04-amd64-\d+x\d+-with-features$")
 NAMESPACE_FEATURE_LABEL = "namespace-features:container.privileged=true"
 CATALOGUE_LIMITS = {"minimum_host_memory_bytes", "job_timeout_minutes", "execution_budget_seconds"}
+PROFILE_REQUIRED_KEYS = {
+    "schema_version",
+    "id",
+    "runner",
+    "limits",
+    "trusted_tools",
+    "cache_policy",
+}
+# Maintainer-owned. Submissions cannot set this key. Inclusive KiB bounds.
+NANODA_WORKER_STACK_FIELD = "nanoda_worker_stack_kib"
+NANODA_WORKER_STACK_MIN_KIB = 256
+NANODA_WORKER_STACK_MAX_KIB = 65536
+NANODA_STACK_SUBMISSION_MESSAGE = (
+    "nanoda_worker_stack_kib is a maintainer-owned verification profile field "
+    "and cannot be set by a submission"
+)
+
+
+def contains_mapping_key(value: Any, key: str) -> bool:
+    """True when any mapping in a JSON or YAML document uses ``key``."""
+    if isinstance(value, dict):
+        if key in value:
+            return True
+        return any(contains_mapping_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_mapping_key(item, key) for item in value)
+    return False
+
+
+def nanoda_worker_stack_kib(profile: dict[str, Any]) -> int | None:
+    """The recorded stack size, or None when the platform default is unchanged.
+
+    The integer is evidence. Callers must not pass it to NanoDa, con-ron, or
+    ``lake comparator`` as a stack limit.
+    """
+    if NANODA_WORKER_STACK_FIELD not in profile:
+        return None
+    value = profile[NANODA_WORKER_STACK_FIELD]
+    if (
+        type(value) is not int
+        or not NANODA_WORKER_STACK_MIN_KIB <= value <= NANODA_WORKER_STACK_MAX_KIB
+    ):
+        raise VerificationProfileError(
+            "nanoda_worker_stack_kib must be an integer from "
+            f"{NANODA_WORKER_STACK_MIN_KIB} to {NANODA_WORKER_STACK_MAX_KIB} KiB; "
+            "omit the field to keep the platform stack default"
+        )
+    return value
+
+
+def reject_submission_stack_override(
+    document: Any, *, where: str, path: str | None = None
+) -> None:
+    """Reject a formalization or comparator document that tries to set the field."""
+    if not contains_mapping_key(document, NANODA_WORKER_STACK_FIELD):
+        return
+    if where == "comparator":
+        code = "comparator.stack_override"
+        prefix = "comparator.json"
+    elif where == "formalization":
+        code = "formalization.stack_override"
+        prefix = "formalization.yaml"
+    else:
+        raise VerificationProfileError(f"unknown submission document {where}")
+    raise VerificationError(
+        f"{prefix} cannot set {NANODA_WORKER_STACK_FIELD}; {NANODA_STACK_SUBMISSION_MESSAGE}",
+        code=code,
+        field=NANODA_WORKER_STACK_FIELD,
+        path=path,
+    )
+
+
+def profile_evidence(profile: dict[str, Any], *, digest: str) -> dict[str, Any]:
+    """The profile fields a report records, including an approved stack size."""
+    evidence: dict[str, Any] = {
+        "id": profile["id"],
+        "sha256": digest,
+        "runner": dict(profile["runner"]),
+        "limits": dict(profile["limits"]),
+        "trusted_tools": dict(profile["trusted_tools"]),
+    }
+    stack = nanoda_worker_stack_kib(profile)
+    if stack is not None:
+        evidence[NANODA_WORKER_STACK_FIELD] = stack
+    return evidence
 
 
 def load_catalogue() -> dict[str, Any]:
@@ -68,14 +162,11 @@ def default_profile_id() -> str:
 def load_profile(identifier: str | None = None) -> dict[str, Any]:
     identifier = identifier or os.environ.get("PALOMAR_EXECUTION_PROFILE") or default_profile_id()
     value = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version",
-        "id",
-        "runner",
-        "limits",
-        "trusted_tools",
-        "cache_policy",
-    }:
+    # Optional maintainer field. Absence means the platform stack default.
+    if (
+        not isinstance(value, dict)
+        or not PROFILE_REQUIRED_KEYS <= set(value) <= PROFILE_REQUIRED_KEYS | {NANODA_WORKER_STACK_FIELD}
+    ):
         raise VerificationProfileError("verification profile has an invalid top-level shape")
     if value["schema_version"] != 1 or value["id"] != "palomar-standard-v1":
         raise VerificationProfileError("verification profile identity is unsupported")
@@ -115,6 +206,8 @@ def load_profile(identifier: str | None = None) -> dict[str, Any]:
         raise VerificationProfileError("verification profile toolchain_floor is not a release tag")
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tools["bwrap_source_tag"]):
         raise VerificationProfileError("verification profile bwrap_source_tag is not a release tag")
+    # Validate before any catalogue overlay. Absence leaves the platform default.
+    nanoda_worker_stack_kib(value)
     if identifier != HOSTED_PROFILE:
         catalogue = load_catalogue()
         selected = catalogue["profiles"].get(identifier)

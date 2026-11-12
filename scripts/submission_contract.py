@@ -16,6 +16,12 @@ from scripts.orcid_validation import (
     valid_checksum,
 )
 from scripts.verification_errors import FormalizationValidationError, VerificationError
+from scripts.verification_profile import (
+    NANODA_STACK_SUBMISSION_MESSAGE,
+    NANODA_WORKER_STACK_FIELD,
+    contains_mapping_key,
+    reject_submission_stack_override,
+)
 from scripts.workflow_inputs import (
     REPOSITORY_RE,
     SHA_RE,
@@ -372,6 +378,11 @@ def submission_request(event: dict[str, Any]) -> tuple[dict[str, str], str]:
             ) from error
         if not isinstance(options, dict):
             raise WorkflowInputError("Submission options must be a JSON object", field="options")
+        if contains_mapping_key(options, NANODA_WORKER_STACK_FIELD):
+            raise WorkflowInputError(
+                NANODA_STACK_SUBMISSION_MESSAGE,
+                field=f"options.{NANODA_WORKER_STACK_FIELD}",
+            )
         unknown = sorted(set(options) - OPTIONAL_FIELDS)
         if unknown:
             raise WorkflowInputError(
@@ -1110,6 +1121,7 @@ def load_formalization_metadata(
             code="formalization.wrong_root_type",
             path=path.name,
         )
+    reject_submission_stack_override(data, where="formalization", path=path.name)
     _canonicalize_classification_keys(data)
 
     issues: list[VerificationError] = []
