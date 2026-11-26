@@ -143,6 +143,10 @@ contains the source repository or commit. Each job checks out
 PalomarSubmission at the pinned pipeline commit rather than reading the
 caller, and every mechanical and render report records `run_repository`,
 the repository whose Actions run produced it, beside its `workflow_url`.
+A `uses:` pin fixes only the workflow file, and the jobs execute the scripts at
+`pipeline_commit`, so mechanical reports also record `pipeline_commit` (render
+reports already record it as `renderer_commit`). Palomar accepts a called run
+only when that revision equals the run's referenced workflow SHA.
 
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely

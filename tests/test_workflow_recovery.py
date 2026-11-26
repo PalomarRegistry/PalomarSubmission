@@ -7,7 +7,7 @@ from scripts import trusted_download, workflow_report
 from scripts.verify_submission import VerificationError, check_mathlib_toolchain
 
 # Finalizer arguments that the workflow supplies from the Actions context.
-RUN = {"workflow_url": "run", "run_repository": "owner/runs"}
+RUN = {"workflow_url": "run", "run_repository": "owner/runs", "pipeline_commit": "c" * 40}
 
 
 class WorkflowRecoveryTests(unittest.TestCase):

@@ -13,7 +13,7 @@ from scripts import workflow_report
 
 ROOT = Path(__file__).resolve().parents[1]
 # Finalizer arguments that the workflow supplies from the Actions context.
-RUN = {"workflow_url": "run", "run_repository": "owner/runs"}
+RUN = {"workflow_url": "run", "run_repository": "owner/runs", "pipeline_commit": "c" * 40}
 
 
 class PreparationReportingTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class PreparationReportingTests(unittest.TestCase):
                         "PALOMAR_INPUTS": json.dumps(inputs),
                         "PALOMAR_STEPS": json.dumps(steps),
                         "PALOMAR_WORKFLOW_URL": "https://github.com/owner/runs/actions/runs/1",
-                        "PALOMAR_RUN_REPOSITORY": "owner/runs",
+                        "PALOMAR_RUN_REPOSITORY": "owner/runs", "PALOMAR_PIPELINE_COMMIT": "c" * 40,
                     }
                     prepared = subprocess.run([
                         sys.executable, str(ROOT / "scripts/verify_submission.py"), "prepare",
@@ -222,7 +222,8 @@ class PreparationReportingTests(unittest.TestCase):
             ], cwd=directory, env={
                 **os.environ, "PALOMAR_INPUTS": json.dumps(self.inputs), "PALOMAR_STEPS": "{}",
                 "PALOMAR_WORKFLOW_URL": "https://github.com/owner/runs/actions/runs/1",
-                "PALOMAR_RUN_REPOSITORY": "owner/runs", "GITHUB_STEP_SUMMARY": str(directory / "summary.md"),
+                "PALOMAR_RUN_REPOSITORY": "owner/runs", "PALOMAR_PIPELINE_COMMIT": "c" * 40,
+                "GITHUB_STEP_SUMMARY": str(directory / "summary.md"),
             }, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(result.stdout.splitlines()), 10)
