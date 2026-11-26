@@ -178,13 +178,15 @@ uses the following staged path in
    resource-limited sandbox that can write only the cache directory, fetches
    exactly those names from a fixed chain of official containers. It first
    reads the master-only `mathlib4-master` container on
-   `https://cache.mathlib.org`, the only container that Mathlib's own cache
-   client reads for the canonical repository since September 2026 and so the
-   one that submission verification's `lake exe cache get` uses for current
-   revisions. Archives still missing fall back to the frozen Azure
-   `mathlib4-master` container and then the legacy flat `mathlib4` container,
-   which hold artifacts that master CI published before those cutovers. Fork
-   containers are never read. It runs under
+   `https://cache.mathlib.org`. Mathlib's own cache client has read from that
+   host by default since 2 September 2026, has read only its `mathlib4-master`
+   container for the canonical repository since 25 September 2026, and stopped
+   reading Azure on 19 October 2026, so this is the container that submission
+   verification's `lake exe cache get` uses for current revisions. Archives
+   still missing fall back to the frozen Azure `mathlib4-master` container
+   and then the legacy flat `mathlib4` container, which hold artifacts that
+   master CI published before those cutovers. Fork containers are never read.
+   It runs under
    `env -i`, invokes `curl --disable` so the preserved `HOME` cannot supply a
    `.curlrc`, sends no cache credential, and permits only HTTPS. An
    `RLIMIT_FSIZE` applied by the supervisor makes the 256 MiB per-file limit

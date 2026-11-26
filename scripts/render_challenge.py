@@ -162,9 +162,9 @@ CACHE_TOOL_DOWNLOAD_PROPERTIES = (
 
 # Mathlib's cache client reads the canonical repository's archives only from
 # the master-only ``mathlib4-master`` container on ``cache.mathlib.org``
-# (``publicCacheEndpoint`` in ``Cache/Infra.lean`` since September 2026), so
-# this is the container submission verification's ``lake exe cache get``
-# reads for current revisions.
+# (``publicCacheEndpoint`` in ``Cache/Infra.lean``; the sole read host since
+# 19 October 2026), so this is the container submission verification's
+# ``lake exe cache get`` reads for current revisions.
 # Artifacts that master CI published earlier remain on the frozen Azure storage
 # account: first its ``mathlib4-master`` container, then the flat ``mathlib4``
 # legacy container from before that cutover. Keep this fixed, trusted chain
