@@ -407,7 +407,8 @@ has verified this way. Pin and floor changes require security review and an
 end-to-end comparison probe.
 
 This design still trusts the runner (the privileged Namespace container of the
-default execution profile, or the GitHub-hosted image of the hosted profile), the Linux kernel with
+default execution profile, the GitHub-hosted image of the hosted profile, or the
+operator-launched EC2 instance of an AWS profile), the Linux kernel with
 its namespace, cgroup and seccomp implementations, bubblewrap, Git and its
 protocol parsers, the selected Lean toolchain with its kernel, `lake
 comparator`, `leanexport`, `leanchecker` and bundled independent kernels, the
@@ -452,8 +453,9 @@ that selected file, with package and README detection disabled and bounded
 subprocess output and runtime. Standard fresh Lake build locations are also
 required. The
 verifier enforces the wall-clock allowance its caller passes, which
-[`.github/workflows/submission.yml`](.github/workflows/submission.yml) sets to
-19,800 seconds, five and a half hours, and applies no CPU
+[`.github/workflows/submission.yml`](.github/workflows/submission.yml) takes
+from the resolved profile: 19,800 seconds, five and a half hours, for the hosted
+and Namespace profiles. It applies no CPU
 quota. [`verification-profile.json`](verification-profile.json) records the
 `palomar-standard-v1` runner and containment policy. Each phase retains the
 existing 95% memory pressure threshold and 98% ceiling, 32,768 tasks,
@@ -463,8 +465,10 @@ minimum host memory, and free workspace before tool installation. The report
 records that host snapshot and the effective percentage-based memory thresholds;
 it is not a reservation or a promise about later free capacity.
 
-Each approved execution profile supplies 330 minutes of verifier capacity
-inside its 350-minute job; the report records the profile and its resolved
+Each hosted or Namespace profile supplies 330 minutes of verifier capacity
+inside its 350-minute job, and the operator-launched
+`palomar-aws-r7i-16xlarge-v1` supplies 82,800 seconds (23 hours) inside its
+1,440-minute job; the report records the profile and its resolved
 runner, and every phase's record carries the cgroup limits and rlimits the
 supervisor actually applied on that host (`rlimits_applied` is the value after
 clamping to the runner's hard limit). The cgroup supervisor's termination results identify
@@ -555,6 +559,51 @@ cannot supply runner labels or resource limits. The catalogue's default,
 both runner types on every change, the Namespace leg with the root cgroup
 bootstrap that runner needs; that job is a trusted synthetic probe and never
 accepts candidate source.
+
+### The operator-launched AWS runner
+
+`palomar-aws-r7i-16xlarge-v1` is for the rare project that no Namespace tier
+can hold. Its runner is an EC2 r7i.16xlarge (64 vCPU, 512 GiB) in Palomar's own
+AWS account that a Technical Maintainer launches for one job with
+[`ops/aws-runner/launch-runner.sh`](ops/aws-runner/launch-runner.sh). It
+registers to this repository alone, ephemeral and with no default labels, so
+its only label is the profile id and it deregisters after one job; the
+instance terminates itself when that job ends, when no job arrives within the
+idle window, or at a lifetime cap. The profile is never the catalogue default,
+the server's automatic resource retry never selects it, and a submitter cannot
+name it: it is reached only through the audited Technical Maintainer retry.
+
+A self-hosted runner on a public repository is reachable by any workflow in the
+repository that names its label, and a pull request runs workflows as its own
+tree has them. Three controls keep it to operator dispatches. The resolver
+refuses the profile unless the event is `workflow_dispatch` in this
+repository, so a pull request, push, schedule, repository variable or foreign
+reusable caller never receives the label from Palomar's own workflows. A pull
+request that rewrites those workflows or names the label directly is refused on
+the instance itself: the runner's job-started hook, which lives outside any
+tree a pull request can edit, fails every job that is not a `workflow_dispatch`
+on `main` of `submission.yml` (`verify`), `render-challenge.yml` (`render`) or
+`compatibility.yml` (`cold_build`), before any step runs. Dispatching requires
+write access. Finally, the label has a runner only while an operator-launched
+instance exists, so between launches nothing can pick a job up at all.
+
+On the instance there is no container, so nothing corresponds to Namespace's
+`container.privileged=true` feature, and nothing needs to. That feature lets a
+job in a Namespace container create user namespaces, mount, and write the
+container's cgroup2 root, which `scripts/cgroup_delegate.py` drains into a
+delegated subtree by hand. The instance is a full Ubuntu 24.04 host like the
+GitHub-hosted image: the job user has a lingering systemd user manager, the
+verifier obtains its delegated cgroup from `systemd-run --user --scope
+--property=Delegate=yes`, and bubblewrap's AppArmor profile is loaded as on the
+hosted runner. The same bubblewrap, seccomp, cgroup and probe chain therefore
+runs unchanged and fails closed where it would elsewhere. The job user cannot
+reach instance metadata, so neither the instance role (Session Manager only)
+nor the launch-time registration token in user-data is visible to the job; the
+security group has no inbound rules and access is through Session Manager.
+Because the runner exists only on demand, `ci.yml` cannot prove this boundary
+on every change as it does for Namespace; the verifier's own supervisor and
+confinement probes, which run before any candidate code on every run, are the
+proof on this host.
 
 Memory ceilings use the minimum of host RAM and visible ancestor cgroup limits;
 CPU evidence uses affinity and ancestor quotas. Workload limits are absolute

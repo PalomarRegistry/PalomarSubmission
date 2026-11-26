@@ -24,7 +24,34 @@ class VerificationProfileError(RuntimeError):
 HOSTED_PROFILE = "palomar-standard-v1"
 NAMESPACE_LABEL_RE = re.compile(r"^nscloud-ubuntu-24\.04-amd64-\d+x\d+-with-features$")
 NAMESPACE_FEATURE_LABEL = "namespace-features:container.privileged=true"
+# An operator-launched, ephemeral EC2 runner registered to this repository
+# only. Its one label is the profile id, so no other profile or workflow label
+# can match it, and the profile names the vCPU count the instance must expose.
+AWS_PROVIDER = "aws-self-hosted"
+AWS_LABEL_RE = re.compile(r"^palomar-aws-[a-z0-9-]+-v\d+$")
+CANONICAL_REPOSITORY = "PalomarRegistry/PalomarSubmission"
 CATALOGUE_LIMITS = {"minimum_host_memory_bytes", "job_timeout_minutes", "execution_budget_seconds"}
+
+
+def _runner_is_approved(identifier: str, runner: Any) -> bool:
+    if not isinstance(runner, dict) or runner.get("architecture") != "x86_64":
+        return False
+    if runner.get("provider") == "namespace":
+        return (
+            set(runner) == {"provider", "label", "labels", "architecture"}
+            and bool(NAMESPACE_LABEL_RE.fullmatch(str(runner["label"])))
+            and runner["labels"] == [runner["label"], NAMESPACE_FEATURE_LABEL]
+        )
+    if runner.get("provider") == AWS_PROVIDER:
+        return (
+            set(runner) == {"provider", "label", "labels", "architecture", "minimum_cpus"}
+            and runner["label"] == identifier
+            and bool(AWS_LABEL_RE.fullmatch(identifier))
+            and runner["labels"] == [identifier]
+            and type(runner["minimum_cpus"]) is int
+            and runner["minimum_cpus"] > 0
+        )
+    return False
 
 
 def load_catalogue() -> dict[str, Any]:
@@ -44,12 +71,7 @@ def load_catalogue() -> dict[str, Any]:
         limits = selected.get("limits") if isinstance(selected, dict) else None
         if (
             set(selected) != {"runner", "limits"}
-            or not isinstance(runner, dict)
-            or set(runner) != {"provider", "label", "labels", "architecture"}
-            or runner["provider"] != "namespace"
-            or runner["architecture"] != "x86_64"
-            or not NAMESPACE_LABEL_RE.fullmatch(str(runner["label"]))
-            or runner["labels"] != [runner["label"], NAMESPACE_FEATURE_LABEL]
+            or not _runner_is_approved(identifier, runner)
             or not isinstance(limits, dict)
             or set(limits) != CATALOGUE_LIMITS
             or any(type(limits[name]) is not int or limits[name] <= 0 for name in CATALOGUE_LIMITS)
@@ -58,7 +80,32 @@ def load_catalogue() -> dict[str, Any]:
             raise VerificationProfileError(f"approved execution profile is malformed: {identifier}")
     if catalogue["default"] != HOSTED_PROFILE and catalogue["default"] not in catalogue["profiles"]:
         raise VerificationProfileError("approved execution profile catalogue default is not approved")
+    if catalogue["profiles"].get(catalogue["default"], {}).get("runner", {}).get("provider") == AWS_PROVIDER:
+        # Operator-launched capacity can never be what an omitted selection means.
+        raise VerificationProfileError("an operator-launched profile cannot be the catalogue default")
     return catalogue
+
+
+def require_operator_dispatch(profile: dict[str, Any], environment: Any = os.environ) -> None:
+    """Refuse to hand an operator-launched runner's label to anything but a dispatch here.
+
+    Only someone with write access can dispatch a workflow in this repository,
+    and the Submission Server dispatches only what a Technical Maintainer
+    recorded. A pull request, push, schedule or another repository's reusable
+    call never resolves the label, even through a repository variable. A pull
+    request that edits this check or names the label directly is stopped on
+    the runner itself by its job-started hook (ops/aws-runner).
+    """
+    if profile["runner"]["provider"] != AWS_PROVIDER:
+        return
+    if (
+        environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+        or environment.get("GITHUB_REPOSITORY") != CANONICAL_REPOSITORY
+    ):
+        raise VerificationProfileError(
+            f"execution profile {profile['id']} is operator-only: it resolves only for a "
+            f"workflow_dispatch in {CANONICAL_REPOSITORY}"
+        )
 
 
 def default_profile_id() -> str:
@@ -192,6 +239,10 @@ def check_host(profile: dict[str, Any], disk_path: Path) -> dict[str, int | floa
             raise VerificationProfileError(
                 f"runner has {cpus} effective CPUs; Namespace profile requires {required_cpus}"
             )
+    elif runner["provider"] == AWS_PROVIDER and cpus < runner["minimum_cpus"]:
+        raise VerificationProfileError(
+            f"runner has {cpus} effective CPUs; profile requires {runner['minimum_cpus']}"
+        )
     memory = effective_memory_bytes()
     if memory < limits["minimum_host_memory_bytes"]:
         raise VerificationProfileError(
@@ -223,6 +274,7 @@ def main() -> int:
     args = parser.parse_args()
     profile = load_profile(args.profile)
     if args.resolve:
+        require_operator_dispatch(profile)
         runner = profile["runner"]
         labels = runner.get("labels", [runner["label"]])
         outputs = {
