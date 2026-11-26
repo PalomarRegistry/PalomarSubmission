@@ -130,6 +130,7 @@ class RunRepositoryAssumptionTests(unittest.TestCase):
             if "workflow_report.py finalize" in step.get("run", "")
         )
         self.assertEqual(step["env"]["PALOMAR_RUN_REPOSITORY"], "${{ github.repository }}")
+        self.assertEqual(step["env"]["PALOMAR_PIPELINE_COMMIT"], PIPELINE_REF)
         self.assertEqual(
             step["env"]["PALOMAR_WORKFLOW_URL"],
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
@@ -152,8 +153,10 @@ class RunRepositoryReportFieldTests(unittest.TestCase):
                     report, self.INPUTS, {},
                     workflow_url="https://github.com/PalomarRegistry/PalomarConfidentialRuns/actions/runs/7",
                     run_repository="PalomarRegistry/PalomarConfidentialRuns",
+                    pipeline_commit="c" * 40,
                 )
                 self.assertEqual(result["run_repository"], "PalomarRegistry/PalomarConfidentialRuns")
+                self.assertEqual(result["pipeline_commit"], "c" * 40)
 
     def test_run_repository_must_match_the_workflow_url(self):
         url = "https://github.com/PalomarRegistry/PalomarSubmission/actions/runs/12"
