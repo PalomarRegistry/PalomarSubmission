@@ -248,6 +248,7 @@ jobs:
           PALOMAR_INPUTS: ${{ toJSON(inputs) }}
           PALOMAR_STEPS: ${{ toJSON(steps) }}
           PALOMAR_WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PALOMAR_RUN_REPOSITORY: ${{ github.repository }}
         run: python3 pipeline/scripts/workflow_report.py finalize --report "$RUNNER_TEMP/mechanical-report.json"
 
       - name: Upload bounded mechanical report

@@ -66,3 +66,17 @@ def report_identity(inputs: dict[str, Any]) -> dict[str, Any]:
         },
         "submission": {"submission_id": str(inputs.get("request_id", ""))[:100]},
     }
+
+
+def run_repository(repository: str, workflow_url: str) -> str:
+    """The repository whose Actions run produced a report.
+
+    A dispatch runs in PalomarSubmission; a reusable call runs in its caller,
+    such as Palomar's private confidential runs repository. The report records
+    which, and it must agree with the run URL it also records.
+    """
+    if not REPOSITORY_RE.fullmatch(repository) or not re.fullmatch(
+        rf"https://github\.com/{re.escape(repository)}/actions/runs/[1-9][0-9]*", workflow_url
+    ):
+        raise VerificationError("run repository must be the owner/name the workflow URL names")
+    return repository

@@ -1,7 +1,66 @@
 name: Render accepted Challenge
-run-name: Render ${{ inputs.repository }}@${{ inputs.commit }} [${{ inputs.request_id }}]
+# The run title carries only the request id. A caller's own run name
+# replaces this one, but no caller may name the source repository either.
+run-name: Render challenge [${{ inputs.request_id }}]
 
 on:
+  # Palomar's confidential runs repository calls this exact job at a pinned
+  # commit, so its run, logs and artifact stay private to the caller.
+  workflow_call:
+    inputs:
+      repository:
+        description: Public GitHub repository in owner/name form
+        required: true
+        type: string
+      commit:
+        description: Accepted 40-character source commit
+        required: true
+        type: string
+      pipeline_commit:
+        description: Full PalomarSubmission commit used in this workflow's uses reference
+        required: true
+        type: string
+      challenge_sha256:
+        description: Accepted Challenge source SHA-256
+        required: true
+        type: string
+      request_id:
+        description: Unique lowercase hexadecimal publication request ID
+        required: true
+        type: string
+      execution_profile:
+        description: Approved execution profile inherited from verification (blank selects the catalogue default)
+        required: false
+        default: ""
+        type: string
+      project_path:
+        description: Accepted repository-relative project directory (blank means root)
+        # GitHub rejects an explicitly empty value for a required dispatch
+        # input. Root projects are represented by the empty default, while
+        # nested projects still supply their authenticated non-empty path.
+        required: false
+        default: ""
+        type: string
+      challenge_path:
+        description: Accepted repository-relative Challenge source path
+        required: true
+        type: string
+      solution_path:
+        description: Accepted repository-relative Solution source path
+        required: true
+        type: string
+      comparator_config_path:
+        description: Accepted repository-relative Comparator configuration path
+        required: true
+        type: string
+      lakefile_path:
+        description: Accepted repository-relative Lakefile path
+        required: true
+        type: string
+      lean_toolchain_path:
+        description: Accepted repository-relative lean-toolchain path
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -57,6 +116,8 @@ on:
 permissions:
   contents: read
 
+# Concurrency groups belong to the repository that runs the workflow, so a
+# caller's renders never queue behind Palomar's own.
 concurrency:
   group: palomar-render-${{ inputs.request_id }}
   cancel-in-progress: false
@@ -73,7 +134,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: PalomarRegistry/PalomarSubmission
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
           persist-credentials: false
       - id: resolve
         env:
@@ -85,6 +146,8 @@ jobs:
     env:
       PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
     timeout-minutes: ${{ fromJSON(needs.profile.outputs.render_timeout) }}
+    permissions:
+      contents: read
     steps:
       - name: Validate request identifier
         env:
@@ -93,6 +156,15 @@ jobs:
           if [[ ! "$REQUEST_ID" =~ ^[0-9a-f]{32}$ ]]; then
             echo "request_id must be 32 lowercase hexadecimal characters" >&2
             exit 2
+          fi
+
+      - name: Validate pinned pipeline revision
+        env:
+          PIPELINE_COMMIT: ${{ inputs.pipeline_commit || github.workflow_sha }}
+        run: |
+          if [[ ! "$PIPELINE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "pipeline_commit must be a full lowercase commit SHA" >&2
+            exit 1
           fi
 
       - name: Free disk space
@@ -109,7 +181,8 @@ jobs:
       - name: Checkout trusted renderer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
+          repository: PalomarRegistry/PalomarSubmission
+          ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
           path: pipeline
           persist-credentials: false
 
@@ -175,13 +248,17 @@ jobs:
       - name: Build, sanitize, and hash Challenge rendering under bubblewrap
         if: steps.prepare.outputs.ready == 'true'
         working-directory: pipeline
+        env:
+          RENDERER_COMMIT: ${{ inputs.pipeline_commit || github.workflow_sha }}
+          RUN_REPOSITORY: ${{ github.repository }}
         run: |
           python -m scripts.render_challenge execute \
             --work-dir "$RUNNER_TEMP/palomar-render" \
             --output "$RUNNER_TEMP/palomar-render/report.json" \
             --bwrap "$PALOMAR_BWRAP" \
-            --renderer-commit "${{ github.sha }}" \
+            --renderer-commit "$RENDERER_COMMIT" \
             --bwrap-source-tag v0.12.0 \
+            --run-repository "$RUN_REPOSITORY" \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload bounded render result

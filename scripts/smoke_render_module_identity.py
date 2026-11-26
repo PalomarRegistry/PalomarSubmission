@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -103,6 +104,7 @@ def main() -> int:
             bwrap=str(args.bwrap),
             renderer_commit=args.renderer_commit,
             bwrap_source_tag=args.bwrap_source_tag,
+            run_repository=os.environ.get("GITHUB_REPOSITORY", "PalomarRegistry/PalomarSubmission"),
             workflow_url=args.workflow_url,
         )
     )

@@ -22,6 +22,42 @@ jobs:
       request_id: preflight001
       mode: full
       options: '{"project_path":"tests/fixtures/reusable-preflight","comparator_config_path":"tests/fixtures/reusable-preflight/comparator.json","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
+  render_fixture:
+    if: github.repository == 'PalomarRegistry/PalomarSubmission'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      challenge_sha256: ${{ steps.fixture.outputs.challenge_sha256 }}
+      request_id: ${{ steps.fixture.outputs.request_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Describe the render fixture
+        id: fixture
+        env:
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          echo "challenge_sha256=$(sha256sum tests/fixtures/reusable-preflight/Challenge.lean | cut -c1-64)" >> "$GITHUB_OUTPUT"
+          echo "request_id=$(printf '%s' "$RUN_KEY" | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+  reusable_render:
+    # The confidential runs repository renders through this same call.
+    needs: render_fixture
+    uses: ./.github/workflows/render-challenge.yml
+    with:
+      repository: ${{ github.repository }}
+      commit: ${{ github.sha }}
+      pipeline_commit: ${{ github.sha }}
+      challenge_sha256: ${{ needs.render_fixture.outputs.challenge_sha256 }}
+      request_id: ${{ needs.render_fixture.outputs.request_id }}
+      project_path: tests/fixtures/reusable-preflight
+      challenge_path: tests/fixtures/reusable-preflight/Challenge.lean
+      solution_path: tests/fixtures/reusable-preflight/Solution.lean
+      comparator_config_path: tests/fixtures/reusable-preflight/comparator.json
+      lakefile_path: tests/fixtures/reusable-preflight/lakefile.toml
+      lean_toolchain_path: tests/fixtures/reusable-preflight/lean-toolchain
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 5

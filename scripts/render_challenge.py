@@ -81,6 +81,7 @@ from scripts.verify_submission import (  # noqa: E402
     verify_sandbox_confinement,
     write_json,
 )
+from scripts.workflow_inputs import run_repository as checked_run_repository  # noqa: E402
 
 VERSO_REPOSITORY = "leanprover/verso"
 # Upstream verso#1043 landed after these releases. Authenticate each released
@@ -3014,6 +3015,9 @@ def execute(args: argparse.Namespace) -> int:
             "stage": "workspace",
             "renderer_commit": args.renderer_commit,
             "bwrap_source_tag": args.bwrap_source_tag,
+            # The repository whose Actions run rendered this: PalomarSubmission
+            # for a dispatch, the caller for a reusable call.
+            "run_repository": args.run_repository,
             "workflow_url": args.workflow_url,
         }
     )
@@ -3021,6 +3025,7 @@ def execute(args: argparse.Namespace) -> int:
     try:
         if not SHA_RE.fullmatch(args.renderer_commit):
             raise VerificationError("renderer commit must be an immutable SHA")
+        checked_run_repository(args.run_repository, args.workflow_url)
         if not BWRAP_SOURCE_TAG_RE.fullmatch(args.bwrap_source_tag):
             raise VerificationError("bubblewrap source tag must be a release tag")
         if args.bwrap_source_tag != bwrap_source_tag_from_installer():
@@ -3413,6 +3418,7 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--bwrap", required=True)
     execute_parser.add_argument("--renderer-commit", required=True)
     execute_parser.add_argument("--bwrap-source-tag", required=True)
+    execute_parser.add_argument("--run-repository", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.set_defaults(func=execute)
     sanitize_parser = commands.add_parser("sanitize")

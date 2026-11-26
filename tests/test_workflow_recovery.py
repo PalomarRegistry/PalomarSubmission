@@ -6,6 +6,9 @@ from unittest.mock import patch
 from scripts import trusted_download, workflow_report
 from scripts.verify_submission import VerificationError, check_mathlib_toolchain
 
+# Finalizer arguments that the workflow supplies from the Actions context.
+RUN = {"workflow_url": "run", "run_repository": "owner/runs"}
+
 
 class WorkflowRecoveryTests(unittest.TestCase):
     inputs = {"repository": "owner/repo", "commit": "a" * 40, "request_id": "abcdefghijkl"}
@@ -21,7 +24,7 @@ class WorkflowRecoveryTests(unittest.TestCase):
 
     def test_setup_failure_finalizes_prepared_report(self):
         result = workflow_report.finalize(
-            self.report(), self.inputs, {"elan": {"outcome": "failure"}}, workflow_url="run"
+            self.report(), self.inputs, {"elan": {"outcome": "failure"}}, **RUN
         )
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["stage"], "elan")
@@ -34,31 +37,31 @@ class WorkflowRecoveryTests(unittest.TestCase):
             {"source": 1, "schema_version": 1},
             dict(self.report("pass"), source={"commit": "b" * 40}),
         ):
-            result = workflow_report.finalize(report, self.inputs, {}, workflow_url="run")
+            result = workflow_report.finalize(report, self.inputs, {}, **RUN)
             self.assertEqual(result["status"], "error")
 
     def test_execution_profile_records_what_the_verifier_resolved(self):
         inputs = {**self.inputs, "execution_profile": ""}
         evidence = {"verification_profile": {"id": "palomar-namespace-16x32-v1"}}
         result = workflow_report.finalize(
-            {"status": "pending", "errors": [], **evidence}, inputs, {}, workflow_url="run",
+            {"status": "pending", "errors": [], **evidence}, inputs, {}, **RUN,
         )
         self.assertEqual(result["execution_profile"], "palomar-namespace-16x32-v1")
         # Before any resource evidence exists the answer is the catalogue default.
-        result = workflow_report.finalize({"status": "pending", "errors": []}, inputs, {}, workflow_url="run")
+        result = workflow_report.finalize({"status": "pending", "errors": []}, inputs, {}, **RUN)
         self.assertEqual(result["execution_profile"], workflow_report.resolved_profile({}))
         self.assertNotEqual(workflow_report.resolved_profile({}), "")
         # An operator's explicit choice is recorded as given.
         chosen = {**self.inputs, "execution_profile": "palomar-standard-v1"}
         result = workflow_report.finalize(
-            {"status": "pending", "errors": [], **evidence}, chosen, {}, workflow_url="run",
+            {"status": "pending", "errors": [], **evidence}, chosen, {}, **RUN,
         )
         self.assertEqual(result["execution_profile"], "palomar-standard-v1")
 
     def test_terminal_failure_preserved(self):
         report = self.report("fail")
         report["errors"] = ["user error"]
-        result = workflow_report.finalize(report, self.inputs, {}, workflow_url="run")
+        result = workflow_report.finalize(report, self.inputs, {}, **RUN)
         self.assertEqual(result["errors"], ["user error"])
 
     def test_upload_retry_success_and_step_failure_gate(self):
