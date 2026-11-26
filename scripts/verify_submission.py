@@ -38,6 +38,7 @@ from scripts import (  # noqa: E402
     submission_contract,
 )
 from scripts.orcid_validation import validate_records as validate_orcid_records  # noqa: E402
+from scripts.source_bundles import SourceBundles  # noqa: E402
 from scripts.source_requirements import inspect_lean_sources, lean_source_files  # noqa: E402
 from scripts.verification_errors import (  # noqa: E402
     FormalizationValidationError,
@@ -55,6 +56,10 @@ from scripts.workflow_inputs import WorkflowInputError, report_identity  # noqa:
 
 MAX_SOURCE_BYTES = 500 * 1024 * 1024
 GIT_NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+# Set for a confidential run: its source and non-trusted dependencies come from
+# the validated snapshot bundles only, and nothing else of the source graph is
+# fetched (contract v2, 3.3).
+SOURCE_BUNDLES: SourceBundles | None = None
 MAX_LICENSE_BYTES = 1024 * 1024
 MAX_CHALLENGE_BYTES = 100 * 1024
 MAX_CHALLENGE_LINES = 1000
@@ -989,6 +994,11 @@ def validate_preservable_remote_source(
     work: Path, source: dict[str, str], label: str, *, check_lean_sources: bool = False
 ) -> dict[str, Any] | None:
     """Fetch and inspect a recorded source that is not part of the proof build."""
+    if SOURCE_BUNDLES is not None:
+        raise VerificationError(
+            "A confidential submission is one repository; a separately recorded substantive "
+            "source is not supported"
+        )
     with tempfile.TemporaryDirectory(prefix="palomar-preservation-", dir=work) as directory:
         checkout = Path(directory) / "source"
         clone_commit(source["repository_url"], source["commit"], checkout)
@@ -1399,7 +1409,12 @@ def prepare(args: argparse.Namespace) -> int:
             }
         )
         source = work / "source"
-        clone_commit(url, commit, source)
+        if SOURCE_BUNDLES is not None:
+            SOURCE_BUNDLES.require_source(repository, commit)
+            report["snapshot_sha256"] = SOURCE_BUNDLES.snapshot_sha256
+            SOURCE_BUNDLES.checkout(SOURCE_BUNDLES.source_bundle(), commit, source)
+        else:
+            clone_commit(url, commit, source)
         validate_preservable_git_checkout(source, "submitted source")
         size = tree_size(source)
         if size > MAX_SOURCE_BYTES:
@@ -3800,6 +3815,15 @@ def materialize_packages(
         if not submission_contract.SHA_RE.fullmatch(revision):
             raise VerificationError(f"Git package {name!r} is not pinned to a full commit")
         package_dir = packages_dir / name
+        if SOURCE_BUNDLES is not None:
+            item = SOURCE_BUNDLES.dependency(repository_url, revision)
+            if item is not None and item["kind"] == "public":
+                SOURCE_BUNDLES.checkout(SOURCE_BUNDLES.dependency_bundle(item), revision, package_dir)
+                validate_preservable_git_checkout(
+                    package_dir, f"Git package {name!r}", allow_inert_submodules=True
+                )
+                writable.extend(remove_untrusted_lake_state(package_dir))
+                continue
         package_dir.mkdir()
         git = [
             "git",
@@ -5918,6 +5942,13 @@ def execute(args: argparse.Namespace) -> int:
     report = json.loads(output.read_text(encoding="utf-8"))
     if report.get("status") != "pending":
         return 0
+    if (SOURCE_BUNDLES is None) != (report.get("snapshot_sha256") is None) or (
+        SOURCE_BUNDLES is not None and report["snapshot_sha256"] != SOURCE_BUNDLES.snapshot_sha256
+    ):
+        report.update({"status": "error", "stage": "setup"})
+        report.setdefault("errors", []).append("Prepared report and source bundles name different snapshots")
+        write_json(output, report)
+        return 1
     previous_deadline = _EXECUTION_DEADLINE
     previous_phase = _RESOURCE_PHASE
     previous_metrics_path = _RESOURCE_METRICS_PATH
@@ -6648,6 +6679,8 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
     prepare_parser.add_argument("--licensee", required=True)
+    prepare_parser.add_argument("--source-bundles", type=Path)
+    prepare_parser.add_argument("--snapshot-sha256", default="")
     prepare_parser.set_defaults(func=prepare)
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
@@ -6655,6 +6688,8 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--bwrap", required=True)
     execute_parser.add_argument("--bwrap-source-tag", required=True)
     execute_parser.add_argument("--workflow-url", required=True)
+    execute_parser.add_argument("--source-bundles", type=Path)
+    execute_parser.add_argument("--snapshot-sha256", default="")
     execute_parser.add_argument(
         "--execution-budget-seconds",
         type=int,
@@ -6666,7 +6701,18 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global SOURCE_BUNDLES
     args = parser().parse_args()
+    if getattr(args, "source_bundles", None) is not None:
+        try:
+            SOURCE_BUNDLES = SourceBundles.load(args.source_bundles, args.snapshot_sha256)
+        except (OSError, ValueError, VerificationError) as error:
+            # Fail closed before any source is read; the finalizer reports it.
+            print(json.dumps(f"source bundles are unusable: {error}"))
+            return 1
+    elif getattr(args, "snapshot_sha256", ""):
+        print(json.dumps("a snapshot digest was given without source bundles"))
+        return 1
     return args.func(args)
 
 

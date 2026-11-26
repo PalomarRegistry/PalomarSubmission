@@ -24,6 +24,10 @@ WORKFLOWS = {
     for name in ("submission.yml", "render-challenge.yml")
 }
 PIPELINE_REF = "${{ inputs.pipeline_commit || github.workflow_sha }}"
+# Inputs a reusable caller may set that a dispatch never carries: the pipeline
+# pin, and the confidential snapshot's bundles and digest.
+CALL_ONLY = {"pipeline_commit", "source_bundle_artifact", "snapshot_sha256"}
+CREDENTIALED = ("confidential-snapshot.yml", "confidential-validate.yml", "confidential-restore.yml")
 
 
 def parsed(name):
@@ -52,8 +56,11 @@ class CallerParityTests(unittest.TestCase):
                 on = triggers(parsed(name))
                 called = on["workflow_call"]["inputs"]
                 dispatched = on["workflow_dispatch"]["inputs"]
-                self.assertEqual(set(called), set(dispatched) | {"pipeline_commit"})
-                self.assertNotIn("pipeline_commit", dispatched)
+                self.assertEqual(set(called), set(dispatched) | CALL_ONLY)
+                self.assertFalse(CALL_ONLY & set(dispatched))
+                for field in CALL_ONLY - {"pipeline_commit"}:
+                    self.assertIs(called[field]["required"], False)
+                    self.assertEqual(called[field]["default"], "")
                 self.assertIs(called["pipeline_commit"]["required"], True)
                 for field, spec in dispatched.items():
                     self.assertEqual(
@@ -146,18 +153,21 @@ class CanonicalCallerTemplateTests(unittest.TestCase):
             with self.subTest(file_name):
                 self.assertEqual(hashlib.sha256((TEMPLATES / file_name).read_bytes()).hexdigest(), digest)
 
-    def test_one_commit_pins_both_the_workflow_and_its_scripts(self):
-        # A uses pin fixes only the called YAML; the called jobs run the
-        # scripts at pipeline_commit. The template makes them one literal.
-        for name, (called, job) in CALLERS.items():
+    def test_one_commit_pins_every_called_workflow_and_the_scripts(self):
+        # A uses pin fixes only the called YAML; the verify and render jobs run
+        # the scripts at pipeline_commit, and the credentialed jobs check out
+        # their own job_workflow_sha. The template makes them one literal.
+        for name, (_, job) in CALLERS.items():
             with self.subTest(name):
                 text = (TEMPLATES / name).read_text(encoding="utf-8")
-                self.assertEqual(text.count(PLACEHOLDER), 2)
-                call = caller(name)["jobs"][job]
-                self.assertEqual(
-                    call["uses"], f"PalomarRegistry/PalomarSubmission/.github/workflows/{called}@{'c' * 40}"
-                )
-                self.assertEqual(call["with"]["pipeline_commit"], "c" * 40)
+                workflow = caller(name)
+                self.assertEqual(text.count(PLACEHOLDER), len(workflow["jobs"]) + 1)
+                for each in workflow["jobs"].values():
+                    self.assertRegex(
+                        each["uses"],
+                        rf"^PalomarRegistry/PalomarSubmission/\.github/workflows/[a-z-]+\.yml@{'c' * 40}$",
+                    )
+                self.assertEqual(workflow["jobs"][job]["with"]["pipeline_commit"], "c" * 40)
 
     def test_callers_declare_the_called_dispatch_inputs_and_the_ticket(self):
         for name, (called, _) in CALLERS.items():
@@ -168,26 +178,36 @@ class CanonicalCallerTemplateTests(unittest.TestCase):
                 for field, spec in dispatched.items():
                     self.assertEqual(bool(declared[field].get("required")), bool(spec.get("required")), field)
                     self.assertEqual(declared[field].get("default"), spec.get("default"), field)
-                self.assertIs(declared["ticket"].get("required"), False)
+                self.assertIs(declared["ticket"]["required"], True)
 
-    def test_callers_forward_every_call_input_unchanged(self):
+    def test_the_code_running_job_gets_its_source_only_from_the_credentialed_job(self):
         for name, (called, job) in CALLERS.items():
             with self.subTest(name):
-                forwarded = dict(caller(name)["jobs"][job]["with"])
-                forwarded.pop("pipeline_commit")
-                accepted = set(triggers(parsed(called))["workflow_call"]["inputs"]) - {"pipeline_commit"}
+                workflow = caller(name)
+                need = workflow["jobs"][job]["needs"]
+                self.assertIn(workflow["jobs"][need]["uses"].split("/")[-1].split("@")[0], CREDENTIALED)
+                forwarded = dict(workflow["jobs"][job]["with"])
+                self.assertEqual(forwarded.pop("pipeline_commit"), "c" * 40)
+                for field in ("source_bundle_artifact", "snapshot_sha256"):
+                    self.assertEqual(forwarded.pop(field), f"${{{{ needs.{need}.outputs.{field} }}}}")
+                accepted = set(triggers(parsed(called))["workflow_call"]["inputs"]) - CALL_ONLY
                 self.assertEqual(forwarded, {field: f"${{{{ inputs.{field} }}}}" for field in accepted})
 
-    def test_callers_hold_no_credential_and_only_read(self):
+    def test_only_credentialed_jobs_hold_an_oidc_permission(self):
         for name, (_, job) in CALLERS.items():
             with self.subTest(name):
                 text = (TEMPLATES / name).read_text(encoding="utf-8")
                 self.assertNotIn("secrets", text)
-                self.assertNotIn("id-token", text)
                 workflow = caller(name)
-                self.assertEqual(list(workflow["jobs"]), [job])
                 self.assertEqual(workflow["permissions"], {"contents": "read"})
                 self.assertEqual(workflow["jobs"][job]["permissions"], {"contents": "read"})
+                for other, each in workflow["jobs"].items():
+                    if other == job:
+                        continue
+                    self.assertIn(each["uses"].split("/")[-1].split("@")[0], CREDENTIALED)
+                    self.assertEqual(each["permissions"], {"contents": "read", "id-token": "write"})
+                    expected = {"ticket": "${{ inputs.ticket }}", "request_id": "${{ inputs.request_id }}"}
+                    self.assertEqual(each["with"], expected)
 
     def test_caller_run_titles(self):
         self.assertEqual(
@@ -196,6 +216,75 @@ class CanonicalCallerTemplateTests(unittest.TestCase):
             "&& format(' [{0}]', inputs.execution_attempt) || '' }}",
         )
         self.assertEqual(caller("render.yml")["run-name"], "Render challenge [${{ inputs.request_id }}]")
+
+
+class CredentialedWorkflowTests(unittest.TestCase):
+    """confidential-snapshot, -validate and -restore: the only jobs that hold
+    an OIDC permission, and so the only ones the broker answers."""
+
+    def workflow(self, name):
+        return yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+
+    def test_only_these_jobs_can_request_an_oidc_token(self):
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            with self.subTest(path.name):
+                if path.name in CREDENTIALED:
+                    continue
+                self.assertNotIn("id-token", path.read_text(encoding="utf-8"))
+
+    def test_they_run_their_own_pinned_revision_on_github_hosted_runners(self):
+        for name in CREDENTIALED:
+            with self.subTest(name):
+                workflow = self.workflow(name)
+                self.assertEqual(set(triggers(workflow)), {"workflow_call"})
+                inputs = triggers(workflow)["workflow_call"]["inputs"]
+                # No caller-chosen pipeline revision: the job reads its own
+                # job_workflow_sha from its OIDC token and checks out that.
+                self.assertNotIn("pipeline_commit", inputs)
+                self.assertNotIn("secrets", triggers(workflow)["workflow_call"])
+                (job,) = workflow["jobs"].values()
+                self.assertEqual(job["runs-on"], "ubuntu-24.04")
+                self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
+                pin, checkout = job["steps"][0], job["steps"][1]
+                self.assertEqual(pin["id"], "pin")
+                self.assertIn("job_workflow_sha", pin["run"])
+                self.assertEqual(pin["env"]["WORKFLOW_FILE"], name)
+                self.assertEqual(checkout["with"]["repository"], "PalomarRegistry/PalomarSubmission")
+                self.assertEqual(checkout["with"]["ref"], "${{ steps.pin.outputs.pipeline_commit }}")
+                self.assertIs(checkout["with"]["persist-credentials"], False)
+
+    def test_they_install_nothing_and_run_the_standard_library_script(self):
+        for name in CREDENTIALED:
+            with self.subTest(name):
+                text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+                self.assertNotIn("pip install", text)
+                self.assertNotIn("setup-python", text)
+                (job,) = self.workflow(name)["jobs"].values()
+                step = next(step for step in job["steps"] if step.get("id") == "run")
+                self.assertIn("python3 -I pipeline/scripts/confidential_snapshot.py", step["run"])
+                self.assertEqual(step["env"]["PALOMAR_TICKET"], "${{ inputs.ticket }}")
+
+    def test_their_artifacts_live_one_day(self):
+        for name in CREDENTIALED:
+            with self.subTest(name):
+                (job,) = self.workflow(name)["jobs"].values()
+                uploads = [
+                    s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@")
+                ]
+                self.assertEqual([s["with"]["retention-days"] for s in uploads], [1])
+
+    def test_verify_and_render_take_bundles_only_when_called_with_them(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                download = next(
+                    step for step in steps(parsed(name))
+                    if str(step.get("uses", "")).startswith("actions/download-artifact@")
+                )
+                self.assertEqual(download["if"], "inputs.source_bundle_artifact != ''")
+                runs = [
+                    step["run"] for step in steps(parsed(name)) if "--source-bundles" in step.get("run", "")
+                ]
+                self.assertEqual(len(runs), 2)
 
 
 class RunRepositoryAssumptionTests(unittest.TestCase):

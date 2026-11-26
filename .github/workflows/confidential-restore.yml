@@ -1,0 +1,103 @@
+name: Restore confidential snapshot
+
+# Downloads one finalized snapshot, rechecks it as the validation job does,
+# and hands its bundles to the render (or a re-run) as a same-run artifact.
+#
+# Credentialed jobs are checked before anything is disclosed: the broker
+# verifies this job's OIDC token, including `job_workflow_ref` and
+# `job_workflow_sha`, the ticket, and the caller file (contract v2, 3.2).
+# The scripts this job runs are checked out at `job_workflow_sha` read from
+# that same token, never at a caller-supplied commit.
+on:
+  workflow_call:
+    inputs:
+      ticket:
+        description: Single-use broker ticket from the dispatch
+        required: true
+        type: string
+      request_id:
+        description: Submission id
+        required: true
+        type: string
+      snapshot_sha256:
+        description: The finalized snapshot this run must restore (blank accepts the ticket's)
+        required: false
+        default: ""
+        type: string
+    outputs:
+      snapshot_sha256:
+        description: SHA-256 of the canonical snapshot descriptor
+        value: ${{ jobs.restore.outputs.snapshot_sha256 }}
+      source_bundle_artifact:
+        description: Same-run artifact holding the descriptor, source manifest and bundles
+        value: ${{ jobs.restore.outputs.source_bundle_artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    # GitHub-hosted only: the broker refuses any other runner environment.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      snapshot_sha256: ${{ steps.run.outputs.snapshot_sha256 }}
+      source_bundle_artifact: source-bundles-${{ inputs.request_id }}
+    steps:
+      - name: Read this job's pinned revision from its own OIDC token
+        id: pin
+        env:
+          WORKFLOW_FILE: confidential-restore.yml
+        run: |
+          python3 -I - <<'PYTHON'
+          import base64, json, os, re, urllib.parse, urllib.request
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&" + urllib.parse.urlencode(
+              {"audience": "https://submit.palomar-registry.org/confidential"})
+          request = urllib.request.Request(
+              url, headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          with urllib.request.urlopen(request, timeout=60) as answer:
+              token = json.load(answer)["value"]
+          print("::add-mask::" + token, flush=True)
+          payload = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          prefix = "PalomarRegistry/PalomarSubmission/.github/workflows/" + os.environ["WORKFLOW_FILE"] + "@"
+          sha = str(claims.get("job_workflow_sha", ""))
+          if not str(claims.get("job_workflow_ref", "")).startswith(prefix) or not re.fullmatch("[0-9a-f]{40}", sha):
+              raise SystemExit("this job is not PalomarSubmission's " + os.environ["WORKFLOW_FILE"])
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("pipeline_commit=" + sha + "\n")
+          PYTHON
+
+      - name: Checkout the pinned pipeline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PalomarRegistry/PalomarSubmission
+          ref: ${{ steps.pin.outputs.pipeline_commit }}
+          path: pipeline
+          persist-credentials: false
+
+      - name: Run the restore step
+        id: run
+        env:
+          PALOMAR_TICKET: ${{ inputs.ticket }}
+          PALOMAR_PIPELINE_COMMIT: ${{ steps.pin.outputs.pipeline_commit }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+        run: >-
+          python3 -I pipeline/scripts/confidential_snapshot.py restore
+          --out "$RUNNER_TEMP/restore"
+          --work-dir "$RUNNER_TEMP/restore-work"
+          --snapshot-sha256 "$SNAPSHOT_SHA256"
+
+      - name: Hand the validated bundles to the credential-free job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-bundles-${{ inputs.request_id }}
+          path: |
+            ${{ runner.temp }}/restore/descriptor.json
+            ${{ runner.temp }}/restore/source-manifest.json
+            ${{ runner.temp }}/restore/bundles
+          if-no-files-found: error
+          retention-days: 1

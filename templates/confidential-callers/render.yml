@@ -4,7 +4,7 @@ run-name: Render challenge [${{ inputs.request_id }}]
 
 # PalomarConfidentialRuns' render.yml is this file, kept canonically in
 # PalomarSubmission's templates/confidential-callers/, with one
-# PalomarSubmission commit substituted for both placeholders. The broker
+# PalomarSubmission commit substituted for every placeholder. The broker
 # and the reviewer accept a run only if the caller is byte-for-byte that
 # substitution, so change the template here, never the copy.
 on:
@@ -57,15 +57,27 @@ on:
         required: true
         type: string
       ticket:
-        description: Single-use broker ticket from the submission server (used by the snapshot jobs)
-        required: false
+        description: Single-use broker ticket for this dispatch
+        required: true
         type: string
 
 permissions:
   contents: read
 
 jobs:
+  # Credentialed job: GitHub-hosted, no submitted code. The broker checks its
+  # OIDC identity, this file and the pin before it answers.
+  restore:
+    permissions:
+      contents: read
+      id-token: write
+    uses: PalomarRegistry/PalomarSubmission/.github/workflows/confidential-restore.yml@<pipeline-commit>
+    with:
+      ticket: ${{ inputs.ticket }}
+      request_id: ${{ inputs.request_id }}
+  # Runs submitted code: no id-token, no credential, source from bundles only.
   render:
+    needs: restore
     permissions:
       contents: read
     # The uses pin fixes the workflow file; pipeline_commit fixes the scripts
@@ -84,3 +96,5 @@ jobs:
       comparator_config_path: ${{ inputs.comparator_config_path }}
       lakefile_path: ${{ inputs.lakefile_path }}
       lean_toolchain_path: ${{ inputs.lean_toolchain_path }}
+      source_bundle_artifact: ${{ needs.restore.outputs.source_bundle_artifact }}
+      snapshot_sha256: ${{ needs.restore.outputs.snapshot_sha256 }}

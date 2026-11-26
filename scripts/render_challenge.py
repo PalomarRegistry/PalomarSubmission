@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
+from scripts import verify_submission  # noqa: E402
 from scripts.render_report import (  # noqa: E402
     AcceptedRenderPaths,
     PreparedRenderReport,
@@ -33,6 +34,7 @@ from scripts.render_report import (  # noqa: E402
     parse_prepared_report,
 )
 from scripts.render_styles import RENDER_STYLES, SURFACE_STYLES  # noqa: E402
+from scripts.source_bundles import SourceBundles  # noqa: E402
 from scripts.submission_contract import GITHUB_RE, SHA_RE, lake_package_name  # noqa: E402
 from scripts.verification_errors import VerificationError  # noqa: E402
 from scripts.verify_submission import (  # noqa: E402
@@ -892,7 +894,12 @@ def prepare(args: argparse.Namespace) -> int:
             lean_toolchain_path=args.lean_toolchain_path.strip(),
         )
         source = work / "source"
-        clone_commit(repository_url, commit, source)
+        bundles = verify_submission.SOURCE_BUNDLES
+        if bundles is not None:
+            bundles.require_source(repository, commit)
+            bundles.checkout(bundles.source_bundle(), commit, source)
+        else:
+            clone_commit(repository_url, commit, source)
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         project_relative = (
@@ -3013,6 +3020,11 @@ def execute(args: argparse.Namespace) -> int:
             # The repository whose Actions run rendered this: PalomarSubmission
             # for a dispatch, the caller for a reusable call.
             "run_repository": args.run_repository,
+            **(
+                {"snapshot_sha256": verify_submission.SOURCE_BUNDLES.snapshot_sha256}
+                if verify_submission.SOURCE_BUNDLES is not None
+                else {}
+            ),
             "workflow_url": args.workflow_url,
         }
     )
@@ -3406,6 +3418,8 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--lean-toolchain-path", required=True)
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
+    prepare_parser.add_argument("--source-bundles", type=Path)
+    prepare_parser.add_argument("--snapshot-sha256", default="")
     prepare_parser.set_defaults(func=prepare)
     execute_parser = commands.add_parser("execute")
     execute_parser.add_argument("--work-dir", required=True)
@@ -3414,6 +3428,8 @@ def parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--renderer-commit", required=True)
     execute_parser.add_argument("--bwrap-source-tag", required=True)
     execute_parser.add_argument("--run-repository", required=True)
+    execute_parser.add_argument("--source-bundles", type=Path)
+    execute_parser.add_argument("--snapshot-sha256", default="")
     execute_parser.add_argument("--workflow-url", required=True)
     execute_parser.set_defaults(func=execute)
     sanitize_parser = commands.add_parser("sanitize")
@@ -3433,6 +3449,13 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     try:
         args = parser().parse_args()
+        if getattr(args, "source_bundles", None) is not None:
+            # Confidential render: source and non-trusted dependencies come
+            # from the validated snapshot bundles only.
+            verify_submission.SOURCE_BUNDLES = SourceBundles.load(args.source_bundles, args.snapshot_sha256)
+            verify_submission.SOURCE_BUNDLES.allow_unlisted = True
+        elif getattr(args, "snapshot_sha256", ""):
+            raise VerificationError("a snapshot digest was given without source bundles")
         return args.func(args)
     except (OSError, ValueError, VerificationError, json.JSONDecodeError) as error:
         print(f"render challenge: {error}", file=sys.stderr)

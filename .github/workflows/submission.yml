@@ -50,6 +50,18 @@ on:
         required: false
         default: "{}"
         type: string
+      # Confidential runs only: source comes from the validated snapshot
+      # bundles in this same-run artifact, never from the network.
+      source_bundle_artifact:
+        description: Same-run artifact of validated source bundles (confidential runs only)
+        required: false
+        default: ""
+        type: string
+      snapshot_sha256:
+        description: SHA-256 of the finalized snapshot descriptor the bundles must match
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -161,22 +173,37 @@ jobs:
         id: dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
 
+      - name: Receive validated source bundles
+        id: bundles
+        if: inputs.source_bundle_artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.source_bundle_artifact }}
+          path: ${{ runner.temp }}/source-bundles
+
       - name: Parse and fetch immutable source
         id: prepare
         env:
           BUNDLE_GEMFILE: ${{ github.workspace }}/pipeline/Gemfile
           PALOMAR_INPUTS: ${{ toJSON(inputs) }}
+          SOURCE_BUNDLE_ARTIFACT: ${{ inputs.source_bundle_artifact }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
         run: |
           python - <<'PYTHON'
           import json, os, pathlib
           path = pathlib.Path(os.environ["RUNNER_TEMP"], "submission-inputs.json")
           path.write_text(json.dumps({"inputs": json.loads(os.environ["PALOMAR_INPUTS"])}))
           PYTHON
+          bundle_args=()
+          if [ -n "$SOURCE_BUNDLE_ARTIFACT" ] || [ -n "$SNAPSHOT_SHA256" ]; then
+            bundle_args=(--source-bundles "$RUNNER_TEMP/source-bundles" --snapshot-sha256 "$SNAPSHOT_SHA256")
+          fi
           python pipeline/scripts/verify_submission.py prepare \
             --event "$RUNNER_TEMP/submission-inputs.json" \
             --work-dir "$RUNNER_TEMP/palomar" \
             --output "$RUNNER_TEMP/mechanical-report.json" \
-            --licensee "$(command -v bundle)"
+            --licensee "$(command -v bundle)" \
+            "${bundle_args[@]}"
 
       - name: Free disk space
         id: disk
@@ -231,8 +258,15 @@ jobs:
       - name: Run lake comparator and challenge provenance audit
         id: execute
         if: inputs.mode == 'full' && steps.prepare.outputs.ready == 'true'
+        env:
+          SOURCE_BUNDLE_ARTIFACT: ${{ inputs.source_bundle_artifact }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
         run: |
-          python pipeline/scripts/verify_submission.py execute \
+          bundle_args=()
+          if [ -n "$SOURCE_BUNDLE_ARTIFACT" ] || [ -n "$SNAPSHOT_SHA256" ]; then
+            bundle_args=(--source-bundles "$RUNNER_TEMP/source-bundles" --snapshot-sha256 "$SNAPSHOT_SHA256")
+          fi
+          python pipeline/scripts/verify_submission.py execute "${bundle_args[@]}" \
             --work-dir "$RUNNER_TEMP/palomar" \
             --output "$RUNNER_TEMP/mechanical-report.json" \
             --bwrap "$PALOMAR_BWRAP" \

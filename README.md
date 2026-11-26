@@ -146,6 +146,25 @@ and the reviewer substitute the placeholder back and compare the result with
 `templates/confidential-callers/SHA256SUMS` at the pinned commit. Change a
 template here first, then the broker's recorded digest, then the copies.
 
+A confidential verification runs three jobs. The
+[`confidential-snapshot.yml`](.github/workflows/confidential-snapshot.yml) job
+fetches the admitted commit's complete history with a short-lived,
+single-repository source token from the broker, bundles it and every
+non-trusted public dependency, and uploads the bundles to R2.
+[`confidential-validate.yml`](.github/workflows/confidential-validate.yml)
+downloads them, restores each into an empty repository, recomputes the
+snapshot descriptor from those bytes, and finalizes it. `submission.yml` then
+verifies with `source_bundle_artifact` and `snapshot_sha256`, reading the
+source and its non-trusted dependencies only from the bundles, and records
+`snapshot_sha256` in the report. A confidential render uses
+[`confidential-restore.yml`](.github/workflows/confidential-restore.yml) the
+same way. The credentialed jobs run on GitHub-hosted runners, run no submitted
+code, install nothing, and check out the scripts at the `job_workflow_sha` of
+their own OIDC token. The verify and render jobs hold no credential and no
+OIDC permission. The scripts are
+[`confidential_snapshot.py`](scripts/confidential_snapshot.py) and
+[`source_bundles.py`](scripts/source_bundles.py).
+
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says

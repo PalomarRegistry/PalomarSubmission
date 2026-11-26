@@ -5,7 +5,7 @@ run-name: Verify ${{ inputs.request_id }}${{ inputs.execution_attempt && format(
 
 # PalomarConfidentialRuns' verify.yml is this file, kept canonically in
 # PalomarSubmission's templates/confidential-callers/, with one
-# PalomarSubmission commit substituted for both placeholders. The broker
+# PalomarSubmission commit substituted for every placeholder. The broker
 # and the reviewer accept a run only if the caller is byte-for-byte that
 # substitution, so change the template here, never the copy.
 on:
@@ -46,15 +46,36 @@ on:
         required: false
         type: string
       ticket:
-        description: Single-use broker ticket from the submission server (used by the snapshot jobs)
-        required: false
+        description: Single-use broker ticket for this dispatch
+        required: true
         type: string
 
 permissions:
   contents: read
 
 jobs:
+  # Credentialed jobs: GitHub-hosted, no submitted code. The broker checks
+  # each one's OIDC identity, this file and the pin before it answers.
+  snapshot:
+    permissions:
+      contents: read
+      id-token: write
+    uses: PalomarRegistry/PalomarSubmission/.github/workflows/confidential-snapshot.yml@<pipeline-commit>
+    with:
+      ticket: ${{ inputs.ticket }}
+      request_id: ${{ inputs.request_id }}
+  validate:
+    needs: snapshot
+    permissions:
+      contents: read
+      id-token: write
+    uses: PalomarRegistry/PalomarSubmission/.github/workflows/confidential-validate.yml@<pipeline-commit>
+    with:
+      ticket: ${{ inputs.ticket }}
+      request_id: ${{ inputs.request_id }}
+  # Runs submitted code: no id-token, no credential, source from bundles only.
   verify:
+    needs: validate
     permissions:
       contents: read
     # The uses pin fixes the workflow file; pipeline_commit fixes the scripts
@@ -69,3 +90,5 @@ jobs:
       execution_profile: ${{ inputs.execution_profile }}
       execution_attempt: ${{ inputs.execution_attempt }}
       options: ${{ inputs.options }}
+      source_bundle_artifact: ${{ needs.validate.outputs.source_bundle_artifact }}
+      snapshot_sha256: ${{ needs.validate.outputs.snapshot_sha256 }}

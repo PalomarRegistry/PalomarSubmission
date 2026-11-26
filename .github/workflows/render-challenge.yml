@@ -61,6 +61,18 @@ on:
         description: Accepted repository-relative lean-toolchain path
         required: true
         type: string
+      # Confidential renders only: source comes from the restored snapshot
+      # bundles in this same-run artifact, never from the network.
+      source_bundle_artifact:
+        description: Same-run artifact of restored source bundles (confidential renders only)
+        required: false
+        default: ""
+        type: string
+      snapshot_sha256:
+        description: SHA-256 of the finalized snapshot descriptor the bundles must match
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -193,10 +205,19 @@ jobs:
       - name: Install verifier dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r pipeline/requirements.txt
 
+      - name: Receive restored source bundles
+        if: inputs.source_bundle_artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.source_bundle_artifact }}
+          path: ${{ runner.temp }}/source-bundles
+
       - name: Fetch and bind accepted source
         id: prepare
         working-directory: pipeline
         env:
+          SOURCE_BUNDLE_ARTIFACT: ${{ inputs.source_bundle_artifact }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           SOURCE_REPOSITORY: ${{ inputs.repository }}
           SOURCE_COMMIT: ${{ inputs.commit }}
           CHALLENGE_SHA256: ${{ inputs.challenge_sha256 }}
@@ -207,7 +228,11 @@ jobs:
           LAKEFILE_PATH: ${{ inputs.lakefile_path }}
           LEAN_TOOLCHAIN_PATH: ${{ inputs.lean_toolchain_path }}
         run: |
-          python -m scripts.render_challenge prepare \
+          bundle_args=()
+          if [ -n "$SOURCE_BUNDLE_ARTIFACT" ] || [ -n "$SNAPSHOT_SHA256" ]; then
+            bundle_args=(--source-bundles "$RUNNER_TEMP/source-bundles" --snapshot-sha256 "$SNAPSHOT_SHA256")
+          fi
+          python -m scripts.render_challenge prepare "${bundle_args[@]}" \
             --repository "$SOURCE_REPOSITORY" \
             --commit "$SOURCE_COMMIT" \
             --challenge-sha256 "$CHALLENGE_SHA256" \
@@ -251,8 +276,14 @@ jobs:
         env:
           RENDERER_COMMIT: ${{ inputs.pipeline_commit || github.workflow_sha }}
           RUN_REPOSITORY: ${{ github.repository }}
+          SOURCE_BUNDLE_ARTIFACT: ${{ inputs.source_bundle_artifact }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
         run: |
-          python -m scripts.render_challenge execute \
+          bundle_args=()
+          if [ -n "$SOURCE_BUNDLE_ARTIFACT" ] || [ -n "$SNAPSHOT_SHA256" ]; then
+            bundle_args=(--source-bundles "$RUNNER_TEMP/source-bundles" --snapshot-sha256 "$SNAPSHOT_SHA256")
+          fi
+          python -m scripts.render_challenge execute "${bundle_args[@]}" \
             --work-dir "$RUNNER_TEMP/palomar-render" \
             --output "$RUNNER_TEMP/palomar-render/report.json" \
             --bwrap "$PALOMAR_BWRAP" \
