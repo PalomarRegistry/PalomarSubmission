@@ -138,6 +138,14 @@ A `uses:` pin fixes only the workflow file, and the jobs execute the scripts at
 reports already record it as `renderer_commit`). Palomar accepts a called run
 only when that revision equals the run's referenced workflow SHA.
 
+The confidential callers themselves are kept here, in
+`templates/confidential-callers/`, with the placeholder `<pipeline-commit>`
+standing for the one commit used both in `uses:` and as `pipeline_commit`.
+PalomarConfidentialRuns copies them with that commit substituted; the broker
+and the reviewer substitute the placeholder back and compare the result with
+`templates/confidential-callers/SHA256SUMS` at the pinned commit. Change a
+template here first, then the broker's recorded digest, then the copies.
+
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says
