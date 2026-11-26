@@ -15,16 +15,17 @@
 #                          render timeout plus setup)
 #   --max-lifetime-minutes N   absolute cap from boot (default 1680, 28 hours)
 #   --dry-run              ask EC2 to authorize the launch without starting anything; no
-#                          registration token is requested
+#                          runner is registered
 #
-# AWS: profile `palomar` (account 945725587698), us-east-1, unless AWS_PROFILE /
-# AWS_REGION say otherwise. GitHub: the authenticated `gh` account must be able
-# to administer PalomarRegistry/PalomarSubmission runners.
+# AWS: profile `palomar` (account 945725587698), us-east-1. To launch in another
+# account set AWS_PROFILE and PALOMAR_AWS_ACCOUNT (and AWS_REGION if needed), e.g.
+#   AWS_PROFILE=riemann-hypothesis PALOMAR_AWS_ACCOUNT=419423654034 launch-runner.sh launch
+# GitHub: the authenticated `gh` account must be able to administer PalomarRegistry/PalomarSubmission runners.
 set -euo pipefail
 
 export AWS_PROFILE="${AWS_PROFILE:-palomar}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
-EXPECTED_ACCOUNT=945725587698
+EXPECTED_ACCOUNT="${PALOMAR_AWS_ACCOUNT:-945725587698}"
 REPOSITORY=PalomarRegistry/PalomarSubmission
 ROLE=palomar-runner
 SECURITY_GROUP=palomar-runner-no-inbound
@@ -55,14 +56,20 @@ setup() {
       --description "Palomar ephemeral runner: SSM Session Manager access only" \
       --tags Key=project,Value=palomar \
       --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
-    # Nothing else: the instance terminates itself through its shutdown behaviour.
-    aws iam attach-role-policy --role-name "$ROLE" \
-      --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   fi
+  # Nothing else: the instance terminates itself through its shutdown behaviour.
+  # Each step is reconciled on every run, so an interrupted setup is repaired.
+  aws iam attach-role-policy --role-name "$ROLE" \
+    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   if ! aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1; then
     aws iam create-instance-profile --instance-profile-name "$ROLE" --tags Key=project,Value=palomar >/dev/null
-    aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE"
   fi
+  if [[ "$(aws iam get-instance-profile --instance-profile-name "$ROLE" --query 'InstanceProfile.Roles[].RoleName' --output text)" != "$ROLE" ]]; then
+    aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE"
+    echo "instance profile updated: EC2 may refuse it for a minute while IAM propagates"
+  fi
+  [[ "$(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyName' --output text)" == AmazonSSMManagedInstanceCore ]] \
+    || die "role $ROLE must have exactly AmazonSSMManagedInstanceCore attached"
   local group
   group=$(security_group_id)
   if [[ "$group" == None || -z "$group" ]]; then
@@ -111,10 +118,17 @@ launch() {
     [[ "$running" == 0 ]] || die "an instance for $profile_id is already pending or running"
   fi
 
-  local token=dry-run-placeholder
+  # A just-in-time configuration registers exactly one ephemeral runner with
+  # exactly this label. Unlike a registration token it cannot enrol further
+  # runners, so a copy read off the instance is worth nothing once this runner
+  # has connected. An unused registration is removed by `cleanup`.
+  local jit=dry-run-placeholder
+  local name
+  name="$profile_id-$(date -u +%Y%m%dT%H%M%SZ)"
   if [[ "$dry_run" == false ]]; then
-    # Valid for one hour; the instance registers within minutes of boot.
-    token=$(gh api -X POST "repos/$REPOSITORY/actions/runners/registration-token" --jq .token)
+    jit=$(gh api -X POST "repos/$REPOSITORY/actions/runners/generate-jitconfig" \
+      -f name="$name" -F runner_group_id=1 -f "labels[]=$profile_id" -f work_folder=_work \
+      --jq .encoded_jit_config)
   fi
   local user_data
   user_data=$(mktemp)
@@ -123,7 +137,8 @@ launch() {
     echo '#!/bin/bash'
     printf 'REPOSITORY=%q\n' "$REPOSITORY"
     printf 'RUNNER_LABEL=%q\n' "$profile_id"
-    printf 'REGISTRATION_TOKEN=%q\n' "$token"
+    printf 'RUNNER_NAME=%q\n' "$name"
+    printf 'JIT_CONFIG=%q\n' "$jit"
     printf 'RUNNER_VERSION=%q\nRUNNER_SHA256=%q\n' "$RUNNER_VERSION" "$RUNNER_SHA256"
     printf 'IDLE_MINUTES=%q\nJOB_MINUTES=%q\nMAX_LIFETIME_MINUTES=%q\n' "$idle" "$job" "$lifetime"
     printf 'JOB_STARTED_HOOK_B64=%q\n' "$(base64 -w0 "$HERE/job-started.sh")"
@@ -179,8 +194,12 @@ cleanup() {
   ids=$(gh api "repos/$REPOSITORY/actions/runners" \
     --jq '.runners[] | select((.name | startswith("palomar-aws-")) and .status == "offline") | .id')
   for id in $ids; do
-    gh api -X DELETE "repos/$REPOSITORY/actions/runners/$id"
-    echo "deleted offline runner $id"
+    # A runner killed mid-job stays "busy" until GitHub notices it is gone.
+    if gh api -X DELETE "repos/$REPOSITORY/actions/runners/$id" >/dev/null 2>&1; then
+      echo "deleted offline runner $id"
+    else
+      echo "runner $id is still marked busy; rerun cleanup later"
+    fi
   done
 }
 
@@ -189,5 +208,5 @@ case "${1:-}" in
   launch) shift; launch "$@" ;;
   status) status ;;
   cleanup) cleanup ;;
-  *) sed -n '2,24p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,25p' "$0" >&2; exit 2 ;;
 esac

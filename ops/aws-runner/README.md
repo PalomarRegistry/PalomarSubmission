@@ -13,11 +13,13 @@ the containment and trigger model; this file is the procedure.
   deletes offline runner registrations (`cleanup`).
 - `user-data.sh` is the first-boot script. It installs the packages the
   workflows expect, a `runner` user with a lingering systemd user manager, the
-  pinned Actions runner registered `--ephemeral --no-default-labels` with the
-  profile id as its only label, and a watchdog.
-- `job-started.sh` is the runner's job-started hook. It fails every job that is
-  not a `workflow_dispatch` on `main` of `submission.yml` (`verify`),
-  `render-challenge.yml` (`render`) or `compatibility.yml` (`cold_build`).
+  pinned Actions runner started from a just-in-time configuration (ephemeral,
+  with the profile id as its only label) that `launch` requests from GitHub,
+  and a watchdog.
+- `job-started.sh` is the runner's job-started hook. It refuses every job that
+  is not a `workflow_dispatch` on `main` of `submission.yml` (`verify`),
+  `render-challenge.yml` (`render`) or `compatibility.yml` (`cold_build`) by
+  killing the runner and powering the instance off before any step starts.
 
 ## Machine
 
@@ -49,12 +51,16 @@ self-hosted jobs, and bounds the cost of a run that never finishes.
 
 On-demand r7i.16xlarge in us-east-1 is USD 4.2336 an hour. A 12-hour
 verification costs about USD 53 with storage; the watchdog's 28-hour cap
-bounds a single instance at about USD 120. Rendering is a second launch of the
+bounds a single instance at about USD 120. The watchdog powers off on any
+boot after the first, so a reboot or instance recovery cannot restart the
+allowance. Rendering is a second launch of the
 same kind, usually much shorter.
 
 ## Procedure
 
-Prerequisites: the `palomar` AWS CLI profile, an EC2 On-Demand Standard vCPU
+Prerequisites: the `palomar` AWS CLI profile (or another account, selected
+with `AWS_PROFILE` and `PALOMAR_AWS_ACCOUNT`, which the script checks against
+the caller identity before doing anything), an EC2 On-Demand Standard vCPU
 quota of at least 64 in us-east-1, and a `gh` login that can administer this
 repository's runners. Check the quota with
 
@@ -81,9 +87,11 @@ aws service-quotas get-service-quota --profile palomar --region us-east-1 \
 
    The server's dispatcher sends the `workflow_dispatch`; the `verify` job runs
    on the instance, which terminates when it ends.
-5. After acceptance, Reviewer dispatches `render-challenge.yml` with the same
-   profile. Its `render` job waits for a runner: launch a second instance
-   (step 3) when it is queued.
+5. Once mechanical verification passes, Reviewer dispatches
+   `render-challenge.yml` with the same profile before editorial review can
+   proceed. Its `render` job waits for a runner: launch a second instance
+   (step 3) when it is queued. The renderer applies its own build limits
+   (`scripts/render_challenge.py`), which this profile does not raise.
 6. `launch-runner.sh status` should show no instances; `launch-runner.sh
    cleanup` removes any registration an instance left behind.
 

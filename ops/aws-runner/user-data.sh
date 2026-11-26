@@ -1,7 +1,8 @@
+# shellcheck shell=bash
 # Body of the EC2 user-data for Palomar's operator-launched runner.
 #
 # launch-runner.sh prepends a shebang and these variables, then this file:
-#   REPOSITORY RUNNER_LABEL REGISTRATION_TOKEN RUNNER_VERSION RUNNER_SHA256
+#   REPOSITORY RUNNER_LABEL RUNNER_NAME JIT_CONFIG RUNNER_VERSION RUNNER_SHA256
 #   IDLE_MINUTES JOB_MINUTES MAX_LIFETIME_MINUTES JOB_STARTED_HOOK_B64
 #
 # It runs once, as root, at first boot. Every failure path powers the
@@ -12,21 +13,32 @@ exec > >(tee -a /var/log/palomar-runner-setup.log) 2>&1
 trap 'echo "palomar-runner: setup failed at line $LINENO; terminating"; systemctl --no-block poweroff' ERR
 
 # The watchdog first, so nothing below can leave an instance running forever.
-install -d -m 0755 /opt/palomar-runner
+# The first-boot time is recorded once; a reboot, instance recovery or watchdog
+# restart finds it and powers off at once rather than granting a new allowance
+# or restarting the runner without the metadata firewall below.
+install -d -m 0755 /opt/palomar-runner /var/lib/palomar-runner
+date +%s > /var/lib/palomar-runner/first-boot
 cat > /opt/palomar-runner/watchdog.sh <<WATCHDOG
 #!/usr/bin/env bash
 # Terminate when no job arrived in time, when the job overran, or at the cap.
 set -u
-booted=\$(date +%s)
-job_started=""
+booted=\$(cat /var/lib/palomar-runner/first-boot)
+if [[ "\$(cat /proc/sys/kernel/random/boot_id)" != "\$(cat /var/lib/palomar-runner/boot-id)" ]]; then
+  echo "palomar-runner: not the first boot; terminating"; systemctl --no-block poweroff; exit 0
+fi
+job_started=\$(cat /var/lib/palomar-runner/job-started 2>/dev/null || true)
 while sleep 30; do
   now=\$(date +%s)
   if [[ -z "\$job_started" ]] && pgrep -u runner -f Runner.Worker >/dev/null; then
     job_started=\$now
+    echo "\$now" > /var/lib/palomar-runner/job-started
     echo "palomar-runner: job started"
   fi
   if [[ -z "\$job_started" ]] && (( now - booted > ${IDLE_MINUTES} * 60 )); then
     echo "palomar-runner: no job within ${IDLE_MINUTES} minutes; terminating"; break
+  fi
+  if [[ -f /var/lib/palomar-runner/runner-started ]] && ! systemctl is-active --quiet palomar-runner.service; then
+    echo "palomar-runner: the runner has stopped; terminating"; break
   fi
   if [[ -n "\$job_started" ]] && (( now - job_started > ${JOB_MINUTES} * 60 )); then
     echo "palomar-runner: job exceeded ${JOB_MINUTES} minutes; terminating"; break
@@ -38,6 +50,7 @@ done
 systemctl --no-block poweroff
 WATCHDOG
 chmod 0755 /opt/palomar-runner/watchdog.sh
+cat /proc/sys/kernel/random/boot_id > /var/lib/palomar-runner/boot-id
 cat > /etc/systemd/system/palomar-watchdog.service <<'UNIT'
 [Unit]
 Description=Palomar runner lifetime watchdog
@@ -83,8 +96,8 @@ loginctl enable-linger runner
 for _ in $(seq 60); do [[ -S "/run/user/$runner_uid/bus" ]] && break; sleep 1; done
 [[ -S "/run/user/$runner_uid/bus" ]]
 
-# Instance metadata (the registration token in this user-data, the instance
-# role's credentials) is unreachable from the job user. Root services such as
+# Instance metadata (this user-data, the instance role's credentials) is
+# unreachable from the job user's own sockets. Root services such as
 # the SSM agent keep it.
 nft -f - <<NFT
 table inet palomar {
@@ -124,12 +137,14 @@ ENV
 chown root:root /opt/actions-runner/.env
 chmod 0644 /opt/actions-runner/.env
 
-# Ephemeral: one job, then the runner deregisters itself and exits.
-sudo -u runner -H /opt/actions-runner/config.sh --unattended \
-  --url "https://github.com/$REPOSITORY" --token "$REGISTRATION_TOKEN" \
-  --name "$RUNNER_LABEL-$instance_id" --labels "$RUNNER_LABEL" --no-default-labels \
-  --ephemeral --disableupdate --work _work --replace
-unset REGISTRATION_TOKEN
+# The just-in-time configuration registers this one ephemeral runner: one job,
+# then GitHub removes it. systemd reads it as root, before dropping to the job
+# user, and the runner masks it.
+install -d -m 0700 /etc/palomar-runner
+umask 077
+printf 'ACTIONS_RUNNER_INPUT_JITCONFIG=%s\n' "$JIT_CONFIG" > /etc/palomar-runner/jit.env
+umask 022
+unset JIT_CONFIG
 
 cat > /etc/systemd/system/palomar-runner.service <<UNIT
 [Unit]
@@ -142,6 +157,8 @@ User=runner
 WorkingDirectory=/opt/actions-runner
 Environment=XDG_RUNTIME_DIR=/run/user/$runner_uid
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$runner_uid/bus
+# Optional: it is deleted once the runner starts, and stop-post must still run.
+EnvironmentFile=-/etc/palomar-runner/jit.env
 ExecStart=/opt/actions-runner/run.sh
 # The job is over (or the runner could not start): terminate the instance.
 ExecStopPost=+/usr/bin/systemctl --no-block poweroff
@@ -149,10 +166,14 @@ Restart=no
 KillMode=control-group
 TimeoutStopSec=60
 
-[Install]
-WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now palomar-runner.service
+# Started, never enabled: it must not come back on a later boot.
+systemctl start palomar-runner.service
+touch /var/lib/palomar-runner/runner-started
+rm -f /etc/palomar-runner/jit.env
+# cloud-init's on-disk copies of this script carry the configuration too.
+rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.txt.i \
+  /var/lib/cloud/instance/scripts/part-001
 trap - ERR
-echo "palomar-runner: registered $RUNNER_LABEL-$instance_id"
+echo "palomar-runner: started $RUNNER_NAME on $instance_id"

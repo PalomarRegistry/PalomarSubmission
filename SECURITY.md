@@ -566,10 +566,10 @@ accepts candidate source.
 can hold. Its runner is an EC2 r7i.16xlarge (64 vCPU, 512 GiB) in Palomar's own
 AWS account that a Technical Maintainer launches for one job with
 [`ops/aws-runner/launch-runner.sh`](ops/aws-runner/launch-runner.sh). It
-registers to this repository alone, ephemeral and with no default labels, so
-its only label is the profile id and it deregisters after one job; the
-instance terminates itself when that job ends, when no job arrives within the
-idle window, or at a lifetime cap. The profile is never the catalogue default,
+registers to this repository alone from a just-in-time configuration, so it is
+ephemeral, its only label is the profile id, and GitHub removes it after one
+job; the instance terminates itself when that job ends, when no job arrives
+within the idle window, at a lifetime cap, or on any boot after its first. The profile is never the catalogue default,
 the server's automatic resource retry never selects it, and a submitter cannot
 name it: it is reached only through the audited Technical Maintainer retry.
 
@@ -581,11 +581,23 @@ repository, so a pull request, push, schedule, repository variable or foreign
 reusable caller never receives the label from Palomar's own workflows. A pull
 request that rewrites those workflows or names the label directly is refused on
 the instance itself: the runner's job-started hook, which lives outside any
-tree a pull request can edit, fails every job that is not a `workflow_dispatch`
-on `main` of `submission.yml` (`verify`), `render-challenge.yml` (`render`) or
-`compatibility.yml` (`cold_build`), before any step runs. Dispatching requires
-write access. Finally, the label has a runner only while an operator-launched
-instance exists, so between launches nothing can pick a job up at all.
+tree a pull request can edit, refuses every job that is not a
+`workflow_dispatch` on `main` of `submission.yml` (`verify`),
+`render-challenge.yml` (`render`) or `compatibility.yml` (`cold_build`). A
+failing hook alone would not be enough, since the runner still evaluates later
+steps and runs any marked `if: always()`; so a refusal kills the runner's own
+processes before the hook returns and powers the instance off, and no step of
+the refused job starts. Dispatching requires write access. Finally, the label
+has a runner only while an operator-launched instance exists, so between
+launches nothing can pick a job up at all.
+
+What these controls do not stop is a pull request that names the label while
+an instance is waiting: its job is refused, but it has consumed the one job and
+the operator must launch again. GitHub can refuse such a job before assignment
+only through an organization runner group restricted to selected workflows,
+which this organization's plan does not offer. Fork pull requests from
+first-time contributors already need approval before any workflow runs;
+requiring it for all outside contributors narrows this further.
 
 On the instance there is no container, so nothing corresponds to Namespace's
 `container.privileged=true` feature, and nothing needs to. That feature lets a
@@ -596,10 +608,16 @@ GitHub-hosted image: the job user has a lingering systemd user manager, the
 verifier obtains its delegated cgroup from `systemd-run --user --scope
 --property=Delegate=yes`, and bubblewrap's AppArmor profile is loaded as on the
 hosted runner. The same bubblewrap, seccomp, cgroup and probe chain therefore
-runs unchanged and fails closed where it would elsewhere. The job user cannot
-reach instance metadata, so neither the instance role (Session Manager only)
-nor the launch-time registration token in user-data is visible to the job; the
-security group has no inbound rules and access is through Session Manager.
+runs unchanged and fails closed where it would elsewhere. The job user keeps
+the passwordless sudo the hosted images give it, because the trusted workflow
+installs packages and loads bubblewrap's AppArmor profile with it; candidate
+code runs only inside bubblewrap, where there is no sudo and, outside the
+Mathlib cache phase, no network. The job user's own sockets cannot reach
+instance metadata, which holds only the instance role (Session Manager, nothing
+else) and the user-data; the user-data's just-in-time configuration can enrol
+no runner but this one, and its on-disk copies are deleted once the runner
+starts. The security group has no inbound rules and access is through Session
+Manager.
 Because the runner exists only on demand, `ci.yml` cannot prove this boundary
 on every change as it does for Namespace; the verifier's own supervisor and
 confinement probes, which run before any candidate code on every run, are the

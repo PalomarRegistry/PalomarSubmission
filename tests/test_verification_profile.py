@@ -179,6 +179,12 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertEqual(admitted, selecting)
         self.assertIn('[[ "$event" == workflow_dispatch ]]', hook)
         self.assertIn('[[ "${GITHUB_REF:-}" == refs/heads/main ]]', hook)
+        # A failed hook step does not stop later `if: always()` steps, so a
+        # refusal must take the runner down before it returns.
+        refuse = hook.split("refuse() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("pkill -KILL", refuse)
+        self.assertIn("poweroff", refuse)
+        self.assertNotIn("exit", refuse)
 
     def test_catalogue_is_validated_by_shape(self):
         from scripts.verification_profile import load_catalogue
