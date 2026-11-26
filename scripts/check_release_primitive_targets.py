@@ -74,17 +74,23 @@ def main() -> int:
     parser.add_argument("--remote", default=LEAN4_REMOTE, help="the lean4 repository to read tags from")
     arguments = parser.parse_args()
     minimum = json.loads((ROOT / "toolchains.json").read_text(encoding="utf-8"))["minimum"]
+    remote = arguments.remote
+    if Path(remote).exists():
+        remote = str(Path(remote).resolve())
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory)
         git("init", "--quiet", cwd=work)
-        listed = git("ls-remote", "--tags", "--refs", arguments.remote, "v*", cwd=work).stdout.decode()
+        # A named remote, so the blobless fetch records it as the promisor
+        # `git show` fetches the omitted blobs from.
+        git("remote", "add", "origin", remote, cwd=work)
+        listed = git("ls-remote", "--tags", "--refs", "origin", "v*", cwd=work).stdout.decode()
         names = [line.split("\t", 1)[1].removeprefix("refs/tags/") for line in listed.splitlines()]
         tags = supported_release_tags(names, minimum)
         if not tags:
             print(f"::error::no lean4 release tags at or above {minimum}")
             return 1
         git(
-            "fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags", arguments.remote,
+            "fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags", "origin",
             *(f"refs/tags/{tag}:refs/tags/{tag}" for tag in tags), cwd=work,
         )
         problems = []

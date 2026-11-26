@@ -5237,6 +5237,49 @@ def replay_con_ron(
     return result
 
 
+def strip_primitive_list_comments(text: str) -> str | None:
+    """`text` with its Lean comments replaced by spaces, or None if it cannot be read.
+
+    Comments are read in order as Lean lexes them: `--` runs to the end of
+    the line, and `/-` opens a block comment that nests and closes at the
+    matching `-/`. Stripping one kind before the other would misread
+    `-- /-` or a nested block, and could drop a real entry or keep a
+    commented-out one. Unlike `strip_lean_comments`, this refuses rather
+    than reads text with a string literal, a doc comment (which Lean does
+    not accept inside an array), or an unclosed block comment.
+    """
+    out: list[str] = []
+    depth = 0
+    index = 0
+    while index < len(text):
+        pair = text[index:index + 2]
+        if depth:
+            if pair == "/-":
+                depth += 1
+                index += 2
+            elif pair == "-/":
+                depth -= 1
+                index += 2
+                if not depth:
+                    out.append(" ")
+            else:
+                index += 1
+        elif pair == "/-":
+            if text[index + 2:index + 3] in {"-", "!"}:
+                return None
+            depth = 1
+            index += 2
+        elif pair == "--":
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        elif text[index] == '"':
+            return None
+        else:
+            out.append(text[index])
+            index += 1
+    return None if depth else "".join(out)
+
+
 def primitive_targets(lean_prefix: Path) -> list[str]:
     """The kernel-builtin constants `lake comparator` exports beside the declarations.
 
@@ -5264,8 +5307,9 @@ def primitive_targets(lean_prefix: Path) -> list[str]:
     # Strip comments (`-- ``Nat.zero,` is a commented-out entry, not an entry),
     # then accept exactly one literal array of quoted names and nothing else:
     # a list assembled any other way would be read only in part.
-    body = re.sub(r"/-.*?-/", "", match.group("body"), flags=re.DOTALL)
-    body = "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+    body = strip_primitive_list_comments(match.group("body"))
+    if body is None:
+        raise refusal
     literal = re.fullmatch(r"\s*return\s*#\[(?P<items>[^\[\]]*)\]\s*", body)
     if literal is None:
         raise refusal

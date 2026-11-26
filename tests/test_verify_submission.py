@@ -5024,6 +5024,33 @@ class LakeComparatorTests(unittest.TestCase):
             )
             self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "outParam"])
 
+    def test_comments_are_read_in_the_order_lean_lexes_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            head = "def primitiveTargets : M (Array Lean.Name) := do\n  return #[\n    ``Nat.add,\n"
+            tail = "    ``outParam\n  ]\ndef builtinTargets := 0\n"
+            for entries, expected in (
+                ("    -- /-\n    ``Nat.pow,\n    -- -/\n", ["Nat.add", "Nat.pow", "outParam"]),
+                ("    /- /- ``Nat.pow, -/ ``Nat.mul, -/\n", ["Nat.add", "outParam"]),
+                ("    ``Nat.mul,/- -/``Nat.pow,\n", ["Nat.add", "Nat.mul", "Nat.pow", "outParam"]),
+            ):
+                with self.subTest(entries=entries):
+                    source.write_text(head + entries + tail)
+                    self.assertEqual(verifier.primitive_targets(prefix), expected)
+            for entries in (
+                "    /- ``Nat.mul,\n",
+                "    ``Nat.mul,/--/``Nat.pow,\n",
+                "    /-- doc -/ ``Nat.mul,\n",
+                "    /-! doc -/ ``Nat.mul,\n",
+                '    ``Nat.mul, -- "\n    "--", \n',
+            ):
+                with self.subTest(entries=entries):
+                    source.write_text(head + entries + tail)
+                    with self.assertRaises(VerificationError) as raised:
+                        verifier.primitive_targets(prefix)
+                    self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+
     def test_every_released_primitive_list_format_is_read_exactly(self):
         # Verbatim `primitiveTargets` excerpts: v4.35.0-rc2 through v4.36.0
         # share the v4.36.0 text; v4.37.0-rc1 wraps `String.mk` in
