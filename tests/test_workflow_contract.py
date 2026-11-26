@@ -7,6 +7,7 @@ interchangeable, keep source names out of run titles, and stop the jobs from
 assuming that `github.repository` is PalomarSubmission.
 """
 
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -81,6 +82,120 @@ class RunTitleTests(unittest.TestCase):
         self.assertEqual(
             parsed("render-challenge.yml")["run-name"], "Render challenge [${{ inputs.request_id }}]"
         )
+
+
+class NoSourceNamesInRunSurfacesTests(unittest.TestCase):
+    """A confidential caller's run page shows step names, artifact names and
+    summaries. None of them may be built from the source's identity."""
+
+    IDENTIFYING = re.compile(
+        r"inputs\.(repository|commit|challenge_sha256|[a-z_]*_path|options)\b"
+    )
+
+    def test_step_and_job_names_are_static(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                workflow = parsed(name)
+                for job in workflow["jobs"].values():
+                    self.assertNotIn("${{", str(job.get("name", "")))
+                for step in steps(workflow):
+                    self.assertNotIn("${{", str(step.get("name", "")))
+
+    def test_artifact_names_carry_only_the_request(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                uploads = [
+                    step for step in steps(parsed(name))
+                    if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+                ]
+                self.assertTrue(uploads)
+                for step in uploads:
+                    self.assertIn("inputs.request_id", step["with"]["name"])
+                    self.assertNotRegex(step["with"]["name"], self.IDENTIFYING)
+
+    def test_render_writes_no_step_summary(self):
+        from scripts import render_challenge
+
+        self.assertNotIn("GITHUB_STEP_SUMMARY", WORKFLOWS["render-challenge.yml"])
+        self.assertNotIn("GITHUB_STEP_SUMMARY", Path(render_challenge.__file__).read_text(encoding="utf-8"))
+
+
+TEMPLATES = ROOT / "templates/confidential-callers"
+PLACEHOLDER = "<pipeline-commit>"
+# Template name, the PalomarSubmission workflow it calls, and its one job.
+CALLERS = {"verify.yml": ("submission.yml", "verify"), "render.yml": ("render-challenge.yml", "render")}
+
+
+def caller(name, commit="c" * 40):
+    return yaml.safe_load((TEMPLATES / name).read_text(encoding="utf-8").replace(PLACEHOLDER, commit))
+
+
+class CanonicalCallerTemplateTests(unittest.TestCase):
+    """PalomarConfidentialRuns copies these templates with one commit P
+    substituted. The broker and the reviewer hash the copy back against
+    SHA256SUMS at P, so the templates are part of this repository's contract."""
+
+    def test_sha256sums_lists_exactly_the_templates(self):
+        recorded = {}
+        for line in (TEMPLATES / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+            digest, file_name = line.split("  ", 1)
+            recorded[file_name] = digest
+        self.assertEqual(set(recorded), set(CALLERS))
+        self.assertEqual({path.name for path in TEMPLATES.iterdir()}, {*CALLERS, "SHA256SUMS"})
+        for file_name, digest in recorded.items():
+            with self.subTest(file_name):
+                self.assertEqual(hashlib.sha256((TEMPLATES / file_name).read_bytes()).hexdigest(), digest)
+
+    def test_one_commit_pins_both_the_workflow_and_its_scripts(self):
+        # A uses pin fixes only the called YAML; the called jobs run the
+        # scripts at pipeline_commit. The template makes them one literal.
+        for name, (called, job) in CALLERS.items():
+            with self.subTest(name):
+                text = (TEMPLATES / name).read_text(encoding="utf-8")
+                self.assertEqual(text.count(PLACEHOLDER), 2)
+                call = caller(name)["jobs"][job]
+                self.assertEqual(
+                    call["uses"], f"PalomarRegistry/PalomarSubmission/.github/workflows/{called}@{'c' * 40}"
+                )
+                self.assertEqual(call["with"]["pipeline_commit"], "c" * 40)
+
+    def test_callers_declare_the_called_dispatch_inputs_and_the_ticket(self):
+        for name, (called, _) in CALLERS.items():
+            with self.subTest(name):
+                declared = triggers(caller(name))["workflow_dispatch"]["inputs"]
+                dispatched = triggers(parsed(called))["workflow_dispatch"]["inputs"]
+                self.assertEqual(set(declared), set(dispatched) | {"ticket"})
+                for field, spec in dispatched.items():
+                    self.assertEqual(bool(declared[field].get("required")), bool(spec.get("required")), field)
+                    self.assertEqual(declared[field].get("default"), spec.get("default"), field)
+                self.assertIs(declared["ticket"].get("required"), False)
+
+    def test_callers_forward_every_call_input_unchanged(self):
+        for name, (called, job) in CALLERS.items():
+            with self.subTest(name):
+                forwarded = dict(caller(name)["jobs"][job]["with"])
+                forwarded.pop("pipeline_commit")
+                accepted = set(triggers(parsed(called))["workflow_call"]["inputs"]) - {"pipeline_commit"}
+                self.assertEqual(forwarded, {field: f"${{{{ inputs.{field} }}}}" for field in accepted})
+
+    def test_callers_hold_no_credential_and_only_read(self):
+        for name, (_, job) in CALLERS.items():
+            with self.subTest(name):
+                text = (TEMPLATES / name).read_text(encoding="utf-8")
+                self.assertNotIn("secrets", text)
+                self.assertNotIn("id-token", text)
+                workflow = caller(name)
+                self.assertEqual(list(workflow["jobs"]), [job])
+                self.assertEqual(workflow["permissions"], {"contents": "read"})
+                self.assertEqual(workflow["jobs"][job]["permissions"], {"contents": "read"})
+
+    def test_caller_run_titles(self):
+        self.assertEqual(
+            caller("verify.yml")["run-name"],
+            "Verify ${{ inputs.request_id }}${{ inputs.execution_attempt "
+            "&& format(' [{0}]', inputs.execution_attempt) || '' }}",
+        )
+        self.assertEqual(caller("render.yml")["run-name"], "Render challenge [${{ inputs.request_id }}]")
 
 
 class RunRepositoryAssumptionTests(unittest.TestCase):
