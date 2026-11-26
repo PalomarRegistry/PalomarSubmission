@@ -14,6 +14,7 @@ from unittest import mock
 import yaml
 
 import scripts.submission_contract as submission_contract
+import scripts.update_licence_supplement as update_licence_supplement
 import scripts.verify_submission as verifier
 from scripts.submission_contract import (
     OPTIONAL_FIELDS,
@@ -768,6 +769,102 @@ class VerifySubmissionTests(unittest.TestCase):
             (root / "LICENSES").mkdir()
             shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSES" / "LICENSE")
             self.assertEqual(detect_spdx_identifier(root / "LICENSE", bundle), "MIT")
+
+    def test_licence_supplement_matches_its_generator(self):
+        supplement = REPOSITORY_ROOT / "licence-supplement"
+        identifiers = update_licence_supplement.SUPPLEMENTARY_LICENCES
+        self.assertEqual(
+            sorted(path.name for path in (supplement / "_licenses").iterdir()),
+            sorted(f"{identifier.lower()}.txt" for identifier in identifiers),
+        )
+        self.assertEqual(
+            sorted(path.name for path in (supplement / "license-list-XML").iterdir()),
+            sorted(f"{identifier}.xml" for identifier in identifiers),
+        )
+        for identifier in identifiers:
+            with self.subTest(identifier=identifier):
+                self.assertNotIn("-ND", identifier)
+                self.assertNotRegex(identifier, r"-1\.0\b")
+                text = (supplement / "_licenses" / f"{identifier.lower()}.txt").read_text(
+                    encoding="utf-8"
+                )
+                front_matter = yaml.safe_load(text.split("---\n", 2)[1])
+                self.assertEqual(front_matter["spdx-id"], identifier)
+                xml = (supplement / "license-list-XML" / f"{identifier}.xml").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn(f'licenseId="{identifier}"', xml)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_creative_commons_legal_code(self):
+        # Verbatim legalcode.txt files from creativecommons.org, as submitters
+        # usually copy them into LICENSE.
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        fixtures = REPOSITORY_ROOT / "tests" / "fixtures" / "licences"
+        accepted = ("CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-NC-3.0")
+        rejected = ("CC-BY-NC-ND-4.0", "CC-BY-ND-4.0", "CC-BY-NC-ND-3.0", "CC-BY-ND-3.0")
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for identifier in accepted + rejected:
+                shutil.copyfile(fixtures / f"{identifier}.legalcode.txt", license_path)
+                with self.subTest(identifier=identifier):
+                    if identifier in accepted:
+                        self.assertEqual(
+                            detect_spdx_identifier(license_path, bundle), identifier
+                        )
+                    else:
+                        with self.assertRaisesRegex(LicenseValidationError, "unambiguous"):
+                            detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_rejects_licences_disguised_by_the_supplement(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        fixtures = REPOSITORY_ROOT / "tests" / "fixtures" / "licences"
+        no_derivatives = (fixtures / "CC-BY-NC-ND-4.0.legalcode.txt").read_text(encoding="utf-8")
+        section = no_derivatives.index("Section 3")
+        mit = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
+        disguised = {
+            # Within the similarity threshold of CC-BY-NC-4.0, but still
+            # titled and worded as a NoDerivatives licence.
+            "edited NoDerivatives": no_derivatives[:section]
+            + "The Licensor does not grant permission to Share Adapted Material under the "
+            "terms and conditions of this Public License.\n\n"
+            + no_derivatives[section:],
+            # A supplementary licence identifier must not be stripped as if
+            # it were the title of the MIT text below it.
+            "restricted MIT": "CC-BY-NC-4.0; you may not use the Software for commercial "
+            "purposes.\n" + mit,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for name, text in disguised.items():
+                license_path.write_text(text, encoding="utf-8")
+                with (
+                    self.subTest(name=name),
+                    self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+                ):
+                    detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_each_supplementary_licence(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        supplement = REPOSITORY_ROOT / "licence-supplement" / "_licenses"
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for identifier in update_licence_supplement.SUPPLEMENTARY_LICENCES:
+                text = (supplement / f"{identifier.lower()}.txt").read_text(encoding="utf-8")
+                license_path.write_text(text.split("---\n", 2)[2], encoding="utf-8")
+                with self.subTest(identifier=identifier):
+                    self.assertEqual(detect_spdx_identifier(license_path, bundle), identifier)
 
     def test_phase_timeout_is_capped_by_global_deadline(self):
         with (
@@ -5024,6 +5121,82 @@ class LakeComparatorTests(unittest.TestCase):
             )
             self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "outParam"])
 
+    def test_comments_are_read_in_the_order_lean_lexes_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            head = "def primitiveTargets : M (Array Lean.Name) := do\n  return #[\n    ``Nat.add,\n"
+            tail = "    ``outParam\n  ]\ndef builtinTargets := 0\n"
+            for entries, expected in (
+                ("    -- /-\n    ``Nat.pow,\n    -- -/\n", ["Nat.add", "Nat.pow", "outParam"]),
+                ("    /- /- ``Nat.pow, -/ ``Nat.mul, -/\n", ["Nat.add", "outParam"]),
+                ("    ``Nat.mul,/- -/``Nat.pow,\n", ["Nat.add", "Nat.mul", "Nat.pow", "outParam"]),
+            ):
+                with self.subTest(entries=entries):
+                    source.write_text(head + entries + tail)
+                    self.assertEqual(verifier.primitive_targets(prefix), expected)
+            for entries in (
+                "    /- ``Nat.mul,\n",
+                "    ``Nat.mul,/--/``Nat.pow,\n",
+                "    /-- doc -/ ``Nat.mul,\n",
+                "    /-! doc -/ ``Nat.mul,\n",
+                '    ``Nat.mul, -- "\n    "--", \n',
+            ):
+                with self.subTest(entries=entries):
+                    source.write_text(head + entries + tail)
+                    with self.assertRaises(VerificationError) as raised:
+                        verifier.primitive_targets(prefix)
+                    self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+
+    def test_every_released_primitive_list_format_is_read_exactly(self):
+        # Verbatim `primitiveTargets` excerpts: v4.35.0-rc2 through v4.36.0
+        # share the v4.36.0 text; v4.37.0-rc1 wraps `String.mk` in
+        # `set_option linter.deprecated false in`.
+        expected = [
+            "Nat.add", "Nat.sub", "Nat.mul", "Nat.pow", "Nat.gcd", "Nat.div", "Nat.mod",
+            "Nat.beq", "Nat.ble", "Nat.land", "Nat.lor", "Nat.xor", "Nat.shiftLeft",
+            "Nat.shiftRight", "String.ofList", "Char.ofNat", "List", "eagerReduce", "Nat",
+            "String", "String.mk", "Char", "optParam", "autoParam", "semiOutParam", "outParam",
+        ]
+        fixtures = Path(__file__).parent / "fixtures" / "primitive-targets"
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            for release in ("v4.36.0", "v4.37.0-rc1"):
+                with self.subTest(release=release):
+                    excerpt = (fixtures / f"{release}.txt").read_text(encoding="utf-8")
+                    source.write_text(f"namespace Lake\n\n{excerpt}  pure #[]\n")
+                    self.assertEqual(verifier.primitive_targets(prefix), expected)
+            self.assertIn(
+                "    set_option linter.deprecated false in ``String.mk,\n",
+                (fixtures / "v4.37.0-rc1.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_only_a_boolean_linter_option_may_wrap_a_primitive_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            head = "def primitiveTargets : M (Array Lean.Name) := do\n  return #[\n    ``Nat.add,\n"
+            tail = "  ]\ndef builtinTargets := 0\n"
+            source.write_text(head + "    set_option linter.unusedVariables true in ``Nat.sub\n" + tail)
+            self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "Nat.sub"])
+            for entry in (
+                "set_option pp.all true in ``Nat.sub",
+                "set_option linter.deprecated 0 in ``Nat.sub",
+                "set_option linter.deprecated false ``Nat.sub",
+                "set_option linter.deprecated false in",
+                "set_option linter.deprecated false in Nat.sub",
+                "set_option linter.deprecated false in set_option linter.deprecated false in ``Nat.sub",
+                "set_option linter.deprecated false in ``Nat.sub ``Nat.mul",
+                "open Nat in ``sub",
+                "id ``Nat.sub",
+            ):
+                with self.subTest(entry=entry):
+                    source.write_text(head + f"    {entry}\n" + tail)
+                    with self.assertRaises(VerificationError) as raised:
+                        verifier.primitive_targets(prefix)
+                    self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+
     def test_a_declaration_the_module_does_not_define_is_the_submitters(self):
         panic = subprocess.CompletedProcess(
             ["leanexport"], 134, "",
@@ -5090,6 +5263,7 @@ class LakeComparatorTests(unittest.TestCase):
         self.assertIn("eagerReduce", primitives)
         self.assertEqual(primitives[-1], "outParam")
         self.assertNotIn("Nat.zero", primitives)
+        self.assertIn("String.mk", primitives)
 
     def test_export_targets_follow_the_comparators_order(self):
         config = {
