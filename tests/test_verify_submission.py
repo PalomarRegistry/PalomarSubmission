@@ -5024,6 +5024,55 @@ class LakeComparatorTests(unittest.TestCase):
             )
             self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "outParam"])
 
+    def test_every_released_primitive_list_format_is_read_exactly(self):
+        # Verbatim `primitiveTargets` excerpts: v4.35.0-rc2 through v4.36.0
+        # share the v4.36.0 text; v4.37.0-rc1 wraps `String.mk` in
+        # `set_option linter.deprecated false in`.
+        expected = [
+            "Nat.add", "Nat.sub", "Nat.mul", "Nat.pow", "Nat.gcd", "Nat.div", "Nat.mod",
+            "Nat.beq", "Nat.ble", "Nat.land", "Nat.lor", "Nat.xor", "Nat.shiftLeft",
+            "Nat.shiftRight", "String.ofList", "Char.ofNat", "List", "eagerReduce", "Nat",
+            "String", "String.mk", "Char", "optParam", "autoParam", "semiOutParam", "outParam",
+        ]
+        fixtures = Path(__file__).parent / "fixtures" / "primitive-targets"
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            for release in ("v4.36.0", "v4.37.0-rc1"):
+                with self.subTest(release=release):
+                    excerpt = (fixtures / f"{release}.lean").read_text(encoding="utf-8")
+                    source.write_text(f"namespace Lake\n\n{excerpt}  pure #[]\n")
+                    self.assertEqual(verifier.primitive_targets(prefix), expected)
+            self.assertIn(
+                "    set_option linter.deprecated false in ``String.mk,\n",
+                (fixtures / "v4.37.0-rc1.lean").read_text(encoding="utf-8"),
+            )
+
+    def test_only_a_boolean_linter_option_may_wrap_a_primitive_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = self.toolchain(Path(directory))
+            source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
+            head = "def primitiveTargets : M (Array Lean.Name) := do\n  return #[\n    ``Nat.add,\n"
+            tail = "  ]\ndef builtinTargets := 0\n"
+            source.write_text(head + "    set_option linter.unusedVariables true in ``Nat.sub\n" + tail)
+            self.assertEqual(verifier.primitive_targets(prefix), ["Nat.add", "Nat.sub"])
+            for entry in (
+                "set_option pp.all true in ``Nat.sub",
+                "set_option linter.deprecated 0 in ``Nat.sub",
+                "set_option linter.deprecated false ``Nat.sub",
+                "set_option linter.deprecated false in",
+                "set_option linter.deprecated false in Nat.sub",
+                "set_option linter.deprecated false in set_option linter.deprecated false in ``Nat.sub",
+                "set_option linter.deprecated false in ``Nat.sub ``Nat.mul",
+                "open Nat in ``sub",
+                "id ``Nat.sub",
+            ):
+                with self.subTest(entry=entry):
+                    source.write_text(head + f"    {entry}\n" + tail)
+                    with self.assertRaises(VerificationError) as raised:
+                        verifier.primitive_targets(prefix)
+                    self.assertEqual(raised.exception.code, "palomar.toolchain_unrecognised")
+
     def test_a_declaration_the_module_does_not_define_is_the_submitters(self):
         panic = subprocess.CompletedProcess(
             ["leanexport"], 134, "",
@@ -5090,6 +5139,7 @@ class LakeComparatorTests(unittest.TestCase):
         self.assertIn("eagerReduce", primitives)
         self.assertEqual(primitives[-1], "outParam")
         self.assertNotIn("Nat.zero", primitives)
+        self.assertIn("String.mk", primitives)
 
     def test_export_targets_follow_the_comparators_order(self):
         config = {

@@ -5274,7 +5274,17 @@ def primitive_targets(lean_prefix: Path) -> list[str]:
         item = item.strip()
         if not item:
             continue
-        name = re.fullmatch(r"``([A-Za-z_][A-Za-z0-9_'.]*)", item)
+        # Lean 4.37 deprecated `String.mk` and writes its entry as
+        # `set_option linter.deprecated false in ``String.mk`. A linter option
+        # only silences a warning and cannot change the name the quotation
+        # resolves to, so exactly that wrapper, with a `linter.` option and a
+        # Boolean value, is accepted around a single quoted name. Any other
+        # option, or anything else before the name, is still refused.
+        name = re.fullmatch(
+            r"(?:set_option[ \t]+linter\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+            r"[ \t]+(?:true|false)[ \t]+in[ \t]+)?``([A-Za-z_][A-Za-z0-9_'.]*)",
+            item,
+        )
         if name is None:
             raise refusal
         names.append(name.group(1))
