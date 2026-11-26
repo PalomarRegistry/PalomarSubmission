@@ -160,12 +160,18 @@ CACHE_TOOL_DOWNLOAD_PROPERTIES = (
     f"LimitFSIZE={MAX_CACHE_TOOL_ARCHIVE_BYTES}",
 )
 
-# Mathlib's canonical cache moved new master-built artifacts to the
-# ``mathlib4-master`` container. The old flat ``mathlib4`` container remains a
-# read-only legacy fallback for artifacts from before the cutover. Keep this
-# fixed, trusted chain local rather than executing submitted cache policy; in
-# particular, do not read fork containers whose writers are not trusted.
+# Mathlib's cache client reads the canonical repository's archives only from
+# the master-only ``mathlib4-master`` container on ``cache.mathlib.org``
+# (``publicCacheEndpoint`` in ``Cache/Infra.lean`` since September 2026), so
+# this is the container submission verification's ``lake exe cache get``
+# reads for current revisions.
+# Artifacts that master CI published earlier remain on the frozen Azure storage
+# account: first its ``mathlib4-master`` container, then the flat ``mathlib4``
+# legacy container from before that cutover. Keep this fixed, trusted chain
+# local rather than executing submitted cache policy; in particular, do not
+# read fork containers whose writers are not trusted.
 MATHLIB_CACHE_BASE_URLS = (
+    "https://cache.mathlib.org/mathlib4-master",
     "https://lakecache.blob.core.windows.net/mathlib4-master",
     "https://lakecache.blob.core.windows.net/mathlib4",
 )
