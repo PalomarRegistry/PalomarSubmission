@@ -271,7 +271,12 @@ The licence filename is case-insensitive and may instead use `LICENCE`,
 `COPYING`, `UNLICENSE`, or `OFL`, with an optional `.md`, `.markdown`, or
 `.txt` extension. Exactly one such regular root file is required. It must be
 nonempty UTF-8 text, match one standard SPDX licence mechanically, and agree
-exactly with the SPDX identifier in `project.license`.
+exactly with the SPDX identifier in `project.license`. The detector recognises
+Licensee's choosealicense.com corpus (MIT, Apache-2.0, the BSD and GPL
+families, CC-BY-4.0, CC0-1.0 and others) together with the Creative Commons
+licences in [`licence-supplement/`](licence-supplement/README.md): CC-BY and
+CC-BY-SA from version 2.0, and CC-BY-NC and CC-BY-NC-SA from version 2.0.
+NoDerivatives licences are not recognised.
 
 Current metadata should declare `version: v0.4`; an omitted version follows the
 upstream dispatcher's v0.4 default. `formalization.yaml` must be valid YAML with
