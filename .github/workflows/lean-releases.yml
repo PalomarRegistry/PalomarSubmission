@@ -1,0 +1,36 @@
+name: Lean release primitive targets
+
+# The verifier reads the kernel primitive target list from each submitted
+# toolchain's `Lake/CLI/Check.lean` and refuses a shape it does not
+# recognise. Run that parser over every supported Lean release tag, daily as
+# well as on changes, so a new release that changes the shape fails here
+# before it fails a submission.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  primitive_targets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11.10"
+      - name: Install verifier dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes --no-deps -r requirements.txt
+      - name: Parse the primitive target list of every supported Lean release
+        run: python scripts/check_release_primitive_targets.py

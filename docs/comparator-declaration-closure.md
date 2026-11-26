@@ -20,6 +20,10 @@ them alongside the declarations; that list is read from the toolchain's own
 source rather than copied (the quotient additions `builtinTargets` makes when
 `Quot.sound` is permitted are held in Palomar), and an export that lacked one
 would fail a valid proof.
+The parser accepts only a single literal array of quoted names, each
+optionally wrapped in a Boolean `set_option linter.<name> ... in` (Lean 4.37
+writes `String.mk` that way), and refuses any other shape. The Lean release
+primitive targets workflow runs it over every supported release tag daily.
 
 Configured `definition_names` are deliberate holes, not ordinary dependencies.
 A named definition is compared by type and safety, the constants used by that
