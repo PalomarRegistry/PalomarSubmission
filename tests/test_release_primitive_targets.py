@@ -25,9 +25,9 @@ class ReleasePrimitiveTargetTests(unittest.TestCase):
     def test_released_lists_pass_and_an_unparseable_one_fails(self):
         for release in ("v4.36.0", "v4.37.0-rc1"):
             with self.subTest(release=release):
-                text = (FIXTURES / f"{release}.lean").read_bytes()
+                text = (FIXTURES / f"{release}.txt").read_bytes()
                 self.assertEqual(release_problems(release, text), [])
-        broken = (FIXTURES / "v4.37.0-rc1.lean").read_bytes().replace(
+        broken = (FIXTURES / "v4.37.0-rc1.txt").read_bytes().replace(
             b"set_option linter.deprecated false in ``String.mk",
             b"set_option pp.all true in ``String.mk",
         )
@@ -35,7 +35,7 @@ class ReleasePrimitiveTargetTests(unittest.TestCase):
         self.assertIn("unrecognised export target list", problem)
 
     def test_a_list_missing_an_expected_primitive_is_reported(self):
-        text = (FIXTURES / "v4.36.0.lean").read_bytes().replace(b"    ``String.mk,\n", b"")
+        text = (FIXTURES / "v4.36.0.txt").read_bytes().replace(b"    ``String.mk,\n", b"")
         [problem] = release_problems("v9.9.9", text)
         self.assertIn("lacks String.mk", problem)
 
@@ -56,7 +56,7 @@ class ReleasePrimitiveTargetTests(unittest.TestCase):
             for tag, fixture in (("v4.34.0", None), ("v4.36.0", "v4.36.0"),
                                  ("v4.37.0-rc1", "v4.37.0-rc1")):
                 text = b"def primitiveTargets := 0\n" if fixture is None else (
-                    FIXTURES / f"{fixture}.lean"
+                    FIXTURES / f"{fixture}.txt"
                 ).read_bytes()
                 check.write_bytes(text)
                 git("add", "-A")

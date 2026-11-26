@@ -5067,12 +5067,12 @@ class LakeComparatorTests(unittest.TestCase):
             source = prefix / "src" / "lean" / "lake" / "Lake" / "CLI" / "Check.lean"
             for release in ("v4.36.0", "v4.37.0-rc1"):
                 with self.subTest(release=release):
-                    excerpt = (fixtures / f"{release}.lean").read_text(encoding="utf-8")
+                    excerpt = (fixtures / f"{release}.txt").read_text(encoding="utf-8")
                     source.write_text(f"namespace Lake\n\n{excerpt}  pure #[]\n")
                     self.assertEqual(verifier.primitive_targets(prefix), expected)
             self.assertIn(
                 "    set_option linter.deprecated false in ``String.mk,\n",
-                (fixtures / "v4.37.0-rc1.lean").read_text(encoding="utf-8"),
+                (fixtures / "v4.37.0-rc1.txt").read_text(encoding="utf-8"),
             )
 
     def test_only_a_boolean_linter_option_may_wrap_a_primitive_name(self):
