@@ -125,6 +125,15 @@ their Actions job logs to correct the profile or pinned pipeline revision.
 The `inputs` context is materialized as the verifier's request for either trigger,
 so a caller's push or pull-request event cannot replace the supplied inputs.
 
+[`render-challenge.yml`](.github/workflows/render-challenge.yml) is callable
+the same way, with the same inputs as its dispatch plus `pipeline_commit`.
+Palomar's private confidential runs repository calls both workflows, so their
+runs, logs and artifacts stay in that repository. Neither workflow's run name
+contains the source repository or commit. Each job checks out
+PalomarSubmission at the pinned pipeline commit rather than reading the
+caller, and every mechanical and render report records `run_repository`,
+the repository whose Actions run produced it, beside its `workflow_url`.
+
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says
