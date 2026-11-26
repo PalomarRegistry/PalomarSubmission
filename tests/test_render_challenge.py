@@ -2877,6 +2877,34 @@ instPartialOrderElement</span></body></html>'''
             with self.assertRaisesRegex(VerificationError, "unexpected file type"):
                 artifact_manifest(root)
 
+    def test_katex_fonts_in_every_emitted_format_are_kept_byte_for_byte(self):
+        # Verso v4.36.0 writes KaTeX's fonts to katex/fonts/ as .ttf, .woff and
+        # .woff2 (PalomarSubmission issue 203).
+        fonts = {
+            "katex/fonts/KaTeX_AMS-Regular.ttf": b"\x00\x01\x00\x00ttf",
+            "katex/fonts/KaTeX_AMS-Regular.woff": b"wOFFwoff",
+            "katex/fonts/KaTeX_AMS-Regular.woff2": b"wOF2woff2",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw"
+            output = root / "output"
+            (raw / "Challenge").mkdir(parents=True)
+            output.mkdir()
+            (raw / "Challenge" / "index.html").write_text(
+                '<!doctype html><html><head><base href="../"></head><body><p>Challenge</p></body></html>',
+                encoding="utf-8",
+            )
+            for relative, contents in fonts.items():
+                (raw / relative).parent.mkdir(parents=True, exist_ok=True)
+                (raw / relative).write_bytes(contents)
+            sanitize_bundle(raw, output, challenge_module="Challenge")
+            manifest = json.loads((output / "artifact-manifest.json").read_text())
+            listed = {item["path"] for item in manifest["files"]}
+            for relative, contents in fonts.items():
+                self.assertIn(relative, listed)
+                self.assertEqual((output / relative).read_bytes(), contents)
+
     def test_bundle_is_bounded_sanitized_and_content_addressed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
