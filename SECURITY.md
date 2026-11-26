@@ -412,7 +412,8 @@ its namespace, cgroup and seccomp implementations, bubblewrap, Git and its
 protocol parsers, the selected Lean toolchain with its kernel, `lake
 comparator`, `leanexport`, `leanchecker` and bundled independent kernels, the
 Palomar verifier/reporter, the governance of the canonical allowlisted repositories,
-the pinned Licensee SPDX detector and its locked Ruby dependencies,
+the pinned Licensee SPDX detector, its locked Ruby dependencies and the
+SPDX licence texts vendored in `licence-supplement/`,
 and the contents served by Mathlib's cache service. HTTPS authenticates the
 cache endpoint in transit, but the source-derived cache key is not a digest or
 signature of the downloaded archive. A cache publisher or storage service able
