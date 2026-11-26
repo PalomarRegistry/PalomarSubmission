@@ -33,6 +33,22 @@
         "job_timeout_minutes": 350,
         "execution_budget_seconds": 19800
       }
+    },
+    "palomar-aws-r7i-16xlarge-v1": {
+      "runner": {
+        "provider": "aws-self-hosted",
+        "label": "palomar-aws-r7i-16xlarge-v1",
+        "labels": [
+          "palomar-aws-r7i-16xlarge-v1"
+        ],
+        "architecture": "x86_64",
+        "minimum_cpus": 64
+      },
+      "limits": {
+        "minimum_host_memory_bytes": 515396075520,
+        "job_timeout_minutes": 1440,
+        "execution_budget_seconds": 82800
+      }
     }
   }
 }

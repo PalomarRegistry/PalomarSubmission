@@ -20,6 +20,12 @@ PERMANENT = re.compile(
 )
 
 
+def job_budget_seconds() -> int:
+    """The resolved profile's execution budget, which the workflow exports."""
+    raw = os.environ.get("PALOMAR_EXECUTION_BUDGET_SECONDS", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else 19800
+
+
 def fetch(repository: str, revision: str, destination: Path, *, budget: float = 300) -> None:
     if repository not in TRUSTED_REPOSITORIES or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("trusted tool fetch requires an approved repository and immutable commit")
@@ -27,7 +33,7 @@ def fetch(repository: str, revision: str, destination: Path, *, budget: float = 
         raise ValueError("trusted tool destination already exists")
     started = os.environ.get("PALOMAR_JOB_STARTED_AT")
     if started:
-        budget = min(budget, float(started) + 19800 - time.time())
+        budget = min(budget, float(started) + job_budget_seconds() - time.time())
     deadline = time.monotonic() + budget
     environment = {
         **os.environ,

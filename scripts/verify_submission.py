@@ -421,9 +421,12 @@ def report_diagnostic(
 
 
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-EXECUTION_BUDGET_SECONDS = 12 * 60 * 60
 VERIFICATION_PROFILE = load_profile()
 VERIFICATION_LIMITS = VERIFICATION_PROFILE["limits"]
+# The per-phase ceiling: twelve hours, or the selected profile's whole budget
+# when that is longer, so one phase of a long operator-launched run is bounded
+# by the shared deadline rather than cut short below it.
+EXECUTION_BUDGET_SECONDS = max(12 * 60 * 60, VERIFICATION_LIMITS["execution_budget_seconds"])
 _EXECUTION_DEADLINE: float | None = None
 _MONOTONIC = time.monotonic
 _WALL_TIME = time.time
@@ -6659,7 +6662,7 @@ def parser() -> argparse.ArgumentParser:
         "--execution-budget-seconds",
         type=int,
         default=EXECUTION_BUDGET_SECONDS,
-        help="trusted worker wall-clock capacity (default: 12 hours)",
+        help="trusted worker wall-clock capacity (default: 12 hours or the profile budget if longer)",
     )
     execute_parser.set_defaults(func=execute)
     return result

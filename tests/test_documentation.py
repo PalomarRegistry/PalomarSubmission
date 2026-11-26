@@ -96,14 +96,24 @@ class SecurityPolicyMatchesTheWorkflowTests(unittest.TestCase):
     def test_the_documented_wall_clock_allowance_is_the_one_dispatched(self):
         # The verifier's own default is larger than what the workflow asks for,
         # so the number a reader can check is the one the resolved profile
-        # hands the command line; every approved profile grants the same one.
+        # hands the command line. Hosted and Namespace profiles grant one
+        # allowance; each operator-launched profile documents its own.
         self.assertIn('--execution-budget-seconds "${{ needs.profile.outputs.budget }}"', WORKFLOW_TEXT)
         catalogue = json.loads((ROOT / "execution-profiles.json").read_text())
         hosted = json.loads((ROOT / "verification-profile.json").read_text())
         budgets = {hosted["limits"]["execution_budget_seconds"]}
-        budgets.update(p["limits"]["execution_budget_seconds"] for p in catalogue["profiles"].values())
-        self.assertEqual(budgets, {19800}, "SECURITY.md documents one allowance for every profile")
+        budgets.update(
+            p["limits"]["execution_budget_seconds"] for p in catalogue["profiles"].values()
+            if p["runner"]["provider"] == "namespace"
+        )
+        self.assertEqual(budgets, {19800}, "SECURITY.md documents one allowance for these profiles")
         self.assertIn("19,800 seconds", SECURITY)
+        for identifier, profile in catalogue["profiles"].items():
+            if profile["runner"]["provider"] == "aws-self-hosted":
+                limits = profile["limits"]
+                self.assertIn(f"`{identifier}`", SECURITY)
+                self.assertIn(f"{limits['execution_budget_seconds']:,} seconds", SECURITY)
+                self.assertIn(f"{limits['job_timeout_minutes']:,}-minute job", SECURITY)
 
     def test_standard_profile_matches_the_workflow(self):
         profile = json.loads((ROOT / "verification-profile.json").read_text())

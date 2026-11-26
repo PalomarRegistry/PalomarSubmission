@@ -75,6 +75,14 @@ code 137 do not authorize a retry; trusted cgroup telemetry and supervisor
 deadlines supply the structured resource evidence. Both Namespace profiles run
 the real sandbox boundary tests in CI.
 
+For the rare project that neither Namespace tier can hold, a Technical
+Maintainer may select the operator-only `palomar-aws-r7i-16xlarge-v1` profile
+(64 CPU / 512 GiB, a 1,440-minute job with an 82,800-second budget). Its runner
+is an ephemeral EC2 instance launched for one job with
+[`ops/aws-runner`](ops/aws-runner/README.md); it is never the default, never an
+automatic retry, and not selectable by a submitter or a reusable caller.
+[`SECURITY.md`](SECURITY.md) describes how it is kept to operator dispatches.
+
 The profile is workflow/report metadata, not a field in `comparator.json`.
 It records the existing 95%/98% memory pressure/ceiling policy and the
 19,800-second production budget, without adding a CPU quota or changing swap

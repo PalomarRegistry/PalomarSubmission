@@ -41,6 +41,12 @@ def retry_delay(attempt: int, headers: str) -> float:
     return (5, 20)[attempt]
 
 
+def job_budget_seconds() -> int:
+    """The resolved profile's execution budget, which the workflow exports."""
+    raw = os.environ.get("PALOMAR_EXECUTION_BUDGET_SECONDS", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else 19800
+
+
 def download(
     url: str, destination: Path, digest: str, *, budget: float = 300, max_bytes: int | None = None
 ) -> None:
@@ -48,7 +54,7 @@ def download(
         raise ValueError("trusted downloads require HTTPS and a pinned SHA-256")
     started = os.environ.get("PALOMAR_JOB_STARTED_AT")
     if started:
-        budget = min(budget, float(started) + 19800 - time.time())
+        budget = min(budget, float(started) + job_budget_seconds() - time.time())
     deadline = time.monotonic() + budget
     with tempfile.TemporaryDirectory(prefix="palomar-download-", dir=destination.parent) as raw:
         temporary = Path(raw) / "download"
