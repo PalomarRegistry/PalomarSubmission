@@ -18,6 +18,7 @@ from unittest import mock
 
 from scripts.render_challenge import (
     BUILD_TIMEOUT_SECONDS,
+    MATHLIB_CACHE_BASE_URLS,
     RUNTIME_SANITIZER,
     VERSO_RUNTIME,
     PreparedMathlibCacheTool,
@@ -226,26 +227,100 @@ class RenderChallengeTests(unittest.TestCase):
                 )
         self.assertEqual((downloaded, size), (1, len(b"archive")))
 
-    def test_mathlib_cache_tries_master_then_legacy_for_only_the_misses(self):
+    def test_mathlib_cache_reads_only_the_official_master_and_legacy_containers(self):
+        # Current Mathlib reads the canonical repository's archives only from
+        # the master container on cache.mathlib.org; the frozen Azure master
+        # and legacy containers keep older revisions reachable. Fork
+        # containers are never trusted.
+        self.assertEqual(
+            MATHLIB_CACHE_BASE_URLS,
+            (
+                "https://cache.mathlib.org/mathlib4-master",
+                "https://lakecache.blob.core.windows.net/mathlib4-master",
+                "https://lakecache.blob.core.windows.net/mathlib4",
+            ),
+        )
+        for base_url in MATHLIB_CACHE_BASE_URLS:
+            self.assertNotIn("forks", base_url)
+
+    def test_mathlib_cache_tries_each_container_in_order_for_only_the_misses(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cache = root / "cache"
             environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
-            first = "0123456789abcdef"
-            second = "fedcba9876543210"
+            current = "0123456789abcdef"
+            frozen = "fedcba9876543210"
+            legacy = "00112233445566ff"
+            hits = {
+                "https://cache.mathlib.org/mathlib4-master": current,
+                "https://lakecache.blob.core.windows.net/mathlib4-master": frozen,
+                "https://lakecache.blob.core.windows.net/mathlib4": legacy,
+            }
             configurations = []
 
             def download(*_args, **_kwargs):
-                configurations.append((root / "mathlib-cache-download" / "download.conf").read_text())
-                digest = first if len(configurations) == 1 else second
-                (cache / f"{digest}.ltar").write_bytes(digest.encode())
-                return subprocess.CompletedProcess([], 22, "", "one archive was missing")
+                configuration = (root / "mathlib-cache-download" / "download.conf").read_text()
+                configurations.append(configuration)
+                urls = [
+                    json.loads(line.removeprefix("url = "))
+                    for line in configuration.splitlines()
+                    if line.startswith("url = ")
+                ]
+                for base_url, digest in hits.items():
+                    if f"{base_url}/f/{digest}.ltar" in urls:
+                        (cache / f"{digest}.ltar").write_bytes(digest.encode())
+                return subprocess.CompletedProcess([], 22, "", "some archives were missing")
 
             with mock.patch(
                 "scripts.render_challenge.sandboxed_run", side_effect=download
             ):
                 downloaded, size = download_mathlib_cache(
-                    {first, second},
+                    {current, frozen, legacy},
+                    cache,
+                    trusted_work=root,
+                    environment=environment,
+                    curl=Path("/usr/bin/curl"),
+                    env_tool=Path("/usr/bin/env"),
+                    executable_paths=[],
+                    tools={},
+                )
+
+        self.assertEqual(downloaded, 3)
+        self.assertEqual(size, len(current) + len(frozen) + len(legacy))
+        self.assertEqual(len(configurations), 3)
+        current_master, frozen_master, frozen_legacy = configurations
+        for digest in (current, frozen, legacy):
+            self.assertIn(f"https://cache.mathlib.org/mathlib4-master/f/{digest}.ltar", current_master)
+        self.assertNotIn(current, frozen_master)
+        self.assertIn(
+            f"https://lakecache.blob.core.windows.net/mathlib4-master/f/{frozen}.ltar", frozen_master
+        )
+        self.assertIn(
+            f"https://lakecache.blob.core.windows.net/mathlib4-master/f/{legacy}.ltar", frozen_master
+        )
+        self.assertNotIn(current, frozen_legacy)
+        self.assertNotIn(frozen, frozen_legacy)
+        self.assertIn(f"https://lakecache.blob.core.windows.net/mathlib4/f/{legacy}.ltar", frozen_legacy)
+
+    def test_mathlib_cache_stops_after_the_current_host_supplies_every_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            environment = {"HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+            digests = {"0123456789abcdef", "fedcba9876543210"}
+            configurations = []
+
+            def download(*_args, **_kwargs):
+                configurations.append((root / "mathlib-cache-download" / "download.conf").read_text())
+                for digest in digests:
+                    (cache / f"{digest}.ltar").write_bytes(b"archive")
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            with mock.patch(
+                "scripts.render_challenge.sandboxed_run", side_effect=download
+            ):
+                downloaded, _size = download_mathlib_cache(
+                    digests,
                     cache,
                     trusted_work=root,
                     environment=environment,
@@ -256,12 +331,8 @@ class RenderChallengeTests(unittest.TestCase):
                 )
 
         self.assertEqual(downloaded, 2)
-        self.assertEqual(size, len(first) + len(second))
-        self.assertEqual(len(configurations), 2)
-        self.assertIn(f"mathlib4-master/f/{first}.ltar", configurations[0])
-        self.assertIn(f"mathlib4-master/f/{second}.ltar", configurations[0])
-        self.assertIn(f"mathlib4/f/{second}.ltar", configurations[1])
-        self.assertNotIn(f"mathlib4/f/{first}.ltar", configurations[1])
+        self.assertEqual(len(configurations), 1)
+        self.assertNotIn("lakecache.blob.core.windows.net", configurations[0])
 
     def test_zero_cache_downloads_skip_unpack_and_leave_source_build_to_follow(self):
         with tempfile.TemporaryDirectory() as directory:
