@@ -170,6 +170,10 @@ MATHLIB_CACHE_BASE_URLS = (
     "https://lakecache.blob.core.windows.net/mathlib4",
 )
 
+# Verso's KaTeX assets ship each font as .ttf, .woff and .woff2 under
+# ``katex/fonts/``. Font files are copied as inert bytes and served with a font
+# content type; the KaTeX stylesheet that would load them is dropped with every
+# other input stylesheet.
 ALLOWED_EXTENSIONS = {
     ".css",
     ".gif",
@@ -182,6 +186,7 @@ ALLOWED_EXTENSIONS = {
     ".md",
     ".png",
     ".ts",
+    ".ttf",
     ".txt",
     ".webp",
     ".woff",
