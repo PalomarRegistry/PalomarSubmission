@@ -113,6 +113,17 @@ jobs:
           repository: PalomarRegistry/PalomarSubmission
           ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
           persist-credentials: false
+      # Confidential (bundle) runs execute only on the confidential profile:
+      # no caches, no debugging, Technical Maintainer access only.
+      - name: Require the confidential profile for snapshot runs
+        if: inputs.snapshot_sha256 != '' || inputs.source_bundle_artifact != ''
+        env:
+          PALOMAR_EXECUTION_PROFILE: ${{ inputs.execution_profile }}
+        run: |
+          if [ "$PALOMAR_EXECUTION_PROFILE" != "palomar-confidential-16x32-v1" ]; then
+            echo "::error::confidential runs must use the palomar-confidential-16x32-v1 execution profile"
+            exit 1
+          fi
       - name: Resolve approved execution profile
         id: resolve
         env:
@@ -294,7 +305,7 @@ jobs:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ inputs.snapshot_sha256 != '' && 1 || 90 }}
 
       - name: Wait before report upload retry 2
         if: always() && steps.upload1.outcome == 'failure'
@@ -309,7 +320,7 @@ jobs:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ inputs.snapshot_sha256 != '' && 1 || 90 }}
           overwrite: true
 
       - name: Wait before report upload retry 3
@@ -325,7 +336,7 @@ jobs:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/mechanical-report.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ inputs.snapshot_sha256 != '' && 1 || 90 }}
           overwrite: true
 
       - name: Fail the run when verification did not pass

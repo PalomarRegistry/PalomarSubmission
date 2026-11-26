@@ -971,6 +971,13 @@ def prepare(args: argparse.Namespace) -> int:
             lakefile_path=lakefile_relative.as_posix(),
             lean_toolchain_path=toolchain_relative.as_posix(),
         )
+        if bundles is not None:
+            admitted = bundles.descriptor["project"]
+            for field in admitted:
+                if getattr(accepted_paths, field) != admitted[field]:
+                    raise VerificationError(
+                        f"render {field} differs from the one the confidential snapshot admitted"
+                    )
         report = PreparedRenderReport(
             source=RenderSource(
                 repository=repository,
@@ -1408,6 +1415,17 @@ def prepare_workspace(
                 ),
             )
         verso_manifest = load_json_object(verso_probe / "lake-manifest.json")
+        if verify_submission.SOURCE_BUNDLES is not None:
+            # Only Verso and its own pinned packages may be fetched beyond the
+            # snapshot: the renderer chose them, not the submission.
+            verify_submission.SOURCE_BUNDLES.renderer_packages = {
+                (f"https://github.com/{VERSO_REPOSITORY}", verso_commit),
+                *(
+                    (str(package.get("url", "")), str(package.get("rev", "")))
+                    for package in verso_manifest.get("packages", [])
+                    if isinstance(package, dict) and package.get("type") == "git"
+                ),
+            }
         try:
             merged_manifest = merge_renderer_manifest(
                 source_manifest, verso_manifest, verso_commit,
@@ -3453,7 +3471,6 @@ def main() -> int:
             # Confidential render: source and non-trusted dependencies come
             # from the validated snapshot bundles only.
             verify_submission.SOURCE_BUNDLES = SourceBundles.load(args.source_bundles, args.snapshot_sha256)
-            verify_submission.SOURCE_BUNDLES.allow_unlisted = True
         elif getattr(args, "snapshot_sha256", ""):
             raise VerificationError("a snapshot digest was given without source bundles")
         return args.func(args)

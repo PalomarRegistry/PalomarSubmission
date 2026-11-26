@@ -12,6 +12,7 @@ so it can be restored into an empty repository and pushed as a new archive.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import ipaddress
 import json
@@ -165,6 +166,14 @@ class GitHubRepository:
     @property
     def key(self) -> str:
         return self.full_name.lower()
+
+
+def _is_github(url: str) -> bool:
+    try:
+        canonical_github_repository(url)
+    except SnapshotError:
+        return False
+    return True
 
 
 def canonical_github_repository(url: str) -> GitHubRepository:
@@ -330,6 +339,19 @@ def lake_manifest_path(project_path: str) -> str:
     return f"{project_path}/lake-manifest.json" if project_path else "lake-manifest.json"
 
 
+LAKE_ESCAPED_NAME_RE = re.compile("^\u00ab([^\u00ab\u00bb]*)\u00bb$")
+
+
+def bare_package_name(raw: object) -> str | None:
+    """`submission_contract.lake_package_name` without its YAML dependency:
+    Lake writes a non-identifier name between guillemets in the manifest."""
+    if not isinstance(raw, str):
+        return None
+    escaped = LAKE_ESCAPED_NAME_RE.fullmatch(raw)
+    name = escaped.group(1) if escaped else raw
+    return name if name and not name.startswith(".") and NAME_RE.fullmatch(name) else None
+
+
 def manifest_git_packages(raw: bytes | None) -> list[dict[str, str]]:
     """Git packages of a Lake manifest, in manifest order; path packages are local."""
     if raw is None:
@@ -349,8 +371,8 @@ def manifest_git_packages(raw: bytes | None) -> list[dict[str, str]]:
             continue
         if package.get("type") != "git":
             raise SnapshotError("lake-manifest.json has a package that is neither git nor path")
-        name, url, rev = package.get("name"), package.get("url"), package.get("rev")
-        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+        name, url, rev = bare_package_name(package.get("name")), package.get("url"), package.get("rev")
+        if name is None:
             raise SnapshotError("lake-manifest.json has an unsafe package name")
         if not isinstance(rev, str) or not SHA_RE.fullmatch(rev):
             raise SnapshotError(f"Git package {name!r} is not pinned to a full commit")
@@ -645,10 +667,10 @@ class SourceBundles:
     directory: Path
     descriptor: dict[str, Any]
     snapshot_sha256: str
-    # The renderer adds its own trusted packages (Verso and its closure) to
-    # the workspace manifest; those are not the submission's and are fetched
-    # as today. The verifier allows nothing unlisted.
-    allow_unlisted: bool = False
+    # The renderer adds Verso and Verso's own pinned packages to its
+    # workspace manifest. Exactly those (repository, revision) pairs, and no
+    # other unlisted package, may be fetched as today. The verifier allows none.
+    renderer_packages: set[tuple[str, str]] = dataclasses.field(default_factory=set)
 
     @classmethod
     def load(cls, directory: Path, snapshot_sha256: str) -> SourceBundles:
@@ -687,19 +709,27 @@ class SourceBundles:
         return self._path(self.directory, self.descriptor["source"]["bundle"])
 
     def dependency(self, url: str, rev: str) -> dict[str, Any] | None:
-        """The descriptor row for a manifest package.
+        """The descriptor row for a manifest package at exactly this revision.
 
-        A package the snapshot does not list is refused, except a renderer
-        package when `allow_unlisted` is set; `None` then means "fetch it as
+        A package the snapshot does not list is refused, unless it is one of
+        the renderer's own `renderer_packages`; `None` then means "fetch it as
         a trusted package, as today".
         """
         key = canonical_github_repository(url).key
-        for item in self.descriptor["dependencies"]:
-            if canonical_github_repository(item["url"]).key == key:
-                if item["rev"] != rev:
-                    raise SnapshotError("a Lake package is pinned to another revision than the snapshot's")
+        rows = [
+            item
+            for item in self.descriptor["dependencies"]
+            if canonical_github_repository(item["url"]).key == key
+        ]
+        for item in rows:
+            if item["rev"] == rev:
                 return item
-        if self.allow_unlisted:
+        if rows:
+            raise SnapshotError("a Lake package is pinned to another revision than the snapshot's")
+        allowed = {
+            (canonical_github_repository(u).key, r) for u, r in self.renderer_packages if _is_github(u)
+        }
+        if (key, rev) in allowed:
             return None
         raise SnapshotError("a Lake package is not in the snapshot; no stage refetches confidential source")
 

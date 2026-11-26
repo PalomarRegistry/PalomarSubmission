@@ -87,7 +87,8 @@ jobs:
       pipeline_commit: <pipeline-commit>
       request_id: ${{ inputs.request_id }}
       mode: ${{ inputs.mode }}
-      execution_profile: ${{ inputs.execution_profile }}
+      # Always the confidential profile; the dispatched value is not used.
+      execution_profile: palomar-confidential-16x32-v1
       execution_attempt: ${{ inputs.execution_attempt }}
       options: ${{ inputs.options }}
       source_bundle_artifact: ${{ needs.validate.outputs.source_bundle_artifact }}

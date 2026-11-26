@@ -457,7 +457,7 @@ class DependencyRuleTests(unittest.TestCase):
             cs.GitHub(transport=moved).repository("o/r", None)
         self.assertIsNone(cs.NoRedirects().redirect_request(None, None, 301, "", {}, "https://elsewhere"))
 
-    def test_trusted_closure_follows_the_roots_own_manifest(self):
+    def test_trusted_closure_follows_only_an_official_roots_own_manifest(self):
         rev = "3" * 40
         packages = [
             {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4", "rev": rev},
@@ -487,9 +487,82 @@ class DependencyRuleTests(unittest.TestCase):
                 ]
             }
         ).encode()
-        trusted = cs.trusted_closure(packages, lambda url, revision: nested if revision == rev else None)
+
+        class Roots(cs.RootReader):
+            def __init__(self, official):
+                super().__init__(Path("/nonexistent"), cs.Fetcher(check_addresses=False))
+                self.is_official = official
+
+            def official(self, root, revision):
+                return self.is_official
+
+            def manifest(self, root, revision):
+                return nested if revision == rev else None
+
         # A substituted fork of a closure package is not trusted, so it is bundled.
-        self.assertEqual(trusted, {"mathlib", "batteries"})
+        self.assertEqual(cs.trusted_closure(packages, Roots(True)), {"mathlib", "batteries"})
+        # A root commit outside official history (say, from a pull request)
+        # exempts nothing: everything is bundled.
+        self.assertEqual(cs.trusted_closure(packages, Roots(False)), set())
+
+
+class RootOfficialHistoryTests(Case):
+    def test_only_commits_in_official_history_or_accepted_revisions_count(self):
+        work = self.root / "root-work"
+        work.mkdir()
+        run_git("init", "--quiet", "--initial-branch=master", str(work))
+        (work / "lake-manifest.json").write_text('{"packages": []}')
+        official = commit(work, "official", "Ada")
+        run_git("switch", "--quiet", "-c", "pull/1/head", cwd=work)
+        (work / "lake-manifest.json").write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "type": "git",
+                            "name": "payload",
+                            "url": "https://github.com/attacker/payload",
+                            "rev": "7" * 40,
+                        }
+                    ]
+                }
+            )
+        )
+        unofficial = commit(work, "from a pull request", "Mallory")
+        remote = self.root / "remote" / "leanprover-community" / "mathlib4"
+        remote.parent.mkdir(parents=True)
+        run_git("clone", "--quiet", "--bare", "--mirror", str(work), str(remote))
+        fetcher = cs.Fetcher(
+            base=f"file://{self.root / 'remote'}",
+            protocols=("file",),
+            check_addresses=False,
+            home=self.root / "home",
+        )
+        config = [
+            {
+                "repository": "leanprover-community/mathlib4",
+                "repository_aliases": [],
+                "official_ref": "refs/heads/master",
+                "accepted_revisions": [],
+                "include_semver_release_tags": True,
+            }
+        ]
+        roots = cs.RootReader(self.root / "roots", fetcher, config)
+        (self.root / "roots").mkdir()
+        root = roots.root("https://github.com/leanprover-community/mathlib4")
+        self.assertTrue(roots.official(root, official))
+        self.assertFalse(roots.official(root, unofficial))
+        accepting = cs.RootReader(
+            self.root / "roots2", fetcher, [{**config[0], "accepted_revisions": [unofficial]}]
+        )
+        self.assertTrue(
+            accepting.official(accepting.root("https://github.com/leanprover-community/mathlib4"), unofficial)
+        )
+        packages = [
+            {"name": "mathlib", "url": "https://github.com/leanprover-community/mathlib4", "rev": unofficial},
+            {"name": "payload", "url": "https://github.com/attacker/payload", "rev": "7" * 40},
+        ]
+        self.assertEqual(cs.trusted_closure(packages, roots), set())
 
 
 class SnapshotCredentialTests(Case):
@@ -639,8 +712,15 @@ class ValidationTests(Case):
             bundles.dependency("https://github.com/x/y", "8" * 40)
         with self.assertRaisesRegex(SnapshotError, "another revision"):
             bundles.dependency("https://github.com/dep-owner/dep", "8" * 40)
-        bundles.allow_unlisted = True
+        # The renderer may fetch exactly its own Verso packages, nothing else.
+        with self.assertRaisesRegex(SnapshotError, "not in the snapshot"):
+            bundles.dependency("https://github.com/leanprover/verso", "8" * 40)
+        bundles.renderer_packages = {("https://github.com/leanprover/verso.git", "8" * 40)}
         self.assertIsNone(bundles.dependency("https://github.com/leanprover/verso", "8" * 40))
+        with self.assertRaisesRegex(SnapshotError, "not in the snapshot"):
+            bundles.dependency("https://github.com/leanprover/verso", "9" * 40)
+        with self.assertRaisesRegex(SnapshotError, "not in the snapshot"):
+            bundles.dependency("https://github.com/attacker/payload", "8" * 40)
         target = validated / "bundles" / f"{DEPENDENCY_ID}-{fixture.dependency_rev}.bundle"
         target.write_bytes(target.read_bytes() + b"x")
         with self.assertRaisesRegex(SnapshotError, "does not match"):
@@ -854,3 +934,146 @@ class MaterializeFromBundlesTests(Case):
             verify_submission.materialize_packages(
                 checkout, checkout=checkout, base_env={"PATH": os.environ["PATH"]}
             )
+
+
+class ReviewFollowUpTests(Case):
+    def test_a_malformed_capability_still_masks_and_revokes_its_token(self):
+        fixture = Fixture(self.root)
+
+        class Malformed(FakeBroker):
+            def open(self, ticket, operation):
+                capability = super().open(ticket, operation)
+                del capability["nonce"]
+                return capability
+
+        github = FakeGitHub()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), self.assertRaisesRegex(SnapshotError, "malformed"):
+            cs.snapshot(
+                TICKET,
+                self.root / "out",
+                self.root / "work",
+                broker=Malformed(fixture),
+                identity=IDENTITY,
+                github=github,
+                fetcher=fixture.fetcher(),
+            )
+        self.assertIn(f"::add-mask::{TOKEN}", printed.getvalue())
+        self.assertEqual(github.revoked, [TOKEN])
+
+    def test_one_repository_under_two_names_and_at_two_revisions(self):
+        probe = Fixture(self.root / "probe")
+        first = run_git("rev-parse", "HEAD~1", cwd=self.root / "probe/dep-work")
+        fixture = Fixture(
+            self.root / "real",
+            manifest_packages=[
+                {
+                    "type": "git",
+                    "name": "dep",
+                    "url": "https://github.com/dep-owner/dep",
+                    "rev": probe.dependency_rev,
+                },
+                {
+                    "type": "git",
+                    "name": "«dep alias»".replace(" ", "-"),
+                    "url": "https://github.com/dep-owner/dep.git",
+                    "rev": probe.dependency_rev,
+                },
+                {"type": "git", "name": "old", "url": "https://github.com/dep-owner/dep", "rev": first},
+            ],
+        )
+        # The dependency repository is rebuilt identically, so the revisions match.
+        self.assertEqual(fixture.dependency_rev, probe.dependency_rev)
+        self.root = self.root / "real"
+        (self.root / "home").mkdir(exist_ok=True)
+        descriptor, broker, _, out, _ = self.take_snapshot(fixture)
+        self.assertEqual([row["name"] for row in descriptor["dependencies"]], ["dep", "dep-alias", "old"])
+        validated = self.root / "validated"
+        with contextlib.redirect_stdout(io.StringIO()):
+            digest = cs.validate(
+                TICKET,
+                out / "descriptor-draft.json",
+                validated,
+                self.root / "vw",
+                broker=broker,
+                identity=IDENTITY,
+                fetcher=fixture.fetcher(),
+            )
+        bundles = sb.SourceBundles.load(validated, digest)
+        self.assertEqual(bundles.dependency("https://github.com/dep-owner/dep", first)["name"], "old")
+        self.assertEqual(
+            bundles.dependency("https://github.com/dep-owner/dep", probe.dependency_rev)["name"], "dep"
+        )
+
+    def test_the_verifier_refuses_paths_the_snapshot_did_not_admit(self):
+        from scripts import verify_submission
+        from scripts.verification_errors import VerificationError
+
+        class Bundles:
+            descriptor = {"project": dict(PROJECT)}
+
+        report = {
+            "source": {"project_path": None},
+            "comparator": {"path": "comparator.json"},
+            "lakefile": {"path": "lakefile.toml"},
+            "lean_toolchain_path": "lean-toolchain",
+            "challenge": {"path": "Challenge.lean"},
+            "solution": {"path": "Solution.lean"},
+        }
+        with patch.object(verify_submission, "SOURCE_BUNDLES", Bundles()):
+            verify_submission.require_snapshot_project(report, tuple(PROJECT))
+            for field, value in (("challenge", "Other/Challenge.lean"), ("lakefile", "b/lakefile.toml")):
+                changed = json.loads(json.dumps(report))
+                changed[field]["path"] = value
+                with self.subTest(field), self.assertRaisesRegex(VerificationError, "differs"):
+                    verify_submission.require_snapshot_project(changed, tuple(PROJECT))
+            with self.assertRaisesRegex(VerificationError, "project_path"):
+                verify_submission.require_snapshot_project(
+                    {**report, "source": {"project_path": "other"}}, ("project_path",)
+                )
+
+
+class BrokerWireFixtureTests(unittest.TestCase):
+    """The wire shapes the SRV-3 broker is to match (tests/fixtures/confidential-broker)."""
+
+    FIXTURES = Path(__file__).resolve().parent / "fixtures" / "confidential-broker"
+
+    def load(self, name):
+        return json.loads((self.FIXTURES / f"{name}.json").read_text())
+
+    def test_the_snapshot_capability_fixture_is_accepted(self):
+        capability = self.load("snapshot-capability")
+        self.assertIs(cs.check_snapshot_capability(capability), capability)
+        self.assertEqual(set(capability["project"]), set(sb.PROJECT_FIELDS))
+
+    def test_the_client_sends_the_fixture_request_shapes(self):
+        requests = self.load("requests")
+        sent = []
+
+        def transport(method, url, headers, body):
+            sent.append((method, url.split("?")[0].removeprefix("https://broker"), headers, json.loads(body)))
+            if url.endswith("/broker"):
+                return cs.Response(200, {}, json.dumps(self.load("snapshot-capability")).encode())
+            if url.endswith("/plan"):
+                return cs.Response(200, {}, json.dumps(requests["plan_response"]).encode())
+            return cs.Response(200, {}, json.dumps(requests["finalize_response"]).encode())
+
+        broker = cs.Broker(token_source=lambda: "jwt", base="https://broker", transport=transport)
+        with contextlib.redirect_stdout(io.StringIO()):
+            broker.open("k" * 43, "snapshot")
+        broker.plan(requests["plan"]["dependencies"])
+        broker.finalize({"schema": "x"})
+        self.assertEqual(
+            [item[1] for item in sent],
+            [
+                "/api/confidential/broker",
+                "/api/confidential/snapshot/plan",
+                "/api/confidential/snapshot/finalize",
+            ],
+        )
+        self.assertEqual(sent[0][3], requests["broker"])
+        self.assertEqual(sent[1][3], requests["plan"])
+        self.assertEqual(set(sent[2][3]), {"descriptor"})
+        self.assertNotIn("X-Palomar-Capability", sent[0][2])
+        self.assertEqual(sent[1][2]["X-Palomar-Capability"], "c" * 43)
+        self.assertTrue(all(item[2]["Authorization"] == "Bearer jwt" for item in sent))

@@ -89,7 +89,8 @@ jobs:
       pipeline_commit: <pipeline-commit>
       challenge_sha256: ${{ inputs.challenge_sha256 }}
       request_id: ${{ inputs.request_id }}
-      execution_profile: ${{ inputs.execution_profile }}
+      # Always the confidential profile; the dispatched value is not used.
+      execution_profile: palomar-confidential-16x32-v1
       project_path: ${{ inputs.project_path }}
       challenge_path: ${{ inputs.challenge_path }}
       solution_path: ${{ inputs.solution_path }}

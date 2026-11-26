@@ -1,0 +1,12 @@
+{
+  "capability": "ccccccccccccccccccccccccccccccccccccccccccc",
+  "expires_at": "2026-11-26T12:30:00Z",
+  "object_keys": [
+    "v2/abcdef123456/snapshot/descriptor.json",
+    "v2/abcdef123456/snapshot/101-1111111111111111111111111111111111111111.bundle",
+    "v2/abcdef123456/snapshot/source-manifest.json"
+  ],
+  "operation": "restore",
+  "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "submission_id": "abcdef123456"
+}

@@ -411,29 +411,35 @@ def root_aliases(roots: list[dict[str, Any]]) -> dict[str, str]:
     return aliases
 
 
-def trusted_closure(
-    packages: list[dict[str, str]], read_root_manifest: Callable[[str, str], bytes | None]
-) -> set[str]:
-    """Names of packages that are allowlisted roots or in a root's pinned closure.
+RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
-    The same rule as the verifier's `package_allowlist`: a package is trusted
-    only if it is a root, or the root's own manifest at the submitted revision
-    names it with the same repository and revision. Anything else is `public`
-    and bundled.
+
+def trusted_closure(packages: list[dict[str, str]], roots: RootReader) -> set[str]:
+    """Names of packages that are official allowlisted roots or in such a root's closure.
+
+    The verifier's `package_allowlist` rule, applied before anything is
+    fetched for the verify job: a root counts only at a revision in its
+    official history (ancestor of the official ref, an accepted revision, or
+    a stable release tag when the root opts in), and a closure package only
+    if that root's own manifest names it with the same repository and
+    revision. Anything else is `public` and bundled, so a root commit from a
+    pull request cannot exempt a dependency from bundling. Classifying too
+    little as trusted is safe: the dependency is bundled, and the verifier
+    still applies its own root checks.
     """
-    aliases = root_aliases(allowlist_roots())
 
     def canonical(url: str) -> str:
         name = canonical_github_repository(url).full_name
-        return aliases.get(name.lower(), name).lower()
+        return roots.aliases.get(name.lower(), name).lower()
 
     trusted: set[str] = set()
     by_name = {package["name"]: package for package in packages}
     for package in packages:
-        if canonical(package["url"]) not in {value.lower() for value in aliases.values()}:
+        root = roots.root(package["url"])
+        if root is None or not roots.official(root, package["rev"]):
             continue
         trusted.add(package["name"])
-        for nested in manifest_git_packages(read_root_manifest(package["url"], package["rev"])):
+        for nested in manifest_git_packages(roots.manifest(root, package["rev"])):
             actual = by_name.get(nested["name"])
             if (
                 actual
@@ -444,45 +450,104 @@ def trusted_closure(
     return trusted
 
 
-def root_manifest_reader(work: Path, fetcher: Fetcher) -> Callable[[str, str], bytes | None]:
-    """Read an allowlisted root's lake-manifest.json with a blobless public fetch."""
+@dataclass
+class RootReader:
+    """Public, credential-free reads of allowlisted roots for classification."""
 
-    def read(url: str, rev: str) -> bytes | None:
-        repository = canonical_github_repository(url)
-        destination = work / f"root-{repository.full_name.replace('/', '-')}-{rev}"
-        if not destination.exists():
-            env = git_environment(fetcher.home)
-            init_bare(destination, env)
-            allowed = tuple(
-                item for protocol in fetcher.protocols for item in ("-c", f"protocol.{protocol}.allow=always")
-            )
-            git(
-                ["remote", "add", "origin", f"{fetcher.base}/{repository.full_name}"],
-                git_dir=destination,
-                env=env,
-            )
-            git(
-                ["fetch", "--quiet", "--no-tags", "--depth=1", "--filter=blob:none", "origin", rev],
-                git_dir=destination,
-                env=env,
-                extra_config=allowed,
-                timeout=1800,
-            )
-        env = git_environment(fetcher.home)
-        allowed = tuple(
-            item for protocol in fetcher.protocols for item in ("-c", f"protocol.{protocol}.allow=always")
+    work: Path
+    fetcher: Fetcher
+    config: list[dict[str, Any]] = field(default_factory=allowlist_roots)
+
+    @property
+    def aliases(self) -> dict[str, str]:
+        return root_aliases(self.config)
+
+    def root(self, url: str) -> dict[str, Any] | None:
+        canonical = self.aliases.get(canonical_github_repository(url).full_name.lower())
+        return next((root for root in self.config if root["repository"] == canonical), None)
+
+    def _allowed(self) -> tuple[str, ...]:
+        return tuple(
+            item
+            for protocol in self.fetcher.protocols
+            for item in ("-c", f"protocol.{protocol}.allow=always")
         )
+
+    def _repository(self, root: dict[str, Any]) -> Path:
+        destination = self.work / f"root-{root['repository'].replace('/', '-')}.git"
+        if not destination.exists():
+            env = git_environment(self.fetcher.home)
+            init_bare(destination, env)
+            git(
+                ["remote", "add", "origin", f"{self.fetcher.base}/{root['repository']}"],
+                git_dir=destination,
+                env=env,
+            )
+        return destination
+
+    def _fetch(self, destination: Path, *arguments: str) -> None:
+        if self.fetcher.check_addresses:
+            require_public_github_addresses()
+        git(
+            ["fetch", "--quiet", "--no-tags", *arguments],
+            git_dir=destination,
+            env=git_environment(self.fetcher.home),
+            extra_config=self._allowed(),
+            timeout=1800,
+        )
+
+    def official(self, root: dict[str, Any], rev: str) -> bool:
+        if rev in root.get("accepted_revisions", []):
+            return True
+        destination = self._repository(root)
+        env = git_environment(self.fetcher.home)
+        try:
+            self._fetch(
+                destination,
+                "--filter=tree:0",
+                "origin",
+                f"+{root['official_ref']}:refs/palomar/official",
+                f"+{rev}:refs/palomar/candidate",
+            )
+        except SnapshotError:
+            return False
+        try:
+            git(["merge-base", "--is-ancestor", rev, "refs/palomar/official"], git_dir=destination, env=env)
+            return True
+        except SnapshotError:
+            pass
+        if not root.get("include_semver_release_tags", False):
+            return False
+        if self.fetcher.check_addresses:
+            require_public_github_addresses()
+        listing = git(
+            ["ls-remote", "--tags", "origin"], git_dir=destination, env=env, extra_config=self._allowed()
+        ).decode()
+        for line in listing.splitlines():
+            obj, _, ref = line.partition("\t")
+            tag = ref.removeprefix("refs/tags/").removesuffix("^{}")
+            if obj == rev and RELEASE_TAG_RE.fullmatch(tag):
+                return True
+        return False
+
+    def manifest(self, root: dict[str, Any], rev: str) -> bytes | None:
+        destination = self._repository(root)
+        try:
+            self._fetch(destination, "--depth=1", "--filter=blob:none", "origin", rev)
+        except SnapshotError:
+            return None
+        if self.fetcher.check_addresses:
+            # Reading the blob may lazily fetch it from the promisor remote.
+            require_public_github_addresses()
         try:
             return git(
                 ["cat-file", "blob", f"{rev}:lake-manifest.json"],
                 git_dir=destination,
-                env=env,
-                extra_config=allowed,
+                env=git_environment(self.fetcher.home),
+                extra_config=self._allowed(),
             )
         except SnapshotError:
             return None
-
-    return read
 
 
 # --------------------------------------------------------------------------
@@ -533,12 +598,17 @@ def snapshot(
     fetcher: Fetcher,
 ) -> dict[str, Any]:
     """Fetch, describe, bundle and upload. Returns the unfinalized descriptor."""
-    capability = check_snapshot_capability(broker.open(ticket, "snapshot"))
-    token = capability["source"]["token"]
+    capability = broker.open(ticket, "snapshot")
+    # Take hold of a minted token before anything else can fail, so that it is
+    # masked and revoked whatever the rest of the response looks like.
+    source = capability.get("source") if isinstance(capability, dict) else None
+    token = source.get("token") if isinstance(source, dict) else None
+    token = token if isinstance(token, str) and token else None
     try:
         if token is not None:
             mask(token)
             mask(base64.b64encode(f"x-access-token:{token}".encode()).decode())
+        check_snapshot_capability(capability)
         return _snapshot(
             capability, token, out, work, broker=broker, identity=identity, github=github, fetcher=fetcher
         )
@@ -582,7 +652,7 @@ def _snapshot(
     if raw_manifest is None:
         raise SnapshotError("the project has no committed lake-manifest.json")
     packages = manifest_git_packages(raw_manifest)
-    trusted = trusted_closure(packages, root_manifest_reader(work, fetcher))
+    trusted = trusted_closure(packages, RootReader(work, fetcher))
     dependencies = []
     for package in packages:
         repository = canonical_github_repository(package["url"])
@@ -715,6 +785,9 @@ def restore_and_check(
         path = bundles / bundle_name(reference["key"])
         if path.stat().st_size != reference["size"] or sha256_file(path) != reference["sha256"]:
             raise SnapshotError("a bundle does not match the descriptor")
+        if reference["key"] in restored:
+            # Two package names for one repository at one revision share a bundle.
+            continue
         restored[reference["key"]] = restore_bundle(
             path, target, work / f"restored-{bundle_name(reference['key'])}", env
         )
@@ -741,7 +814,7 @@ def restore_and_check(
     if lake is None or sha256_bytes(lake) != descriptor["lake_manifest_sha256"]:
         raise SnapshotError("the restored lake-manifest.json differs from the descriptor")
     packages = manifest_git_packages(lake)
-    trusted = trusted_closure(packages, root_manifest_reader(work, fetcher))
+    trusted = trusted_closure(packages, RootReader(work, fetcher))
     expected = [
         (p["name"], p["url"], p["rev"], "trusted-root" if p["name"] in trusted else "public")
         for p in packages

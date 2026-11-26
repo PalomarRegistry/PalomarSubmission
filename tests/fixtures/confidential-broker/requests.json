@@ -1,0 +1,55 @@
+{
+  "broker": {
+    "operation": "snapshot",
+    "ticket": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+  },
+  "finalize": {
+    "descriptor": "<palomar-snapshot/1 descriptor>"
+  },
+  "finalize_response": {
+    "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "headers": {
+    "after_broker": [
+      "X-Palomar-Capability: <capability>"
+    ],
+    "all": [
+      "Authorization: Bearer <fresh GitHub OIDC JWT, aud https://submit.palomar-registry.org/confidential>"
+    ],
+    "object_put_and_get": [
+      "X-Palomar-Sha256: <64 hex>"
+    ],
+    "part_bytes": 67108864,
+    "single_put_maximum_bytes": 95000000
+  },
+  "multipart_complete": {
+    "parts": [
+      {
+        "etag": "e1",
+        "part": 1
+      }
+    ],
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "size": 200000000
+  },
+  "multipart_start": {
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "size": 200000000
+  },
+  "plan": {
+    "dependencies": [
+      {
+        "kind": "public",
+        "name": "dep",
+        "repository_id": 202,
+        "rev": "2222222222222222222222222222222222222222",
+        "url": "https://github.com/dep-owner/dep"
+      }
+    ]
+  },
+  "plan_response": {
+    "object_keys": [
+      "v2/abcdef123456/snapshot/202-2222222222222222222222222222222222222222.bundle"
+    ]
+  }
+}

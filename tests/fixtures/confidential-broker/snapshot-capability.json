@@ -1,0 +1,28 @@
+{
+  "capability": "ccccccccccccccccccccccccccccccccccccccccccc",
+  "commit": "1111111111111111111111111111111111111111",
+  "expires_at": "2026-11-26T12:30:00Z",
+  "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "object_keys": [
+    "v2/abcdef123456/snapshot/101-1111111111111111111111111111111111111111.bundle",
+    "v2/abcdef123456/snapshot/source-manifest.json"
+  ],
+  "operation": "snapshot",
+  "project": {
+    "challenge_path": "Challenge.lean",
+    "comparator_config_path": "comparator.json",
+    "lakefile_path": "lakefile.toml",
+    "lean_toolchain_path": "lean-toolchain",
+    "project_path": "",
+    "solution_path": "Solution.lean"
+  },
+  "repository_ids": [
+    101
+  ],
+  "source": {
+    "expires_at": "2026-11-26T13:00:00Z",
+    "full_name": "owner/source",
+    "token": "ghs_TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+  },
+  "submission_id": "abcdef123456"
+}

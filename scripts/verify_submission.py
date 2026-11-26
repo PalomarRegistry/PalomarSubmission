@@ -990,6 +990,29 @@ def tree_size(root: Path) -> int:
     return total
 
 
+def require_snapshot_project(report: dict[str, Any], fields: tuple[str, ...]) -> None:
+    """A confidential run verifies exactly the project its snapshot admitted.
+
+    The six paths are bound into the ticket and the snapshot descriptor; the
+    invocation's options must select the same ones, so a snapshot of one
+    project cannot be spent verifying another in the same repository.
+    """
+    if SOURCE_BUNDLES is None:
+        return
+    effective = {
+        "project_path": report.get("source", {}).get("project_path") or "",
+        "comparator_config_path": report.get("comparator", {}).get("path"),
+        "lakefile_path": report.get("lakefile", {}).get("path"),
+        "lean_toolchain_path": report.get("lean_toolchain_path"),
+        "challenge_path": report.get("challenge", {}).get("path"),
+        "solution_path": report.get("solution", {}).get("path"),
+    }
+    admitted = SOURCE_BUNDLES.descriptor["project"]
+    for field in fields:
+        if effective[field] != admitted[field]:
+            raise VerificationError(f"The {field} differs from the one this confidential snapshot admitted")
+
+
 def validate_preservable_remote_source(
     work: Path, source: dict[str, str], label: str, *, check_lean_sources: bool = False
 ) -> dict[str, Any] | None:
@@ -1723,6 +1746,9 @@ def prepare(args: argparse.Namespace) -> int:
                 "path": repository_relative_path(source, manifest_path),
                 "sha256": sha256(manifest_path),
             }
+        require_snapshot_project(
+            report, ("project_path", "comparator_config_path", "lakefile_path", "lean_toolchain_path")
+        )
         write_json(work / "metadata.json", report)
         report["status"] = "pass" if correction is not None else "pending"
         report["stage"] = "correction-validation" if correction is not None else "prepared"
@@ -6289,6 +6315,7 @@ def execute(args: argparse.Namespace) -> int:
                 "sha256": sha256(solution_source),
             }
         )
+        require_snapshot_project(report, ("challenge_path", "solution_path"))
         report["stage"] = "dependency-provenance"
         guarded_write()
         packages = manifest_packages(source)

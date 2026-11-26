@@ -27,6 +27,7 @@ PIPELINE_REF = "${{ inputs.pipeline_commit || github.workflow_sha }}"
 # Inputs a reusable caller may set that a dispatch never carries: the pipeline
 # pin, and the confidential snapshot's bundles and digest.
 CALL_ONLY = {"pipeline_commit", "source_bundle_artifact", "snapshot_sha256"}
+CONFIDENTIAL_PROFILE = "palomar-confidential-16x32-v1"
 CREDENTIALED = ("confidential-snapshot.yml", "confidential-validate.yml", "confidential-restore.yml")
 
 
@@ -190,7 +191,10 @@ class CanonicalCallerTemplateTests(unittest.TestCase):
                 self.assertEqual(forwarded.pop("pipeline_commit"), "c" * 40)
                 for field in ("source_bundle_artifact", "snapshot_sha256"):
                     self.assertEqual(forwarded.pop(field), f"${{{{ needs.{need}.outputs.{field} }}}}")
-                accepted = set(triggers(parsed(called))["workflow_call"]["inputs"]) - CALL_ONLY
+                # Contract v2, 5.1: never the dispatched profile.
+                self.assertEqual(forwarded.pop("execution_profile"), CONFIDENTIAL_PROFILE)
+                accepted = set(triggers(parsed(called))["workflow_call"]["inputs"])
+                accepted -= CALL_ONLY | {"execution_profile"}
                 self.assertEqual(forwarded, {field: f"${{{{ inputs.{field} }}}}" for field in accepted})
 
     def test_only_credentialed_jobs_hold_an_oidc_permission(self):
@@ -272,6 +276,26 @@ class CredentialedWorkflowTests(unittest.TestCase):
                     s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@")
                 ]
                 self.assertEqual([s["with"]["retention-days"] for s in uploads], [1])
+
+    def test_bundle_runs_need_the_confidential_profile_and_keep_artifacts_one_day(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                profile = parsed(name)["jobs"]["profile"]["steps"]
+                guard = next(
+                    s for s in profile
+                    if s.get("name") == "Require the confidential profile for snapshot runs"
+                )
+                self.assertLess(profile.index(guard), len(profile) - 1)
+                self.assertIn(CONFIDENTIAL_PROFILE, guard["run"])
+                self.assertEqual(
+                    guard["if"], "inputs.snapshot_sha256 != '' || inputs.source_bundle_artifact != ''"
+                )
+                for step in steps(parsed(name)):
+                    if str(step.get("uses", "")).startswith("actions/upload-artifact@"):
+                        self.assertRegex(
+                            str(step["with"]["retention-days"]),
+                            r"^\$\{\{ inputs\.snapshot_sha256 != '' && 1 \|\| [0-9]+ \}\}$",
+                        )
 
     def test_verify_and_render_take_bundles_only_when_called_with_them(self):
         for name in WORKFLOWS:
