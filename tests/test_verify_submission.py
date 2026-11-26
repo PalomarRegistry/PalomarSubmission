@@ -823,6 +823,38 @@ class VerifySubmissionTests(unittest.TestCase):
         os.environ.get("PALOMAR_TEST_LICENSEE"),
         "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
     )
+    def test_real_licensee_rejects_licences_disguised_by_the_supplement(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        fixtures = REPOSITORY_ROOT / "tests" / "fixtures" / "licences"
+        no_derivatives = (fixtures / "CC-BY-NC-ND-4.0.legalcode.txt").read_text(encoding="utf-8")
+        section = no_derivatives.index("Section 3")
+        mit = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
+        disguised = {
+            # Within the similarity threshold of CC-BY-NC-4.0, but still
+            # titled and worded as a NoDerivatives licence.
+            "edited NoDerivatives": no_derivatives[:section]
+            + "The Licensor does not grant permission to Share Adapted Material under the "
+            "terms and conditions of this Public License.\n\n"
+            + no_derivatives[section:],
+            # A supplementary licence identifier must not be stripped as if
+            # it were the title of the MIT text below it.
+            "restricted MIT": "CC-BY-NC-4.0; you may not use the Software for commercial "
+            "purposes.\n" + mit,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for name, text in disguised.items():
+                license_path.write_text(text, encoding="utf-8")
+                with (
+                    self.subTest(name=name),
+                    self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+                ):
+                    detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
     def test_real_licensee_detects_each_supplementary_licence(self):
         bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
         supplement = REPOSITORY_ROOT / "licence-supplement" / "_licenses"

@@ -72,9 +72,47 @@ module PalomarLicenceSupplement
       end
     end
   end
+
+  # Licensee strips any leading line that starts with a known licence title
+  # before comparing texts. Supplementary titles are kept out of that pattern,
+  # so that adding them cannot hide a line such as "CC-BY-NC-4.0; no commercial
+  # use" at the top of an otherwise standard MIT text. Supplementary texts are
+  # matched with their titles in place instead.
+  module TitleMethods
+    def title_regex
+      @title_regex ||= begin
+        licenses = Licensee::License.all(hidden: true, pseudo: false).reject do |license|
+          PalomarLicenceSupplement.include?(license)
+        end
+        titles = licenses.map(&:title_regex)
+        without_versions = licenses.map do |license|
+          next if license.title == license.name_without_version
+
+          Regexp.new Regexp.escape(license.name_without_version), "i"
+        end
+        titles.concat(without_versions.compact)
+        /#{Licensee::ContentHelper::START_REGEX}\(?(?:the )?#{Regexp.union titles}.*?$/i
+      end
+    end
+  end
+
+  # A file that names a NoDerivatives licence anywhere, by title, SPDX-style
+  # identifier, or legal-code URL, is never accepted, whatever it matches.
+  # Otherwise a NonCommercial-NoDerivatives text edited to within the similarity
+  # threshold of a NonCommercial licence would be reported as that licence.
+  NO_DERIVATIVES = %r{
+    attribution[\s-]*(?:non[\s-]*commercial[\s-]*)?no[\s-]*deriv
+    | licen[cs]es/by-(?:nc-)?nd\b
+    | \bcc[\s-]+by[\s-]+(?:nc[\s-]+)?nd\b
+  }xi
+
+  def self.names_no_derivatives?(path)
+    File.read(path, encoding: "utf-8").match?(NO_DERIVATIVES)
+  end
 end
 
 Licensee::License.singleton_class.prepend(PalomarLicenceSupplement::ClassMethods)
+Licensee::ContentHelper.singleton_class.prepend(PalomarLicenceSupplement::TitleMethods)
 Licensee::License.prepend(PalomarLicenceSupplement::InstanceMethods)
 Licensee::Matchers::Dice.prepend(PalomarLicenceSupplement::DiceMethods)
 
@@ -86,6 +124,7 @@ project = Licensee.project(
   filesystem: true
 )
 matched_files = project.matched_files.select { |matched_file| matched_file.directory == "." }
+matched_files = [] if PalomarLicenceSupplement.names_no_derivatives?(ARGV.fetch(0))
 licenses = matched_files.map(&:license).compact.uniq
 
 puts JSON.generate(
