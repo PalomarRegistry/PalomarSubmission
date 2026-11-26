@@ -14,6 +14,7 @@ from unittest import mock
 import yaml
 
 import scripts.submission_contract as submission_contract
+import scripts.update_licence_supplement as update_licence_supplement
 import scripts.verify_submission as verifier
 from scripts.submission_contract import (
     OPTIONAL_FIELDS,
@@ -768,6 +769,102 @@ class VerifySubmissionTests(unittest.TestCase):
             (root / "LICENSES").mkdir()
             shutil.copy2(REPOSITORY_ROOT / "LICENSE", root / "LICENSES" / "LICENSE")
             self.assertEqual(detect_spdx_identifier(root / "LICENSE", bundle), "MIT")
+
+    def test_licence_supplement_matches_its_generator(self):
+        supplement = REPOSITORY_ROOT / "licence-supplement"
+        identifiers = update_licence_supplement.SUPPLEMENTARY_LICENCES
+        self.assertEqual(
+            sorted(path.name for path in (supplement / "_licenses").iterdir()),
+            sorted(f"{identifier.lower()}.txt" for identifier in identifiers),
+        )
+        self.assertEqual(
+            sorted(path.name for path in (supplement / "license-list-XML").iterdir()),
+            sorted(f"{identifier}.xml" for identifier in identifiers),
+        )
+        for identifier in identifiers:
+            with self.subTest(identifier=identifier):
+                self.assertNotIn("-ND", identifier)
+                self.assertNotRegex(identifier, r"-1\.0\b")
+                text = (supplement / "_licenses" / f"{identifier.lower()}.txt").read_text(
+                    encoding="utf-8"
+                )
+                front_matter = yaml.safe_load(text.split("---\n", 2)[1])
+                self.assertEqual(front_matter["spdx-id"], identifier)
+                xml = (supplement / "license-list-XML" / f"{identifier}.xml").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn(f'licenseId="{identifier}"', xml)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_creative_commons_legal_code(self):
+        # Verbatim legalcode.txt files from creativecommons.org, as submitters
+        # usually copy them into LICENSE.
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        fixtures = REPOSITORY_ROOT / "tests" / "fixtures" / "licences"
+        accepted = ("CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-NC-3.0")
+        rejected = ("CC-BY-NC-ND-4.0", "CC-BY-ND-4.0", "CC-BY-NC-ND-3.0", "CC-BY-ND-3.0")
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for identifier in accepted + rejected:
+                shutil.copyfile(fixtures / f"{identifier}.legalcode.txt", license_path)
+                with self.subTest(identifier=identifier):
+                    if identifier in accepted:
+                        self.assertEqual(
+                            detect_spdx_identifier(license_path, bundle), identifier
+                        )
+                    else:
+                        with self.assertRaisesRegex(LicenseValidationError, "unambiguous"):
+                            detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_rejects_licences_disguised_by_the_supplement(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        fixtures = REPOSITORY_ROOT / "tests" / "fixtures" / "licences"
+        no_derivatives = (fixtures / "CC-BY-NC-ND-4.0.legalcode.txt").read_text(encoding="utf-8")
+        section = no_derivatives.index("Section 3")
+        mit = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
+        disguised = {
+            # Within the similarity threshold of CC-BY-NC-4.0, but still
+            # titled and worded as a NoDerivatives licence.
+            "edited NoDerivatives": no_derivatives[:section]
+            + "The Licensor does not grant permission to Share Adapted Material under the "
+            "terms and conditions of this Public License.\n\n"
+            + no_derivatives[section:],
+            # A supplementary licence identifier must not be stripped as if
+            # it were the title of the MIT text below it.
+            "restricted MIT": "CC-BY-NC-4.0; you may not use the Software for commercial "
+            "purposes.\n" + mit,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for name, text in disguised.items():
+                license_path.write_text(text, encoding="utf-8")
+                with (
+                    self.subTest(name=name),
+                    self.assertRaisesRegex(LicenseValidationError, "unambiguous"),
+                ):
+                    detect_spdx_identifier(license_path, bundle)
+
+    @unittest.skipUnless(
+        os.environ.get("PALOMAR_TEST_LICENSEE"),
+        "set PALOMAR_TEST_LICENSEE to a Bundler executable for the detector integration test",
+    )
+    def test_real_licensee_detects_each_supplementary_licence(self):
+        bundle = Path(os.environ["PALOMAR_TEST_LICENSEE"])
+        supplement = REPOSITORY_ROOT / "licence-supplement" / "_licenses"
+        with tempfile.TemporaryDirectory() as directory:
+            license_path = Path(directory) / "LICENSE"
+            for identifier in update_licence_supplement.SUPPLEMENTARY_LICENCES:
+                text = (supplement / f"{identifier.lower()}.txt").read_text(encoding="utf-8")
+                license_path.write_text(text.split("---\n", 2)[2], encoding="utf-8")
+                with self.subTest(identifier=identifier):
+                    self.assertEqual(detect_spdx_identifier(license_path, bundle), identifier)
 
     def test_phase_timeout_is_capped_by_global_deadline(self):
         with (
