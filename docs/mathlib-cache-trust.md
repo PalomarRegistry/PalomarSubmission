@@ -176,9 +176,17 @@ uses the following staged path in
    equal the unique key set, with a hard limit of 10,000 archives.
 4. A verifier-selected `curl`, outside candidate execution but still inside a
    resource-limited sandbox that can write only the cache directory, fetches
-   exactly those names from
-   the fixed official `mathlib4-master` container, with the legacy `mathlib4`
-   container as a fallback. It runs under
+   exactly those names from a fixed chain of official containers. It first
+   reads the master-only `mathlib4-master` container on
+   `https://cache.mathlib.org`. Mathlib's own cache client has read from that
+   host by default since 2 September 2026, has read only its `mathlib4-master`
+   container for the canonical repository since 25 September 2026, and stopped
+   reading Azure on 19 October 2026, so this is the container that submission
+   verification's `lake exe cache get` uses for current revisions. Archives
+   still missing fall back to the frozen Azure `mathlib4-master` container
+   and then the legacy flat `mathlib4` container, which hold artifacts that
+   master CI published before those cutovers. Fork containers are never read.
+   It runs under
    `env -i`, invokes `curl --disable` so the preserved `HOME` cannot supply a
    `.curlrc`, sends no cache credential, and permits only HTTPS. An
    `RLIMIT_FSIZE` applied by the supervisor makes the 256 MiB per-file limit
@@ -199,7 +207,7 @@ network access is restricted to the disposable legacy ProofWidgets source and
 release target whose exact revision is bound to the already accepted Mathlib
 manifest. The `leantar` release archive is pinned by digest, but none of these
 controls makes the downloaded ProofWidgets release, extracted `leantar` binary,
-or fixed Azure bytes semantically equivalent to its pinned source.
+or fixed-host cache bytes semantically equivalent to its pinned source.
 
 The mechanical-verification artifact records the source/dependency revisions
 and workflow URL. The render artifact additionally records cache archive counts
