@@ -46,7 +46,10 @@ artifact as hostile. Its security-relevant sequence is:
    workspace, then freeze the high-trust closure. Recreate every root-owned Lake
    tree before building a qualified root, without granting it write access to
    the Mathlib-owned closure or its verifier-created links, then freeze its
-   output.
+   output. The build names only the root's modules imported by a submitted
+   source or an untrusted dependency, so Lake compiles their import closure
+   rather than the whole root; a missed import fails the candidate build,
+   which cannot write the frozen output.
 5. Compile `Challenge.lean` directly with trusted Lean against frozen
    allowlisted output. Snapshot its `Challenge.olean` and audit Lean's source
    dependency list and source bytes before candidate Challenge/Solution

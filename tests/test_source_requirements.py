@@ -115,6 +115,22 @@ class SourceRequirementsTests(unittest.TestCase):
                     self.assertEqual(caught.exception.code, code)
                     self.assertIn(str(root / "Unused.lean"), run.call_args.args[0])
 
+    def test_compiler_headers_report_the_union_of_written_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "A.lean").write_text("module\n")
+            (root / "B.lean").write_text("module\n")
+            payload = {"imports": [
+                {"result": {"isModule": True, "imports": [{"module": "Init"}, {"module": "Dep.X"}]}},
+                {"result": {"isModule": True, "imports": [{"module": "Dep.Y"}, {"module": "Dep.X"}]}},
+            ]}
+            with mock.patch.object(verifier, "sandboxed_run", return_value=
+                                   subprocess.CompletedProcess([], 0, json.dumps(payload), "")):
+                imports = verifier.confirm_source_modules(
+                    root, source=root, lean=Path("/lean"), environment={},
+                    writable_directories=[], readable_paths=[], executable_paths=[], tools={})
+            self.assertEqual(imports, frozenset({"Dep.X", "Dep.Y"}))
+
     @unittest.skipUnless(os.environ.get("PALOMAR_TEST_LEAN"), "requires Lean header parser")
     def test_real_compiler_batch_accepts_valid_module_headers(self):
         with tempfile.TemporaryDirectory() as directory:
