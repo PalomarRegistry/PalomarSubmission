@@ -19,7 +19,13 @@
         "221bb56a017bb794421eac4fa543d7a5e85add75"
       ],
       "include_pinned_manifest_closure": true,
-      "trust_level": "qualified"
+      "trust_level": "qualified",
+      "trusted_lake_cache": {
+        "repository": "TauCetiProject/TauCeti",
+        "revision_endpoint": "https://cache.taucetiproject.org/trusted/revisions",
+        "artifact_endpoint": "https://cache.taucetiproject.org/trusted/artifacts",
+        "window": 2048
+      }
     },
     {
       "repository": "leanprover/cslib",

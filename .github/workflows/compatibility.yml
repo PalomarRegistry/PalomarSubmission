@@ -82,7 +82,7 @@ jobs:
             cold_build=false
             while IFS= read -r -d '' path; do
               case "$path" in
-                README.md|SECURITY.md|LICENSE|docs/comparator-declaration-closure.md|docs/launch-security-review.md|docs/mathlib-cache-trust.md|taxonomies/README.md|taxonomies/LICENSE.md)
+                README.md|SECURITY.md|LICENSE|docs/comparator-declaration-closure.md|docs/launch-security-review.md|docs/mathlib-cache-trust.md|docs/tauceti-cache-trust.md|taxonomies/README.md|taxonomies/LICENSE.md)
                   ;;
                 *)
                   cold_build=true

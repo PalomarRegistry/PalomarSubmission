@@ -18,6 +18,7 @@ EXEMPT_PROSE_PATHS = (
     "docs/comparator-declaration-closure.md",
     "docs/launch-security-review.md",
     "docs/mathlib-cache-trust.md",
+    "docs/tauceti-cache-trust.md",
     "taxonomies/README.md",
     "taxonomies/LICENSE.md",
 )

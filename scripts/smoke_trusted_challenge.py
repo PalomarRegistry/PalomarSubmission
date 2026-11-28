@@ -48,6 +48,7 @@ from scripts.verify_submission import (  # noqa: E402
     run,
     sandboxed_run,
     sha256,
+    strip_trusted_lake_cache_environment,
     system_readable_paths,
     tool_snapshot,
     toolchain_tools,
@@ -73,7 +74,7 @@ def main() -> int:
     bwrap = configure_bwrap(args.bwrap)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
-    environment = os.environ.copy()
+    environment = strip_trusted_lake_cache_environment(os.environ.copy())
     environment.pop("LAKE_PKG_URL_MAP", None)
 
     lean_command = shutil.which("lean", path=environment["PATH"])

@@ -422,7 +422,10 @@ to replace an object is therefore able to affect the compiled definitions used
 by Palomar. This is an explicit trust decision, not a property established by
 the sandbox. The verified implementation details and residual operational
 questions are recorded in
-[`docs/mathlib-cache-trust.md`](docs/mathlib-cache-trust.md).
+[`docs/mathlib-cache-trust.md`](docs/mathlib-cache-trust.md). The same decision
+covers Tau Ceti's trusted cache channel, which only a clean, cache-free build of
+Tau Ceti's `main` publishes; its producers, storage and the way Palomar reads it
+are recorded in [`docs/tauceti-cache-trust.md`](docs/tauceti-cache-trust.md).
 
 The submission server at <https://submit.palomar-registry.org> belongs in that
 list too, for part of the answer rather than all of it. It chooses the
