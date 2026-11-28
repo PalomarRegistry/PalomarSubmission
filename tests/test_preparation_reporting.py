@@ -12,6 +12,8 @@ from pathlib import Path
 from scripts import workflow_report
 
 ROOT = Path(__file__).resolve().parents[1]
+# Finalizer arguments that the workflow supplies from the Actions context.
+RUN = {"workflow_url": "run", "run_repository": "owner/runs", "pipeline_commit": "c" * 40}
 
 
 class PreparationReportingTests(unittest.TestCase):
@@ -79,7 +81,8 @@ class PreparationReportingTests(unittest.TestCase):
                         "GITHUB_STEP_SUMMARY": str(summary),
                         "PALOMAR_INPUTS": json.dumps(inputs),
                         "PALOMAR_STEPS": json.dumps(steps),
-                        "PALOMAR_WORKFLOW_URL": "https://example.invalid/run",
+                        "PALOMAR_WORKFLOW_URL": "https://github.com/owner/runs/actions/runs/1",
+                        "PALOMAR_RUN_REPOSITORY": "owner/runs", "PALOMAR_PIPELINE_COMMIT": "c" * 40,
                     }
                     prepared = subprocess.run([
                         sys.executable, str(ROOT / "scripts/verify_submission.py"), "prepare",
@@ -103,6 +106,7 @@ class PreparationReportingTests(unittest.TestCase):
                     self.assertEqual(after["status"], "fail")
                     self.assertEqual(after["phase"], "preparation")
                     self.assertEqual(after["stage"], "intake")
+                    self.assertEqual(after["run_repository"], "owner/runs")
                     diagnostic = after["diagnostics"][0]
                     self.assertEqual(diagnostic["field"], field)
                     self.assertEqual(diagnostic["owner"], "submitter")
@@ -134,7 +138,7 @@ class PreparationReportingTests(unittest.TestCase):
                     forged["submission"]["submission_id"] = value
                 else:
                     forged["source"][field] = value
-                result = workflow_report.finalize(forged, inputs, {}, workflow_url="run")
+                result = workflow_report.finalize(forged, inputs, {}, **RUN)
                 self.assertEqual(result["status"], "fail")
                 self.assertFalse(workflow_report.gate(
                     result, "full", "true", {"upload1": {"outcome": "success"}},
@@ -148,11 +152,11 @@ class PreparationReportingTests(unittest.TestCase):
             {"status": []},
         ):
             with self.subTest(mismatch=change):
-                result = workflow_report.finalize({**report, **change}, self.inputs, {}, workflow_url="run")
+                result = workflow_report.finalize({**report, **change}, self.inputs, {}, **RUN)
                 self.assertEqual(result["status"], "error")
         for schema in (1, 2):
             result = workflow_report.finalize(
-                {**report, "schema_version": schema}, self.inputs, {}, workflow_url="run",
+                {**report, "schema_version": schema}, self.inputs, {}, **RUN,
             )
             self.assertEqual(result["status"], "pass")
             self.assertEqual(result["schema_version"], schema)
@@ -165,13 +169,13 @@ class PreparationReportingTests(unittest.TestCase):
         }
         for attempt in ("bad", "A" * 32, 7):
             result = workflow_report.finalize(
-                report, {**self.inputs, "execution_attempt": attempt}, {}, workflow_url="run",
+                report, {**self.inputs, "execution_attempt": attempt}, {}, **RUN,
             )
             self.assertEqual(result["status"], "fail")
             self.assertEqual(result["diagnostics"][0]["field"], "execution_attempt")
             self.assertNotIn("execution_attempt", result)
         valid = workflow_report.finalize(
-            report, {**self.inputs, "execution_attempt": "b" * 32}, {}, workflow_url="run",
+            report, {**self.inputs, "execution_attempt": "b" * 32}, {}, **RUN,
         )
         self.assertEqual(valid["status"], "pass")
         self.assertEqual(valid["execution_attempt"], "b" * 32)
@@ -180,7 +184,7 @@ class PreparationReportingTests(unittest.TestCase):
         }))
         result = workflow_report.finalize(
             None, {**self.inputs, "request_id": "bad"},
-            {"dependencies": {"outcome": "failure"}}, workflow_url="run",
+            {"dependencies": {"outcome": "failure"}}, **RUN,
         )
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["diagnostics"][0]["field"], "request_id")
@@ -217,7 +221,9 @@ class PreparationReportingTests(unittest.TestCase):
                 "finalize", "--report", str(destination),
             ], cwd=directory, env={
                 **os.environ, "PALOMAR_INPUTS": json.dumps(self.inputs), "PALOMAR_STEPS": "{}",
-                "PALOMAR_WORKFLOW_URL": "run", "GITHUB_STEP_SUMMARY": str(directory / "summary.md"),
+                "PALOMAR_WORKFLOW_URL": "https://github.com/owner/runs/actions/runs/1",
+                "PALOMAR_RUN_REPOSITORY": "owner/runs", "PALOMAR_PIPELINE_COMMIT": "c" * 40,
+                "GITHUB_STEP_SUMMARY": str(directory / "summary.md"),
             }, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(result.stdout.splitlines()), 10)

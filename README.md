@@ -135,6 +135,27 @@ their Actions job logs to correct the profile or pinned pipeline revision.
 The `inputs` context is materialized as the verifier's request for either trigger,
 so a caller's push or pull-request event cannot replace the supplied inputs.
 
+[`render-challenge.yml`](.github/workflows/render-challenge.yml) is callable
+the same way, with the same inputs as its dispatch plus `pipeline_commit`.
+Palomar's private confidential runs repository calls both workflows, so their
+runs, logs and artifacts stay in that repository. Neither workflow's run name
+contains the source repository or commit. Each job checks out
+PalomarSubmission at the pinned pipeline commit rather than reading the
+caller, and every mechanical and render report records `run_repository`,
+the repository whose Actions run produced it, beside its `workflow_url`.
+A `uses:` pin fixes only the workflow file, and the jobs execute the scripts at
+`pipeline_commit`, so mechanical reports also record `pipeline_commit` (render
+reports already record it as `renderer_commit`). Palomar accepts a called run
+only when that revision equals the run's referenced workflow SHA.
+
+The confidential callers themselves are kept here, in
+`templates/confidential-callers/`, with the placeholder `<pipeline-commit>`
+standing for the one commit used both in `uses:` and as `pipeline_commit`.
+PalomarConfidentialRuns copies them with that commit substituted; the broker
+and the reviewer substitute the placeholder back and compare the result with
+`templates/confidential-callers/SHA256SUMS` at the pinned commit. Change a
+template here first, then the broker's recorded digest, then the copies.
+
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely
 continues into the expensive toolchain and proof steps after preparation says

@@ -20,9 +20,13 @@ if __package__ in {None, ""}:
 
 from scripts.workflow_inputs import (  # noqa: E402
     EXECUTION_ATTEMPT_RE,
+    SHA_RE,
     WorkflowInputError,
     report_identity,
     request_identity,
+)
+from scripts.workflow_inputs import (
+    run_repository as checked_run_repository,
 )
 
 MAX_REPORT_BYTES = 4 * 1024 * 1024
@@ -42,7 +46,15 @@ SETUP_STEPS = (
 )
 
 
-def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> dict:
+def finalize(
+    report: Any,
+    inputs: dict,
+    steps: dict,
+    *,
+    workflow_url: str,
+    run_repository: str,
+    pipeline_commit: str,
+) -> dict:
     repository = inputs.get("repository", "")
     commit = inputs.get("commit", "")
     identifier = inputs.get("request_id", "")
@@ -143,6 +155,14 @@ def finalize(report: Any, inputs: dict, steps: dict, *, workflow_url: str) -> di
         }:
             result["phase"] = "preparation"
     result["workflow_url"] = workflow_url
+    # The repository whose Actions run produced this report: PalomarSubmission
+    # for a dispatch, the caller for a reusable call. Readers bind the run's
+    # origin to this field instead of assuming PalomarSubmission.
+    result["run_repository"] = run_repository
+    # The PalomarSubmission revision whose scripts produced this report. A
+    # reusable call's `uses:` pins only the workflow file, so readers require
+    # this to equal the run's referenced workflow SHA.
+    result["pipeline_commit"] = pipeline_commit
     attempt = inputs.get("execution_attempt", "")
     if isinstance(attempt, str) and EXECUTION_ATTEMPT_RE.fullmatch(attempt):
         result["execution_attempt"] = attempt
@@ -227,7 +247,15 @@ def main() -> int:
                 # Plain output, never interpolate candidate text into workflow commands.
                 print(json.dumps(str(error)[:2000]))
         return 0 if ok else 1
-    result = finalize(report, inputs, steps, workflow_url=os.environ["PALOMAR_WORKFLOW_URL"])
+    workflow_url = os.environ["PALOMAR_WORKFLOW_URL"]
+    origin = checked_run_repository(os.environ["PALOMAR_RUN_REPOSITORY"], workflow_url)
+    pipeline_commit = os.environ["PALOMAR_PIPELINE_COMMIT"]
+    if not SHA_RE.fullmatch(pipeline_commit):
+        raise SystemExit("pipeline commit must be a full lowercase commit SHA")
+    result = finalize(
+        report, inputs, steps,
+        workflow_url=workflow_url, run_repository=origin, pipeline_commit=pipeline_commit,
+    )
     temporary = args.report.with_suffix(".finalizing.json")
     with temporary.open("x", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
