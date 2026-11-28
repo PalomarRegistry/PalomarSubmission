@@ -81,22 +81,23 @@ qualified root after its Lake state is reset and its exact manifest closure is
 linked. For a root with `trusted_lake_cache`, before the usual build of the
 imported modules:
 
-1. It lists canonical-branch revisions near the pin from the local Git object
-   store: the pin's first-parent ancestors and the fetched `main` head's
-   first-parent descendants of the pin, nearest first, up to the configured
-   window (2,048 each way, about a day and a half of Tau Ceti commits).
-2. A verifier-selected `curl`, run under `env -i` with `--disable`, HTTPS only,
+1. If the import closure, estimated from the root's import headers, has fewer
+   than 750 modules, it skips the cache and builds from source: compiling
+   that many modules is faster than fetching a map's archives (about 0.17 s per module
+   from source on the default 16x32 runner, against about two minutes to fetch
+   and stage a whole map). The estimate only chooses the faster route.
+2. Otherwise it lists canonical-branch revisions near the pin, nearest first:
+   the pin's first-parent ancestors, from a commit-only fetch of the canonical
+   repository, and its first-parent descendants on the `main` head that
+   provenance checking already fetched, up to the configured window (2,048 each
+   way, about a day and a half of Tau Ceti commits).
+3. A verifier-selected `curl`, run under `env -i` with `--disable`, HTTPS only,
    inside the same bubblewrap and cgroup boundary with only one fresh
    directory writable, fetches those revisions' maps for the root's own
    `lean-toolchain` scope. It keeps the nearest ancestor and nearest descendant
    that have one, merging their entries. Maps that are oversized or not plain
    module-archive maps are ignored.
-3. If the import closure, estimated from the root's import headers, has fewer
-   than 750 modules, it stops here and builds from source: compiling that many
-   modules is faster than fetching a map's archives (about 0.17 s per module
-   from source on the default 16x32 runner, against about two minutes to fetch
-   and stage a whole map). The estimate only chooses the faster route.
-4. Otherwise `curl` fetches every archive the merged map names from the trusted
+4. `curl` then fetches every archive the merged map names from the trusted
    artifact endpoint into a fresh Lake cache directory. Unexpected file names,
    links, special files or sizes fail closed; the 256 MiB per-file and 16 GiB
    total caps bound the downloads.
