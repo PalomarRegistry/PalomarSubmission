@@ -5,9 +5,10 @@ run-name: Verify ${{ inputs.request_id }}${{ inputs.execution_attempt && format(
 
 # PalomarConfidentialRuns' verify.yml is this file, kept canonically in
 # PalomarSubmission's templates/confidential-callers/, with one
-# PalomarSubmission commit substituted for both placeholders. The reviewer
-# accepts a run only if the caller is byte-for-byte that substitution, so
-# change the template here, never the copy. The source is the server's
+# PalomarSubmission commit substituted for both placeholders.
+# PalomarConfidentialRuns' contract test requires the copy to be
+# byte-for-byte that substitution, so change the template here, never the
+# copy. The source is the server's
 # tarball of the commit (source_url, source_sha256), never a checkout, and
 # the run stops while the submission's tombstone_url answers anything but 404.
 on:

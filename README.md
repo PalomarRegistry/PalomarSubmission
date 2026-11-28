@@ -151,8 +151,8 @@ only when that revision equals the run's referenced workflow SHA.
 The confidential callers themselves are kept here, in
 `templates/confidential-callers/`, with the placeholder `<pipeline-commit>`
 standing for the one commit used both in `uses:` and as `pipeline_commit`.
-PalomarConfidentialRuns copies them with that commit substituted; the
-reviewer substitutes the placeholder back and compares the result with
+PalomarConfidentialRuns copies them with that commit substituted, and its
+contract test substitutes the placeholder back and compares the result with
 `templates/confidential-callers/SHA256SUMS` at the pinned commit. Change a
 template here first, then the copies.
 
@@ -163,7 +163,8 @@ the tarball of the commit that the submission server stored at intake;
 the submission's withdrawal tombstone. The job refuses a tarball with any other
 digest, unpacks it without its top-level directory (which GitHub names after
 the repository), and commits the whole tree to a fresh Git repository so the
-tracked-file and attribute checks still apply. It checks the tombstone before
+tracked-file and attribute checks still apply; the mechanical report records
+the tarball's digest as `source_sha256`. It checks the tombstone before
 starting and before every upload, and continues only on HTTP 404; any other
 answer, including an expired URL, stops the run. A confidential run writes no
 Actions cache and no job summary.

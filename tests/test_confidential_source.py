@@ -323,6 +323,7 @@ class VerifierSourceTests(unittest.TestCase):
         clone.assert_called_once_with("https://github.com/owner/repo", "b" * 40, root / "work" / "source")
         materialize.assert_not_called()
         self.assertEqual(report["errors"], ["source stage reached"])
+        self.assertNotIn("source_sha256", report)
 
     def test_public_run_with_blank_call_inputs_clones_github(self):
         # A reusable call from a public preflight caller sends the defaults.
@@ -340,6 +341,7 @@ class VerifierSourceTests(unittest.TestCase):
         self.assertIn(report["status"], {"fail", "error"})
         self.assertIn("Confidential source tarball does not match source_sha256", report["errors"])
         self.assertFalse((root / "work" / "source").exists())
+        self.assertNotIn("source_sha256", report)
         self.assertNotIn("secret", json.dumps(report))
 
     def test_confidential_run_unpacks_the_tarball_instead_of_cloning(self):
@@ -351,6 +353,7 @@ class VerifierSourceTests(unittest.TestCase):
             )
         clone.assert_not_called()
         self.assertEqual(tracked(root / "work" / "source"), ["lakefile.toml"])
+        self.assertEqual(report["source_sha256"], hashlib.sha256(data).hexdigest())
         # The run went on to the metadata checks on the unpacked tree.
         self.assertNotIn("Confidential", json.dumps(report["errors"]))
         self.assertNotIn("secret", json.dumps(report))

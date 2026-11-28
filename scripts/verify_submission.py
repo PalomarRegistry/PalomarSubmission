@@ -1414,6 +1414,9 @@ def prepare(args: argparse.Namespace) -> int:
             confidential_source.materialize(
                 confidential["source_url"], confidential["source_sha256"], source
             )
+            # Evidence that this run verified the tarball the State record
+            # names; the reviewer requires the two to agree.
+            report["source_sha256"] = confidential["source_sha256"]
         validate_preservable_git_checkout(source, "submitted source")
         size = tree_size(source)
         if size > MAX_SOURCE_BYTES:
