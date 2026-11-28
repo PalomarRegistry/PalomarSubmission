@@ -1,0 +1,6 @@
+name = "PalomarTauCetiMeasure"
+
+[[require]]
+name = "TauCeti"
+git = "https://github.com/TauCetiProject/TauCeti"
+rev = "d91980bdc255e6e50506be147ad9bcb88eb9fcc0"
