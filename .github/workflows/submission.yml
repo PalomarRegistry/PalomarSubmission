@@ -50,6 +50,24 @@ on:
         required: false
         default: "{}"
         type: string
+      # Confidential runs only, and only through a call: the source is the
+      # server's tarball of the commit, never a GitHub checkout. Blank for
+      # every public run.
+      source_url:
+        description: Presigned HTTPS URL of the confidential source tarball (blank for public runs)
+        required: false
+        default: ""
+        type: string
+      source_sha256:
+        description: Expected SHA-256 of the confidential source tarball
+        required: false
+        default: ""
+        type: string
+      tombstone_url:
+        description: Presigned HTTPS URL of the submission's withdrawal tombstone; only 404 lets the run continue
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -144,6 +162,13 @@ jobs:
           path: pipeline
           persist-credentials: false
 
+      - name: Check confidential withdrawal tombstone
+        id: withdrawal
+        if: inputs.source_url
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         id: python
@@ -155,8 +180,18 @@ jobs:
         id: ruby
         with:
           ruby-version: "3.3.12"
-          bundler-cache: true
+          # A confidential run writes no Actions cache.
+          bundler-cache: ${{ !inputs.source_url }}
           working-directory: pipeline
+
+      - name: Install Ruby gems without a cache
+        id: gems
+        if: inputs.source_url
+        working-directory: pipeline
+        run: |
+          bundle config set --local deployment true
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4
 
       - name: Install verifier dependencies
         id: dependencies
@@ -252,10 +287,17 @@ jobs:
           PALOMAR_PIPELINE_COMMIT: ${{ inputs.pipeline_commit || github.workflow_sha }}
         run: python3 pipeline/scripts/workflow_report.py finalize --report "$RUNNER_TEMP/mechanical-report.json"
 
+      - name: Check confidential withdrawal tombstone before report upload
+        id: tombstone1
+        if: always() && inputs.source_url
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - name: Upload bounded mechanical report
         id: upload1
         continue-on-error: true
-        if: always()
+        if: always() && (!inputs.source_url || steps.tombstone1.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
@@ -267,10 +309,17 @@ jobs:
         if: always() && steps.upload1.outcome == 'failure'
         run: sleep 5
 
+      - name: Check confidential withdrawal tombstone before report upload
+        id: tombstone2
+        if: always() && inputs.source_url && steps.upload1.outcome == 'failure'
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - name: Retry bounded mechanical report upload 2
         id: upload2
         continue-on-error: true
-        if: always() && steps.upload1.outcome == 'failure'
+        if: always() && steps.upload1.outcome == 'failure' && (!inputs.source_url || steps.tombstone2.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}
@@ -283,10 +332,19 @@ jobs:
         if: always() && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
         run: sleep 20
 
+      - name: Check confidential withdrawal tombstone before report upload
+        id: tombstone3
+        if: always() && inputs.source_url && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - name: Retry bounded mechanical report upload 3
         id: upload3
         continue-on-error: true
-        if: always() && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        if: >-
+          always() && steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+          && (!inputs.source_url || steps.tombstone3.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.mode == 'preflight' && 'preflight-report' || inputs.mode == 'correction' && 'correction-report' || 'mechanical-report' }}-${{ inputs.request_id }}

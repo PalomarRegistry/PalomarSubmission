@@ -61,6 +61,24 @@ on:
         description: Accepted repository-relative lean-toolchain path
         required: true
         type: string
+      # Confidential renders only, and only through a call: the source is the
+      # server's tarball of the commit, never a GitHub checkout. Blank for
+      # every public render.
+      source_url:
+        description: Presigned HTTPS URL of the confidential source tarball (blank for public renders)
+        required: false
+        default: ""
+        type: string
+      source_sha256:
+        description: Expected SHA-256 of the confidential source tarball
+        required: false
+        default: ""
+        type: string
+      tombstone_url:
+        description: Presigned HTTPS URL of the submission's withdrawal tombstone; only 404 lets the run continue
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       repository:
@@ -186,6 +204,13 @@ jobs:
           path: pipeline
           persist-credentials: false
 
+      - name: Check confidential withdrawal tombstone
+        id: withdrawal
+        if: inputs.source_url
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11.18"
@@ -206,6 +231,9 @@ jobs:
           COMPARATOR_CONFIG_PATH: ${{ inputs.comparator_config_path }}
           LAKEFILE_PATH: ${{ inputs.lakefile_path }}
           LEAN_TOOLCHAIN_PATH: ${{ inputs.lean_toolchain_path }}
+          SOURCE_URL: ${{ inputs.source_url }}
+          SOURCE_SHA256: ${{ inputs.source_sha256 }}
+          TOMBSTONE_URL: ${{ inputs.tombstone_url }}
         run: |
           python -m scripts.render_challenge prepare \
             --repository "$SOURCE_REPOSITORY" \
@@ -217,6 +245,9 @@ jobs:
             --comparator-config-path "$COMPARATOR_CONFIG_PATH" \
             --lakefile-path "$LAKEFILE_PATH" \
             --lean-toolchain-path "$LEAN_TOOLCHAIN_PATH" \
+            --source-url "$SOURCE_URL" \
+            --source-sha256 "$SOURCE_SHA256" \
+            --tombstone-url "$TOMBSTONE_URL" \
             --work-dir "$RUNNER_TEMP/palomar-render" \
             --output "$RUNNER_TEMP/palomar-render/report.json"
 
@@ -261,8 +292,15 @@ jobs:
             --run-repository "$RUN_REPOSITORY" \
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      - name: Check confidential withdrawal tombstone before render upload
+        id: tombstone1
+        if: always() && inputs.source_url
+        env:
+          PALOMAR_TOMBSTONE_URL: ${{ inputs.tombstone_url }}
+        run: python3 pipeline/scripts/confidential_source.py check-tombstone
+
       - name: Upload bounded render result
-        if: always()
+        if: always() && (!inputs.source_url || steps.tombstone1.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: challenge-render-${{ inputs.request_id }}

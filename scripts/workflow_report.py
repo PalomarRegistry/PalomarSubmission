@@ -32,8 +32,12 @@ from scripts.workflow_inputs import (
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 SETUP_STEPS = (
     "checkout",
+    # Confidential runs only: the withdrawal tombstone check before any work,
+    # and the gem install that replaces setup-ruby's cache.
+    "withdrawal",
     "python",
     "ruby",
+    "gems",
     "dependencies",
     "prepare",
     "disk",
@@ -261,7 +265,9 @@ def main() -> int:
         json.dump(result, handle, indent=2)
         handle.write("\n")
     temporary.replace(args.report)
-    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+    # A confidential run's failure text can quote its source, so it stays in
+    # the private report and log and never reaches the job summary.
+    if (summary := os.environ.get("GITHUB_STEP_SUMMARY")) and not inputs.get("source_url"):
         summarize_failure(result, Path(summary))
     if result.get("status") in {"fail", "error"}:
         for error in result.get("errors", [])[:10]:

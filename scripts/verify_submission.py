@@ -34,6 +34,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
 from scripts import (  # noqa: E402
+    confidential_source,
     seccomp_filter,
     submission_contract,
 )
@@ -1404,7 +1405,15 @@ def prepare(args: argparse.Namespace) -> int:
             }
         )
         source = work / "source"
-        clone_commit(url, commit, source)
+        confidential = confidential_source.confidential_inputs(inputs)
+        if confidential is None:
+            clone_commit(url, commit, source)
+        else:
+            # The server fetched this commit's tarball at intake; the run
+            # never reads GitHub for the source.
+            confidential_source.materialize(
+                confidential["source_url"], confidential["source_sha256"], source
+            )
         validate_preservable_git_checkout(source, "submitted source")
         size = tree_size(source)
         if size > MAX_SOURCE_BYTES:

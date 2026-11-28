@@ -4,9 +4,11 @@ run-name: Render challenge [${{ inputs.request_id }}]
 
 # PalomarConfidentialRuns' render.yml is this file, kept canonically in
 # PalomarSubmission's templates/confidential-callers/, with one
-# PalomarSubmission commit substituted for both placeholders. The broker
-# and the reviewer accept a run only if the caller is byte-for-byte that
-# substitution, so change the template here, never the copy.
+# PalomarSubmission commit substituted for both placeholders. The reviewer
+# accepts a run only if the caller is byte-for-byte that substitution, so
+# change the template here, never the copy. The source is the server's
+# tarball of the commit (source_url, source_sha256), never a checkout, and
+# the run stops while the submission's tombstone_url answers anything but 404.
 on:
   workflow_dispatch:
     inputs:
@@ -56,9 +58,17 @@ on:
         description: Accepted repository-relative lean-toolchain path
         required: true
         type: string
-      ticket:
-        description: Single-use broker ticket from the submission server (used by the snapshot jobs)
-        required: false
+      source_url:
+        description: One-hour presigned URL of the source tarball from the submission server
+        required: true
+        type: string
+      source_sha256:
+        description: Expected SHA-256 of the source tarball
+        required: true
+        type: string
+      tombstone_url:
+        description: Presigned URL of the submission's withdrawal tombstone
+        required: true
         type: string
 
 permissions:
@@ -84,3 +94,6 @@ jobs:
       comparator_config_path: ${{ inputs.comparator_config_path }}
       lakefile_path: ${{ inputs.lakefile_path }}
       lean_toolchain_path: ${{ inputs.lean_toolchain_path }}
+      source_url: ${{ inputs.source_url }}
+      source_sha256: ${{ inputs.source_sha256 }}
+      tombstone_url: ${{ inputs.tombstone_url }}

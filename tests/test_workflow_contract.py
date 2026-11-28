@@ -24,6 +24,8 @@ WORKFLOWS = {
     for name in ("submission.yml", "render-challenge.yml")
 }
 PIPELINE_REF = "${{ inputs.pipeline_commit || github.workflow_sha }}"
+# Call-only inputs of a confidential run; blank for every public run.
+CONFIDENTIAL_INPUTS = {"source_url", "source_sha256", "tombstone_url"}
 
 
 def parsed(name):
@@ -46,15 +48,22 @@ class CallerParityTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(set(triggers(parsed(name))), {"workflow_call", "workflow_dispatch"})
 
-    def test_call_inputs_are_the_dispatch_inputs_plus_the_pipeline_pin(self):
+    def test_call_inputs_are_the_dispatch_inputs_plus_the_pin_and_the_confidential_source(self):
         for name in WORKFLOWS:
             with self.subTest(name):
                 on = triggers(parsed(name))
                 called = on["workflow_call"]["inputs"]
                 dispatched = on["workflow_dispatch"]["inputs"]
-                self.assertEqual(set(called), set(dispatched) | {"pipeline_commit"})
+                self.assertEqual(set(called), set(dispatched) | {"pipeline_commit"} | CONFIDENTIAL_INPUTS)
                 self.assertNotIn("pipeline_commit", dispatched)
                 self.assertIs(called["pipeline_commit"]["required"], True)
+                # A dispatch runs in public PalomarSubmission, so it can
+                # never name a confidential source.
+                self.assertFalse(CONFIDENTIAL_INPUTS & set(dispatched))
+                for field in CONFIDENTIAL_INPUTS:
+                    self.assertIs(called[field]["required"], False, field)
+                    self.assertEqual(called[field]["default"], "", field)
+                    self.assertEqual(called[field]["type"], "string", field)
                 for field, spec in dispatched.items():
                     self.assertEqual(
                         bool(called[field].get("required")), bool(spec.get("required")), field
@@ -76,6 +85,8 @@ class RunTitleTests(unittest.TestCase):
                 title = parsed(name)["run-name"]
                 self.assertNotIn("inputs.repository", title)
                 self.assertNotIn("inputs.commit", title)
+                for field in CONFIDENTIAL_INPUTS:
+                    self.assertNotIn(field, title)
                 self.assertIn("inputs.request_id", title)
 
     def test_render_title_is_request_id_only(self):
@@ -89,7 +100,8 @@ class NoSourceNamesInRunSurfacesTests(unittest.TestCase):
     summaries. None of them may be built from the source's identity."""
 
     IDENTIFYING = re.compile(
-        r"inputs\.(repository|commit|challenge_sha256|[a-z_]*_path|options)\b"
+        r"inputs\.(repository|commit|challenge_sha256|[a-z_]*_path|options|source_url|source_sha256"
+        r"|tombstone_url)\b"
     )
 
     def test_step_and_job_names_are_static(self):
@@ -118,6 +130,135 @@ class NoSourceNamesInRunSurfacesTests(unittest.TestCase):
 
         self.assertNotIn("GITHUB_STEP_SUMMARY", WORKFLOWS["render-challenge.yml"])
         self.assertNotIn("GITHUB_STEP_SUMMARY", Path(render_challenge.__file__).read_text(encoding="utf-8"))
+
+
+CONFIDENTIAL_REFERENCE = re.compile(r"inputs\.(source_url|source_sha256|tombstone_url)\b")
+# Only these forms may mention the confidential inputs. Each one leaves a
+# public run (all three inputs blank) exactly as it was without them.
+CONFIDENTIAL_ONLY_IF = re.compile(r"^(always\(\) && )?inputs\.source_url( && .+)?$", re.S)
+PUBLIC_PASSES = re.compile(r" && \(!inputs\.source_url \|\| steps\.tombstone[1-3]\.outcome == 'success'\)")
+CHECK_TOMBSTONE = "python3 pipeline/scripts/confidential_source.py check-tombstone"
+
+
+def job_steps(name):
+    job = "verify" if name == "submission.yml" else "render"
+    return parsed(name)["jobs"][job]["steps"]
+
+
+def without_confidential_forms(step):
+    """The step as a public run evaluates it: blank inputs, nothing else."""
+    step = dict(step)
+    if "if" in step:
+        condition = " ".join(str(step["if"]).split())
+        step["if"] = PUBLIC_PASSES.sub("", condition)
+    if step.get("with", {}).get("bundler-cache") == "${{ !inputs.source_url }}":
+        step["with"] = {**step["with"], "bundler-cache": True}
+    if "scripts.render_challenge prepare" in step.get("run", ""):
+        step["env"] = {key: value for key, value in step["env"].items()
+                       if key not in {"SOURCE_URL", "SOURCE_SHA256", "TOMBSTONE_URL"}}
+        step["run"] = re.sub(
+            r'^ *--(source-url|source-sha256|tombstone-url) "\$[A-Z0-9_]+" \\\n', "", step["run"], flags=re.M
+        )
+    return step
+
+
+class ConfidentialSourceWorkflowTests(unittest.TestCase):
+    """SUB-2: a call with `source_url` verifies or renders the server's
+    tarball, and stops while the submission's tombstone exists."""
+
+    def test_public_runs_evaluate_every_step_as_before(self):
+        # A public run leaves source_url blank, so a confidential-only step is
+        # skipped, `(!inputs.source_url || ...)` is true, the Ruby cache is
+        # on and the render's source arguments are blank (which
+        # render_challenge reads as "check out GitHub", tested separately).
+        # Removing exactly those forms must leave no mention of the inputs.
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                for step in job_steps(name):
+                    if CONFIDENTIAL_ONLY_IF.match(" ".join(str(step.get("if", "")).split())):
+                        continue
+                    public = str(without_confidential_forms(step))
+                    self.assertNotRegex(public, CONFIDENTIAL_REFERENCE, step.get("name"))
+                    self.assertNotRegex(public, r"SOURCE_URL|SOURCE_SHA256|TOMBSTONE_URL|source-url|"
+                                                r"source-sha256|tombstone-url", step.get("name"))
+
+    def test_confidential_only_steps_are_the_tombstone_checks_and_the_gem_install(self):
+        for name, expected in (
+            ("submission.yml", {"withdrawal", "gems", "tombstone1", "tombstone2", "tombstone3"}),
+            ("render-challenge.yml", {"withdrawal", "tombstone1"}),
+        ):
+            with self.subTest(name):
+                only = {
+                    step.get("id") for step in job_steps(name)
+                    if CONFIDENTIAL_ONLY_IF.match(" ".join(str(step.get("if", "")).split()))
+                }
+                self.assertEqual(only, expected)
+
+    def test_tombstone_is_checked_before_any_source_is_read(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                steps_ = job_steps(name)
+                ids = [step.get("id") for step in steps_]
+                start = steps_[ids.index("withdrawal")]
+                self.assertEqual(start["run"], CHECK_TOMBSTONE)
+                self.assertEqual(start["env"], {"PALOMAR_TOMBSTONE_URL": "${{ inputs.tombstone_url }}"})
+                self.assertNotIn("continue-on-error", start)
+                self.assertLess(ids.index("withdrawal"), ids.index("prepare"))
+                # Every step between the start check and the source fetch
+                # runs only on success, so a withdrawn run never reaches it.
+                for step in steps_[ids.index("withdrawal") + 1 : ids.index("prepare") + 1]:
+                    self.assertNotIn("always()", str(step.get("if", "")), step.get("name"))
+
+    def test_every_upload_requires_a_fresh_tombstone_check(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                steps_ = job_steps(name)
+                uploads = [
+                    position for position, step in enumerate(steps_)
+                    if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+                ]
+                self.assertTrue(uploads)
+                for position in uploads:
+                    upload, check = steps_[position], steps_[position - 1]
+                    self.assertEqual(check["run"], CHECK_TOMBSTONE)
+                    self.assertNotIn("continue-on-error", check)
+                    upload_if = " ".join(str(upload["if"]).split())
+                    required = f"&& (!inputs.source_url || steps.{check['id']}.outcome == 'success')"
+                    self.assertTrue(upload_if.endswith(required), upload_if)
+                    # The check runs whenever the upload would, in a confidential run.
+                    public_if = PUBLIC_PASSES.sub("", upload_if)
+                    self.assertEqual(
+                        " ".join(str(check["if"]).split()),
+                        public_if.replace("always()", "always() && inputs.source_url", 1),
+                    )
+
+    def test_confidential_runs_write_no_cache(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                self.assertNotIn("actions/cache", WORKFLOWS[name])
+                for step in job_steps(name):
+                    if str(step.get("uses", "")).startswith("ruby/setup-ruby@"):
+                        self.assertEqual(step["with"]["bundler-cache"], "${{ !inputs.source_url }}")
+        gems = next(step for step in job_steps("submission.yml") if step.get("id") == "gems")
+        self.assertIn("bundle install", gems["run"])
+        self.assertEqual(gems["working-directory"], "pipeline")
+
+    def test_render_passes_the_source_tarball_to_prepare(self):
+        step = next(step for step in job_steps("render-challenge.yml") if step.get("id") == "prepare")
+        self.assertEqual(step["env"]["SOURCE_URL"], "${{ inputs.source_url }}")
+        self.assertEqual(step["env"]["SOURCE_SHA256"], "${{ inputs.source_sha256 }}")
+        self.assertEqual(step["env"]["TOMBSTONE_URL"], "${{ inputs.tombstone_url }}")
+        for flag, variable in (
+            ("--source-url", "SOURCE_URL"), ("--source-sha256", "SOURCE_SHA256"),
+            ("--tombstone-url", "TOMBSTONE_URL"),
+        ):
+            self.assertIn(f'{flag} "${variable}"', step["run"])
+
+    def test_verify_reads_the_source_tarball_from_its_inputs(self):
+        # The verifier's event file is toJSON(inputs), so the three call
+        # inputs reach `verify_submission.py prepare` without new arguments.
+        step = next(step for step in job_steps("submission.yml") if step.get("id") == "prepare")
+        self.assertEqual(step["env"]["PALOMAR_INPUTS"], "${{ toJSON(inputs) }}")
 
 
 TEMPLATES = ROOT / "templates/confidential-callers"
@@ -159,16 +300,19 @@ class CanonicalCallerTemplateTests(unittest.TestCase):
                 )
                 self.assertEqual(call["with"]["pipeline_commit"], "c" * 40)
 
-    def test_callers_declare_the_called_dispatch_inputs_and_the_ticket(self):
+    def test_callers_declare_the_called_dispatch_inputs_and_require_the_source_tarball(self):
         for name, (called, _) in CALLERS.items():
             with self.subTest(name):
                 declared = triggers(caller(name))["workflow_dispatch"]["inputs"]
                 dispatched = triggers(parsed(called))["workflow_dispatch"]["inputs"]
-                self.assertEqual(set(declared), set(dispatched) | {"ticket"})
+                self.assertEqual(set(declared), set(dispatched) | CONFIDENTIAL_INPUTS)
                 for field, spec in dispatched.items():
                     self.assertEqual(bool(declared[field].get("required")), bool(spec.get("required")), field)
                     self.assertEqual(declared[field].get("default"), spec.get("default"), field)
-                self.assertIs(declared["ticket"].get("required"), False)
+                # A confidential caller without a tarball would fall back to
+                # a GitHub checkout, so the caller refuses that dispatch.
+                for field in CONFIDENTIAL_INPUTS:
+                    self.assertIs(declared[field].get("required"), True, field)
 
     def test_callers_forward_every_call_input_unchanged(self):
         for name, (called, job) in CALLERS.items():
