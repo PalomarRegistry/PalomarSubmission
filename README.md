@@ -44,7 +44,9 @@ declarations is verified and reviewed as a whole. CI then:
    comparator`, `leanexport`, `leanchecker` and the bundled independent
    kernels;
 3. compiles the Challenge against frozen, canonical Mathlib, Tau Ceti, or
-   CSLib output;
+   CSLib output; Mathlib comes from its official cache, while Tau Ceti and
+   CSLib are built from source, limited to the modules the submission imports
+   and their import closure;
 4. computes the transitive source closure of the Challenge and verifies every
    byte in it;
 5. builds the Solution under Palomar's own bubblewrap sandbox, exports the

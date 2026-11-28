@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,6 +131,8 @@ COMPILED_ARTIFACT_SUFFIXES = {
 # `.private`/`.server` and the table above cannot match them on its own.
 COMPILED_ARTIFACT_NAME_SUFFIXES = (".olean.private", ".olean.server")
 MAX_STAGED_LAKE_METADATA_FILES = 512
+# Above this many module targets a trusted root is built whole, which bounds argv.
+MAX_TRUSTED_ROOT_TARGETS = 4096
 MAX_STAGED_LAKE_METADATA_BYTES = 8 * 1024**3
 STAGED_LAKE_CONTROL_NAMES = {
     "lake-manifest.json",
@@ -2467,6 +2469,32 @@ def nested_package_links(
     return nested.resolve()
 
 
+def trusted_root_targets(root_dir: Path, imports: frozenset[str]) -> list[str] | None:
+    """Lake module targets for the imports whose source lies in a trusted root.
+
+    Lake builds each target's import closure, so these are exactly the root's
+    modules that the Challenge, the Solution, or an untrusted dependency can
+    reach. Returns None, meaning a full default build, when there are too many
+    to pass as arguments. An import missed here cannot weaken verification: the
+    candidate build cannot write the root's protected outputs, so it fails.
+    """
+    boundary = root_dir.resolve()
+    targets: list[str] = []
+    for module in sorted(imports):
+        if not MODULE_RE.fullmatch(module):
+            continue
+        *directories, name = module.split(".")
+        path = boundary.joinpath(*directories, f"{name}.lean")
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not path_is_within(path.resolve(), [boundary]):
+            continue
+        targets.append(f"+{module}")
+    if len(targets) > MAX_TRUSTED_ROOT_TARGETS:
+        return None
+    return targets
+
+
 def build_allowlisted_roots(
     source: Path,
     *,
@@ -2478,8 +2506,14 @@ def build_allowlisted_roots(
     readable_paths: list[Path],
     executable_paths: list[Path],
     tools: dict[Path, str],
+    required_imports: frozenset[str] | None = None,
 ) -> None:
-    """Build non-Mathlib trusted roots from freshly reset Lake state."""
+    """Build non-Mathlib trusted roots from freshly reset Lake state.
+
+    With `required_imports`, only the root modules those imports reach are
+    built; without it, the root's default targets are. Either way the build
+    runs from the root's verified source in the same sandbox.
+    """
     roots, aliases = allowed_roots()
     by_name = {package["name"]: package for package in packages}
     for root in sorted(roots, key=lambda item: item["trust_level"] != "high"):
@@ -2530,9 +2564,17 @@ def build_allowlisted_roots(
             {"HOME": str(home.resolve()), "TMPDIR": str(temporary.resolve()), "LEAN_ABORT_ON_PANIC": "1"}
         )
         writable = validate_writable_directories(checkout, trusted_directories)
+        targets = (
+            None if required_imports is None
+            else trusted_root_targets(root_dir, required_imports)
+        )
+        if targets == []:
+            # Nothing reaches this root; its Lake state stays freshly reset.
+            shutil.rmtree(nested)
+            continue
         try:
             sandboxed_run(
-                [str(lake), "build"],
+                [str(lake), "build", *(targets or [])],
                 cwd=root_dir,
                 environment=build_env,
                 writable_directories=writable,
@@ -4786,19 +4828,17 @@ def lean_header(
     return parse_lean_header(proc.stdout)
 
 
-def confirm_source_modules(
-    checkout: Path, *, source: Path, lean: Path, environment: dict[str, str],
+def _source_header_entries(
+    files: list[Path], *, source: Path, lean: Path, environment: dict[str, str],
     writable_directories: list[Path], readable_paths: list[Path],
     executable_paths: list[Path], tools: dict[Path, str],
-) -> None:
-    """Confirm every submitted header with Lean, before candidate Lake code runs.
+) -> Iterator[tuple[Path, Any]]:
+    """Yield `lean --deps-json` header entries for many sources in bounded batches.
 
     --deps-json only parses headers, including unused sources; it never imports
     or elaborates the candidate. Batch requests bound argv size and avoid a
     separate sandbox setup per file.
     """
-    # Keep the lexical precheck: Lean's fast parser also accepts moduleFoo.
-    files = [path for path in lean_source_files(checkout) if path.name != "lakefile.lean"]
     for start in range(0, len(files), 64):
         batch = files[start:start + 64]
         proc = sandboxed_run(
@@ -4815,19 +4855,80 @@ def confirm_source_modules(
                 "Lean did not return the requested source headers",
                 code="palomar.source_header_unavailable", owner="palomar", retryable=True,
             ) from error
-        for path, entry in zip(batch, entries, strict=True):
-            relative = path.relative_to(checkout).as_posix()
+        yield from zip(batch, entries, strict=True)
+
+
+def confirm_source_modules(
+    checkout: Path, *, source: Path, lean: Path, environment: dict[str, str],
+    writable_directories: list[Path], readable_paths: list[Path],
+    executable_paths: list[Path], tools: dict[Path, str],
+) -> frozenset[str]:
+    """Confirm every submitted header with Lean, before candidate Lake code runs.
+
+    Returns the union of the modules those headers import, which tells the
+    trusted-root phase which allowlisted modules the candidate can reach.
+    """
+    # Keep the lexical precheck: Lean's fast parser also accepts moduleFoo.
+    files = [path for path in lean_source_files(checkout) if path.name != "lakefile.lean"]
+    imports: set[str] = set()
+    for path, entry in _source_header_entries(
+        files, source=source, lean=lean, environment=environment,
+        writable_directories=writable_directories, readable_paths=readable_paths,
+        executable_paths=executable_paths, tools=tools,
+    ):
+        relative = path.relative_to(checkout).as_posix()
+        try:
+            header = parse_lean_header(json.dumps({"imports": [entry]}))
+        except VerificationError as error:
+            raise VerificationError(
+                f"{relative}: {error}", code="source.invalid_header", path=relative,
+            ) from error
+        if not header.is_module:
+            raise VerificationError(
+                f"{relative} does not use Lean's module system",
+                code="source.module_required", path=relative, line=1,
+            )
+        imports.update(header.imports)
+    return frozenset(imports)
+
+
+def untrusted_package_imports(
+    source: Path, packages: list[dict[str, str]], allowlist: dict[str, tuple[str, str]], *,
+    checkout: Path, lean: Path, environment: dict[str, str],
+    writable_directories: list[Path], readable_paths: list[Path],
+    executable_paths: list[Path], tools: dict[Path, str],
+) -> frozenset[str] | None:
+    """Modules imported by sources of dependencies outside the verified allowlist.
+
+    The candidate build compiles these packages itself, so any allowlisted
+    module they import must already be built. A header Lean cannot read
+    contributes nothing here; the candidate build reports it. None means Lean
+    returned no headers at all, so the caller cannot narrow trusted builds.
+    """
+    files: set[Path] = set()
+    for package in packages:
+        if package["name"] in allowlist:
+            continue
+        package_dir = package_checkout(source, package, checkout=checkout)
+        if package_dir.is_dir():
+            files.update(
+                path for path in lean_source_files(package_dir)
+                if path.name != "lakefile.lean" and not path.is_symlink()
+            )
+    imports: set[str] = set()
+    try:
+        for _path, entry in _source_header_entries(
+            sorted(files), source=source, lean=lean, environment=environment,
+            writable_directories=writable_directories, readable_paths=readable_paths,
+            executable_paths=executable_paths, tools=tools,
+        ):
             try:
-                header = parse_lean_header(json.dumps({"imports": [entry]}))
-            except VerificationError as error:
-                raise VerificationError(
-                    f"{relative}: {error}", code="source.invalid_header", path=relative,
-                ) from error
-            if not header.is_module:
-                raise VerificationError(
-                    f"{relative} does not use Lean's module system",
-                    code="source.module_required", path=relative, line=1,
-                )
+                imports.update(parse_lean_header(json.dumps({"imports": [entry]})).imports)
+            except VerificationError:
+                continue
+    except VerificationError:
+        return None
+    return frozenset(imports)
 
 
 def lean_source_dependencies(
@@ -6178,7 +6279,7 @@ def execute(args: argparse.Namespace) -> int:
         )
         report["stage"] = "source-requirements"
         guarded_write()
-        confirm_source_modules(
+        candidate_imports = confirm_source_modules(
             checkout, source=source, lean=lean, environment=env,
             writable_directories=writable_directories, readable_paths=readable_paths,
             executable_paths=executable_paths, tools=tools,
@@ -6294,6 +6395,22 @@ def execute(args: argparse.Namespace) -> int:
         )
         report["stage"] = "trusted-roots"
         guarded_write()
+        # Header parsing never needs the frozen trusted outputs to be writable.
+        frozen = {
+            directory
+            for name in allowlist
+            for directory in package_lake_directories(source, name, checkout=checkout)
+        }
+        dependency_imports = untrusted_package_imports(
+            source, packages, allowlist, checkout=checkout, lean=lean, environment=env,
+            writable_directories=[
+                directory for directory in writable_directories if directory not in frozen
+            ],
+            readable_paths=readable_paths, executable_paths=executable_paths, tools=tools,
+        )
+        required_imports = (
+            None if dependency_imports is None else candidate_imports | dependency_imports
+        )
         build_allowlisted_roots(
             source,
             checkout=checkout,
@@ -6304,6 +6421,7 @@ def execute(args: argparse.Namespace) -> int:
             readable_paths=readable_paths,
             executable_paths=executable_paths,
             tools=tools,
+            required_imports=required_imports,
         )
 
         trusted_names = set(allowlist)

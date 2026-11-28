@@ -3872,6 +3872,168 @@ review:
             self.assertFalse((trusted / ".lake" / "packages").exists())
             self.assertEqual(shared_state.read_text(), "Mathlib-owned")
 
+    def _qualified_root_fixture(self, source: Path) -> tuple[Path, Path]:
+        packages_dir = source / ".lake" / "packages"
+        trusted = packages_dir / "trusted"
+        shared = packages_dir / "shared"
+        for package in (trusted, shared):
+            (package / ".lake" / "build").mkdir(parents=True)
+            (package / ".lake" / "config").mkdir()
+        shared_entry = {
+            "name": "shared",
+            "type": "git",
+            "url": "https://github.com/example/shared",
+            "rev": "2" * 40,
+        }
+        (source / "lake-manifest.json").write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "name": "trusted",
+                            "type": "git",
+                            "url": "https://github.com/example/trusted",
+                            "rev": "1" * 40,
+                        },
+                        shared_entry,
+                    ]
+                }
+            )
+        )
+        (trusted / "lake-manifest.json").write_text(json.dumps({"packages": [shared_entry]}))
+        for module in ("Trusted/A.lean", "Trusted/Deep/B.lean"):
+            (trusted / module).parent.mkdir(parents=True, exist_ok=True)
+            (trusted / module).write_text("module\n")
+        return trusted, shared
+
+    def _build_qualified_root(self, source: Path, required_imports, sandbox_side_effect):
+        root = {"repository": "example/trusted", "trust_level": "qualified"}
+        with (
+            mock.patch(
+                "scripts.verify_submission.allowed_roots",
+                return_value=([root], {"example/trusted": root}),
+            ),
+            mock.patch(
+                "scripts.verify_submission.sandboxed_run",
+                side_effect=sandbox_side_effect,
+            ) as sandbox,
+        ):
+            verifier.build_allowlisted_roots(
+                source,
+                checkout=source,
+                packages=verifier.manifest_packages(source),
+                allowlist={
+                    "trusted": ("example/trusted", "qualified"),
+                    "shared": ("leanprover-community/mathlib4", "high"),
+                },
+                base_env={"PATH": "/usr/bin"},
+                lake=Path("/tools/lake"),
+                readable_paths=[source],
+                executable_paths=[],
+                tools={},
+                required_imports=required_imports,
+            )
+        return sandbox
+
+    def test_qualified_root_builds_only_modules_the_candidate_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            trusted, _shared = self._qualified_root_fixture(source)
+            commands = []
+
+            def trusted_build(command, **kwargs):
+                commands.append(command)
+                self.assertEqual(kwargs["cwd"], trusted)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            self._build_qualified_root(
+                source,
+                frozenset({"Trusted.Deep.B", "Mathlib.Data.Nat", "Trusted.Missing", "Local"}),
+                trusted_build,
+            )
+            self.assertEqual(commands, [["/tools/lake", "build", "+Trusted.Deep.B"]])
+            self.assertFalse((trusted / ".lake" / "packages").exists())
+
+    def test_unreached_qualified_root_is_reset_but_not_built(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            trusted, _shared = self._qualified_root_fixture(source)
+            planted = trusted / ".lake" / "build" / "lib" / "lean" / "Trusted" / "A.olean"
+            planted.parent.mkdir(parents=True)
+            planted.write_bytes(b"candidate compiled output")
+
+            sandbox = self._build_qualified_root(
+                source, frozenset({"Mathlib.Data.Nat"}), AssertionError("must not build")
+            )
+            sandbox.assert_not_called()
+            self.assertFalse(planted.exists())
+            self.assertTrue((trusted / ".lake" / "build").is_dir())
+            self.assertFalse((trusted / ".lake" / "packages").exists())
+
+    def test_trusted_root_targets_name_only_real_root_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            outside = Path(directory) / "outside"
+            (root / "Trusted").mkdir(parents=True)
+            outside.mkdir()
+            (root / "Trusted" / "A.lean").write_text("module\n")
+            (outside / "Escape.lean").write_text("module\n")
+            (root / "Trusted" / "Linked.lean").symlink_to(outside / "Escape.lean")
+            (root / "Escaped").symlink_to(outside, target_is_directory=True)
+            imports = frozenset(
+                {"Trusted.A", "Trusted.Linked", "Escaped.Escape", "«Trusted».A", "Absent"}
+            )
+            self.assertEqual(verifier.trusted_root_targets(root, imports), ["+Trusted.A"])
+            self.assertEqual(verifier.trusted_root_targets(root, frozenset()), [])
+            with mock.patch.object(verifier, "MAX_TRUSTED_ROOT_TARGETS", 0):
+                self.assertIsNone(verifier.trusted_root_targets(root, imports))
+
+    def test_untrusted_package_imports_skip_allowlisted_and_unreadable_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            packages_dir = source / ".lake" / "packages"
+            for name in ("helper", "trusted"):
+                (packages_dir / name / "Src").mkdir(parents=True)
+                (packages_dir / name / "Src" / "M.lean").write_text("module\n")
+                (packages_dir / name / "lakefile.lean").write_text("import Lake\n")
+            (packages_dir / "helper" / "Src" / "Bad.lean").write_text("module\n")
+            packages = [
+                {"name": name, "url": f"https://github.com/example/{name}"}
+                for name in ("helper", "trusted")
+            ]
+            seen = []
+
+            def headers(command, **_kwargs):
+                files = command[2:]
+                seen.extend(files)
+                entries = [
+                    {"errors": ["bad header"]} if file.endswith("Bad.lean")
+                    else {"result": {"isModule": True, "imports": [
+                        {"module": "Init"}, {"module": "Trusted.A"}]}}
+                    for file in files
+                ]
+                return subprocess.CompletedProcess(command, 0, json.dumps({"imports": entries}), "")
+
+            with mock.patch.object(verifier, "sandboxed_run", side_effect=headers):
+                imports = verifier.untrusted_package_imports(
+                    source, packages, {"trusted": ("example/trusted", "qualified")},
+                    checkout=source, lean=Path("/lean"), environment={},
+                    writable_directories=[], readable_paths=[], executable_paths=[], tools={},
+                )
+            self.assertEqual(imports, frozenset({"Trusted.A"}))
+            self.assertEqual(
+                sorted(Path(file).relative_to(packages_dir).as_posix() for file in seen),
+                ["helper/Src/Bad.lean", "helper/Src/M.lean"],
+            )
+
+            unavailable = subprocess.CompletedProcess([], 0, "not json", "")
+            with mock.patch.object(verifier, "sandboxed_run", return_value=unavailable):
+                self.assertIsNone(verifier.untrusted_package_imports(
+                    source, packages, {"trusted": ("example/trusted", "qualified")},
+                    checkout=source, lean=Path("/lean"), environment={},
+                    writable_directories=[], readable_paths=[], executable_paths=[], tools={},
+                ))
+
     def test_committed_artifacts_outside_lake_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)
