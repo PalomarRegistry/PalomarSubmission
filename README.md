@@ -152,9 +152,8 @@ The confidential callers themselves are kept here, in
 `templates/confidential-callers/`, with the placeholder `<pipeline-commit>`
 standing for the one commit used both in `uses:` and as `pipeline_commit`.
 PalomarConfidentialRuns copies them with that commit substituted, and its
-contract test substitutes the placeholder back and compares the result with
-`templates/confidential-callers/SHA256SUMS` at the pinned commit. Change a
-template here first, then the copies.
+contract test compares its copies with the templates at the pinned commit.
+Change a template here first, then the copies.
 
 A confidential call never checks out the source. Both workflows accept three
 call-only inputs, blank for every public run: `source_url`, a presigned URL of
@@ -167,7 +166,7 @@ tracked-file and attribute checks still apply; the mechanical report records
 the tarball's digest as `source_sha256`. It checks the tombstone before
 starting and before every upload, and continues only on HTTP 404; any other
 answer, including an expired URL, stops the run. A confidential run writes no
-Actions cache and no job summary.
+Actions cache and no job summary, and refuses the AWS execution profile.
 
 The workflow has `preflight` and `full` modes. Both invoke
 the same `verify_submission.py prepare` entry point; full verification merely

@@ -243,6 +243,20 @@ class ConfidentialSourceWorkflowTests(unittest.TestCase):
         self.assertIn("bundle install", gems["run"])
         self.assertEqual(gems["working-directory"], "pipeline")
 
+    def test_confidential_runs_refuse_the_aws_profile_before_choosing_a_runner(self):
+        for name in WORKFLOWS:
+            with self.subTest(name):
+                profile = parsed(name)["jobs"]["profile"]["steps"]
+                names = [step.get("name") for step in profile]
+                refusal = profile[names.index("Refuse the AWS profile for confidential runs")]
+                self.assertEqual(
+                    refusal["if"],
+                    "inputs.source_url && inputs.execution_profile == 'palomar-aws-r7i-16xlarge-v1'",
+                )
+                self.assertIn("exit 1", refusal["run"])
+                resolve = next(i for i, step in enumerate(profile) if step.get("id") == "resolve")
+                self.assertLess(names.index("Refuse the AWS profile for confidential runs"), resolve)
+
     def test_render_passes_the_source_tarball_to_prepare(self):
         step = next(step for step in job_steps("render-challenge.yml") if step.get("id") == "prepare")
         self.assertEqual(step["env"]["SOURCE_URL"], "${{ inputs.source_url }}")

@@ -119,6 +119,13 @@ jobs:
           repository: PalomarRegistry/PalomarSubmission
           ref: ${{ inputs.pipeline_commit || github.workflow_sha }}
           persist-credentials: false
+      - name: Refuse the AWS profile for confidential runs
+        # The pilot runs confidential submissions on Namespace only; the AWS
+        # profile's 24-hour jobs would also outlive the tombstone URL.
+        if: inputs.source_url && inputs.execution_profile == 'palomar-aws-r7i-16xlarge-v1'
+        run: |
+          echo "::error::Confidential runs may not use palomar-aws-r7i-16xlarge-v1"
+          exit 1
       - name: Resolve approved execution profile
         id: resolve
         env:
