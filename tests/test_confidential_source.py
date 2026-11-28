@@ -17,6 +17,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from http.client import IncompleteRead
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
@@ -257,6 +258,7 @@ class TombstoneTests(unittest.TestCase):
             ((http_error(400),), False),
             ((http_error(503), http_error(404)), True),
             ((URLError("down"), URLError("down"), URLError("down")), False),
+            ((IncompleteRead(b""), http_error(404)), True),
             ((http_error(500), http_error(500), http_error(500)), False),
         ):
             with self.subTest(outcomes=outcomes):

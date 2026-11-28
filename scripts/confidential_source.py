@@ -27,6 +27,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Mapping
+from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -45,6 +46,8 @@ MAX_URL_LENGTH = 4096
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 RETRY_DELAYS = (5, 20)
 INPUTS = ("source_url", "source_sha256", "tombstone_url")
+# Transport failures worth a bounded retry; an HTTP status is decided apart.
+NETWORK_ERRORS = (URLError, TimeoutError, ConnectionError, HTTPException)
 # A fixed identity and date make the synthetic commit reproducible; nothing in
 # it names the source repository.
 COMMIT_ENVIRONMENT = {
@@ -107,7 +110,7 @@ def _with_retries(action: Callable[[], Any], sleep: Callable[[float], None]) -> 
             transient = error.code in {408, 429} or error.code >= 500
             if not transient or attempt == len(RETRY_DELAYS):
                 raise
-        except (URLError, TimeoutError, ConnectionError):
+        except NETWORK_ERRORS:
             if attempt == len(RETRY_DELAYS):
                 raise
         sleep(RETRY_DELAYS[attempt])
@@ -130,7 +133,7 @@ def tombstone_absent(url: str, *, sleep: Callable[[float], None] = time.sleep) -
 
     try:
         return _with_retries(probe, sleep)
-    except (HTTPError, URLError, TimeoutError, ConnectionError, OSError):
+    except (*NETWORK_ERRORS, OSError):
         return False
 
 
@@ -157,7 +160,7 @@ def download(
     except VerificationError:
         destination.unlink(missing_ok=True)
         raise
-    except (HTTPError, URLError, TimeoutError, ConnectionError, OSError) as error:
+    except (*NETWORK_ERRORS, OSError) as error:
         destination.unlink(missing_ok=True)
         # Never repeat the URL: it is a credential for the object.
         raise VerificationError("Confidential source tarball could not be downloaded") from error
