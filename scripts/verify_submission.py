@@ -294,6 +294,11 @@ SANDBOX_ENVIRONMENT = (
     "MATHLIB_CACHE_DIR",
     "MATHLIB_CACHE_GET_URL",
     "LAKE_PKG_URL_MAP",
+    # Set only for a qualified root's trusted Lake cache restore (build_allowlisted_roots);
+    # stripped from every inherited environment by `strip_trusted_lake_cache_environment`.
+    "LAKE_CACHE_DIR",
+    "LAKE_CONFIG",
+    "LAKE_NO_CACHE",
     "COMPARATOR_BWRAP",
     "PALOMAR_PROTECTED_CHALLENGE_MODULE",
 )
@@ -350,6 +355,8 @@ class ResourceExhausted(VerificationError):
         )
 
 
+# Stages whose workload is Palomar's preparation of allowlisted dependencies.
+TRUSTED_DEPENDENCY_STAGES = frozenset({"trusted-cache", "trusted-roots"})
 DIAGNOSTICS_SCHEMA_VERSION = 1
 MAX_DIAGNOSTICS = 50
 PALOMAR_OWNED_STAGES = frozenset(
@@ -2038,6 +2045,12 @@ def allowed_roots() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         include_semver_release_tags = root.get("include_semver_release_tags", False)
         trust_level = root.get("trust_level")
         repository_aliases = root.get("repository_aliases", [])
+        trusted_lake_cache = root.get("trusted_lake_cache")
+        if trusted_lake_cache is not None and (
+            not isinstance(repository, str)
+            or not valid_trusted_lake_cache_config(trusted_lake_cache, repository)
+        ):
+            raise VerificationError(f"invalid trusted Lake cache configuration: {repository!r}")
         if (
             not isinstance(repository, str)
             or github_repository(f"https://github.com/{repository}") != repository
@@ -2469,6 +2482,628 @@ def nested_package_links(
     return nested.resolve()
 
 
+# --- Trusted Lake cache of a qualified root -------------------------------------------
+#
+# A qualified root may name an official Lake artifact cache channel whose maps only a
+# clean, cache-free build of its canonical branch publishes (docs/tauceti-cache-trust.md).
+# Palomar trusts those bytes as it trusts Mathlib's cache. It never runs Lake with network:
+# a verifier-selected curl fetches maps and archives into a disposable directory, Lake reads
+# that directory offline, and every module Lake cannot restore is built from verified source.
+
+TRUSTED_LAKE_CACHE_KEYS = frozenset(
+    {"artifact_endpoint", "revision_endpoint", "repository", "window"}
+)
+TRUSTED_LAKE_CACHE_ENDPOINT_RE = re.compile(
+    r"^https://[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[A-Za-z0-9_-]+)+$"
+)
+LAKE_HASH_RE = re.compile(r"^[0-9a-f]{16}$")
+LAKE_ARTIFACT_NAME_RE = re.compile(r"^(?P<hash>[0-9a-f]{16})\.(?P<ext>[a-z]{1,16})$")
+LAKE_TOOLCHAIN_RE = re.compile(r"^leanprover/lean4:[A-Za-z0-9._-]+$")
+MAX_TRUSTED_LAKE_CACHE_WINDOW = 4096
+MAX_TRUSTED_LAKE_CACHE_MAP_BYTES = 64 * 1024**2
+MAX_TRUSTED_LAKE_CACHE_ENTRIES = 250_000
+MAX_TRUSTED_LAKE_CACHE_FILE_BYTES = 256 * 1024**2
+MAX_TRUSTED_LAKE_CACHE_BYTES = 16 * 1024**3
+# Each probe restores one more layer of the import graph; past this depth the remaining
+# archives of the selected maps are fetched at once.
+MAX_TRUSTED_LAKE_CACHE_WAVES = 8
+TRUSTED_LAKE_CACHE_DOWNLOAD_SECONDS = 1800
+TRUSTED_LAKE_CACHE_DOWNLOAD_PROPERTIES = (
+    "MemoryMax=2G",
+    "TasksMax=256",
+    "LimitNOFILE=16384",
+    f"LimitFSIZE={MAX_TRUSTED_LAKE_CACHE_FILE_BYTES}",
+)
+# A Lake cache service that cannot answer. Lake records it in each mapping, so the offline
+# probe build names every archive it would fetch instead of fetching it.
+TRUSTED_LAKE_CACHE_PROBE_SERVICE = "palomar-offline-probe"
+TRUSTED_LAKE_CACHE_PROBE_ENDPOINT = "file:///nonexistent/palomar-offline-probe"
+TRUSTED_LAKE_CACHE_ENVIRONMENT = ("LAKE_CACHE_DIR", "LAKE_CONFIG", "LAKE_NO_CACHE")
+
+
+def strip_trusted_lake_cache_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Keep inherited Lake cache settings out of every sandboxed phase."""
+    for name in (*TRUSTED_LAKE_CACHE_ENVIRONMENT, "LAKE_ARTIFACT_CACHE", "LAKE_RESTORE_ARTIFACTS"):
+        environment.pop(name, None)
+    return environment
+
+
+def valid_trusted_lake_cache_config(value: object, repository: str) -> bool:
+    if not isinstance(value, dict) or set(value) != TRUSTED_LAKE_CACHE_KEYS:
+        return False
+    window = value["window"]
+    return (
+        all(
+            isinstance(value[key], str) and TRUSTED_LAKE_CACHE_ENDPOINT_RE.fullmatch(value[key])
+            for key in ("artifact_endpoint", "revision_endpoint")
+        )
+        and value["repository"] == repository
+        and type(window) is int
+        and 0 <= window <= MAX_TRUSTED_LAKE_CACHE_WINDOW
+    )
+
+
+def lake_toolchain_scope(toolchain: str) -> str:
+    """Lake's revision-map directory for an official toolchain (`toolchain2Dir`)."""
+    if not LAKE_TOOLCHAIN_RE.fullmatch(toolchain):
+        raise VerificationError(f"trusted Lake cache toolchain is not an official release: {toolchain!r}")
+    return toolchain.replace("/", "--").replace(":", "---")
+
+
+@dataclass(frozen=True)
+class TrustedLakeCacheMap:
+    """The validated, merged input-to-archive mappings Palomar will offer Lake."""
+
+    schema: str
+    revisions: tuple[str, ...]
+    entries: dict[str, str]
+
+
+class _CommitReader:
+    """Read commit parents from the local object store; shallow grafts do not apply."""
+
+    def __init__(self, package_dir: Path, environment: dict[str, str]) -> None:
+        env = environment.copy()
+        # Commits outside the fetched history end the walk; never fetch them lazily.
+        env["GIT_NO_LAZY_FETCH"] = "1"
+        self._process = subprocess.Popen(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *GIT_NO_AUTO_MAINTENANCE,
+                "-C",
+                str(package_dir),
+                "cat-file",
+                "--batch",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+
+    def first_parent(self, commit: str) -> str | None:
+        assert self._process.stdin is not None and self._process.stdout is not None
+        self._process.stdin.write(f"{commit}\n".encode())
+        self._process.stdin.flush()
+        header = self._process.stdout.readline().decode(errors="replace").split()
+        if len(header) != 3 or header[1] != "commit" or not header[2].isdigit():
+            return None
+        body = self._process.stdout.read(int(header[2]) + 1)
+        for line in body.decode(errors="replace").splitlines():
+            if not line:
+                break
+            if line.startswith("parent "):
+                parent = line.removeprefix("parent ").strip()
+                return parent if submission_contract.SHA_RE.fullmatch(parent) else None
+        return None
+
+    def close(self) -> None:
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+        if self._process.stdout is not None:
+            self._process.stdout.close()
+        try:
+            self._process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait()
+
+
+def trusted_lake_cache_history_url(repository: str) -> str:
+    return f"https://github.com/{repository}"
+
+
+def trusted_lake_cache_revisions(
+    package_dir: Path,
+    revision: str,
+    *,
+    repository: str,
+    window: int,
+    environment: dict[str, str],
+    work: Path,
+) -> list[str]:
+    """Canonical-branch revisions near `revision`, nearest first.
+
+    The pinned checkout is shallow, so its ancestors come from a separate commit-only
+    fetch of the canonical repository into the disposable work directory. Descendants
+    come from the canonical branch head that `verify_official_revision` fetched. Either
+    list may be empty; a map is useful wherever it lies, because Lake keys outputs by
+    input hash.
+    """
+    history = work / "history.git"
+    run(["git", "init", "--bare", "--quiet", str(history)], env=environment)
+    fetched = run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *GIT_NO_AUTO_MAINTENANCE,
+            "-C",
+            str(history),
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--filter=tree:0",
+            f"--depth={window + 1}",
+            trusted_lake_cache_history_url(repository),
+            revision,
+        ],
+        env=environment,
+        timeout=600,
+        check=False,
+    )
+    ancestors = [revision]
+    if fetched.returncode == 0:
+        reader = _CommitReader(history, environment)
+        try:
+            current: str | None = revision
+            while current is not None and len(ancestors) <= window:
+                current = reader.first_parent(current)
+                if current is not None:
+                    ancestors.append(current)
+        finally:
+            reader.close()
+    shutil.rmtree(history)
+    descendants: list[str] = []
+    head = run(
+        [
+            "git",
+            "-C",
+            str(package_dir),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/remotes/palomar-official/head^{commit}",
+        ],
+        env=environment,
+        check=False,
+    ).stdout.strip()
+    if submission_contract.SHA_RE.fullmatch(head):
+        reader = _CommitReader(package_dir, environment)
+        try:
+            chain: list[str] = []
+            current = head
+            # Bounded by the branch's own length; the walk stops at the pin.
+            while current is not None and current != revision and len(chain) < 1_000_000:
+                chain.append(current)
+                current = reader.first_parent(current)
+            if current == revision:
+                descendants = list(reversed(chain))[:window]
+        finally:
+            reader.close()
+    # By distance from the pin, the ancestor first on a tie.
+    ordered: list[str] = []
+    for distance in range(window + 1):
+        for candidates, index in ((ancestors, distance), (descendants, distance - 1)):
+            if 0 <= index < len(candidates) and candidates[index] not in ordered:
+                ordered.append(candidates[index])
+    return ordered
+
+
+def _trusted_lake_cache_tools() -> tuple[Path, Path]:
+    curl = shutil.which("curl", path="/usr/bin:/bin")
+    env_tool = shutil.which("env", path="/usr/bin:/bin")
+    if not curl or not env_tool:
+        raise VerificationError("trusted Lake cache download tools are unavailable")
+    return Path(curl).resolve(strict=True), Path(env_tool).resolve(strict=True)
+
+
+def _trusted_lake_cache_curl(
+    pairs: list[tuple[str, Path]],
+    *,
+    work: Path,
+    destination: Path,
+    environment: dict[str, str],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> None:
+    """Fetch fixed-host HTTPS URLs into one directory with a verifier-selected curl."""
+    if not pairs:
+        return
+    curl, env_tool = _trusted_lake_cache_tools()
+    curl_tools = {**tools, **tool_snapshot([curl, env_tool])}
+    config_dir = work / "curl"
+    if config_dir.exists():
+        shutil.rmtree(config_dir)
+    config_dir.mkdir()
+    lines: list[str] = []
+    for url, path in pairs:
+        if not url.startswith("https://") or path.parent != destination:
+            raise VerificationError("trusted Lake cache download request is malformed")
+        lines.extend([f"url = {json.dumps(url)}", f"output = {json.dumps(str(path))}"])
+    config = config_dir / "download.conf"
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    clean_env = {
+        "HOME": str(config_dir.resolve()),
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": str(config_dir.resolve()),
+        "LANG": "C.UTF-8",
+    }
+    sandboxed_run(
+        [
+            str(env_tool),
+            "-i",
+            *(f"{name}={value}" for name, value in clean_env.items()),
+            str(curl),
+            "--disable",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--remove-on-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--parallel",
+            "--parallel-immediate",
+            "--parallel-max",
+            "64",
+            "--retry",
+            "3",
+            "--connect-timeout",
+            "30",
+            "--max-filesize",
+            str(MAX_TRUSTED_LAKE_CACHE_FILE_BYTES),
+            "--config",
+            str(config),
+        ],
+        cwd=config_dir,
+        environment=environment,
+        writable_directories=[destination],
+        readable_paths=sorted({config_dir.resolve(), *system_readable_paths()}),
+        executable_paths=executable_paths,
+        tools=curl_tools,
+        timeout=TRUSTED_LAKE_CACHE_DOWNLOAD_SECONDS,
+        check=False,
+        unrestricted_network=True,
+        resource_properties=TRUSTED_LAKE_CACHE_DOWNLOAD_PROPERTIES,
+    )
+    shutil.rmtree(config_dir)
+
+
+def _downloaded_regular_files(directory: Path, expected: set[str]) -> dict[str, int]:
+    """Sizes of the expected downloads that arrived, refusing anything else."""
+    sizes: dict[str, int] = {}
+    for path in directory.iterdir():
+        info = path.lstat()
+        if path.name not in expected or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise VerificationError(f"unexpected trusted Lake cache download: {path.name!r}")
+        if info.st_size == 0 or info.st_size > MAX_TRUSTED_LAKE_CACHE_FILE_BYTES:
+            raise VerificationError(f"invalid trusted Lake cache download size: {path.name!r}")
+        sizes[path.name] = info.st_size
+    return sizes
+
+
+def parse_trusted_lake_cache_map(raw: bytes) -> tuple[str, dict[str, str]] | None:
+    """Lake's JSON-lines map, or None when it is not the plain module-archive shape."""
+    if len(raw) > MAX_TRUSTED_LAKE_CACHE_MAP_BYTES:
+        return None
+    try:
+        lines = raw.decode("utf-8").splitlines()
+        schema = json.loads(lines[0]) if lines else None
+        rows = [json.loads(line) for line in lines[1:] if line.strip()]
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(schema, str) or len(rows) > MAX_TRUSTED_LAKE_CACHE_ENTRIES:
+        return None
+    entries: dict[str, str] = {}
+    for row in rows:
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not isinstance(row[0], str)
+            or not LAKE_HASH_RE.fullmatch(row[0])
+            or row[0] in entries
+        ):
+            return None
+        # Structured outputs are not module archives; leaving them out only costs a rebuild.
+        if isinstance(row[1], str) and LAKE_ARTIFACT_NAME_RE.fullmatch(row[1]):
+            entries[row[0]] = row[1]
+    return schema, entries
+
+
+def fetch_trusted_lake_cache_map(
+    config: dict[str, Any],
+    *,
+    toolchain: str,
+    revisions: list[str],
+    work: Path,
+    environment: dict[str, str],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> TrustedLakeCacheMap | None:
+    """Merge the trusted maps nearest the pin: one ancestor and one descendant at most."""
+    scope = lake_toolchain_scope(toolchain)
+    maps_dir = work / "maps"
+    maps_dir.mkdir()
+    base = f"{config['revision_endpoint']}/{config['repository']}/tc/{scope}"
+    _trusted_lake_cache_curl(
+        [(f"{base}/{revision}.jsonl", maps_dir / f"{revision}.jsonl") for revision in revisions],
+        work=work,
+        destination=maps_dir,
+        environment=environment,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+    present = _downloaded_regular_files(maps_dir, {f"{revision}.jsonl" for revision in revisions})
+    selected: list[tuple[str, str, dict[str, str]]] = []
+    for revision in revisions:
+        if f"{revision}.jsonl" not in present:
+            continue
+        parsed = parse_trusted_lake_cache_map((maps_dir / f"{revision}.jsonl").read_bytes())
+        if parsed is None:
+            continue
+        if selected and parsed[0] != selected[0][1]:
+            continue
+        selected.append((revision, parsed[0], parsed[1]))
+        if len(selected) == 2:
+            break
+    shutil.rmtree(maps_dir)
+    if not selected:
+        return None
+    entries: dict[str, str] = {}
+    for _revision, _schema, mapping in selected:
+        for input_hash, name in mapping.items():
+            entries.setdefault(input_hash, name)
+    if len(entries) > MAX_TRUSTED_LAKE_CACHE_ENTRIES:
+        return None
+    return TrustedLakeCacheMap(
+        selected[0][1], tuple(revision for revision, _schema, _mapping in selected), entries
+    )
+
+
+def _download_trusted_lake_cache_artifacts(
+    names: set[str],
+    config: dict[str, Any],
+    *,
+    artifacts: Path,
+    work: Path,
+    environment: dict[str, str],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> None:
+    base = f"{config['artifact_endpoint']}/{config['repository']}"
+    pairs = []
+    for name in sorted(names):
+        match = LAKE_ARTIFACT_NAME_RE.fullmatch(name)
+        if match is None:
+            raise VerificationError(f"invalid trusted Lake cache archive name: {name!r}")
+        # Lake stores every remote artifact as `<hash>.art`, whatever its local extension.
+        pairs.append((f"{base}/{match['hash']}.art", artifacts / name))
+    _trusted_lake_cache_curl(
+        pairs,
+        work=work,
+        destination=artifacts,
+        environment=environment,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+
+
+def restore_trusted_lake_cache(
+    root: dict[str, Any],
+    *,
+    root_dir: Path,
+    revision: str,
+    git_env: dict[str, str],
+    build_env: dict[str, str],
+    targets: list[str],
+    work: Path,
+    lake: Path,
+    writable: list[Path],
+    readable_paths: list[Path],
+    executable_paths: list[Path],
+    tools: dict[Path, str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Restore what the trusted channel holds; return the evidence and the build environment.
+
+    Network access is confined to the verifier's curl. Lake runs offline: `lake cache add`
+    records the merged map, and `lake build --no-build` probes name the archives the import
+    closure needs, one layer of the import graph at a time, which curl then fetches. The final
+    `lake build` restores those archives and builds anything else from source. Cache misses,
+    unavailable services and unusual map shapes therefore only cost build time.
+    """
+    started = time.monotonic()
+    config = root["trusted_lake_cache"]
+    evidence: dict[str, Any] = {
+        "repository": config["repository"],
+        "revision_endpoint": config["revision_endpoint"],
+        "artifact_endpoint": config["artifact_endpoint"],
+        "map_revisions": [],
+        "map_entries": 0,
+        "probes": 0,
+        "bulk": False,
+        "archives": 0,
+        "bytes": 0,
+    }
+    try:
+        toolchain = (root_dir / "lean-toolchain").read_text(encoding="utf-8").strip()
+        lake_toolchain_scope(toolchain)
+    except (OSError, UnicodeDecodeError, VerificationError):
+        evidence["seconds"] = round(time.monotonic() - started, 3)
+        evidence["outcome"] = "unsupported-toolchain"
+        return evidence, build_env
+    revisions = trusted_lake_cache_revisions(
+        root_dir,
+        revision,
+        repository=config["repository"],
+        window=int(config["window"]),
+        environment=git_env,
+        work=work,
+    )
+    cache_map = fetch_trusted_lake_cache_map(
+        config,
+        toolchain=toolchain,
+        revisions=revisions,
+        work=work,
+        environment=build_env,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+    if cache_map is None:
+        evidence["seconds"] = round(time.monotonic() - started, 3)
+        evidence["outcome"] = "no-map"
+        return evidence, build_env
+    evidence["map_revisions"] = list(cache_map.revisions)
+    evidence["map_entries"] = len(cache_map.entries)
+
+    cache_dir = work / "lake-cache"
+    artifacts = cache_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    map_file = work / "trusted-outputs.jsonl"
+    map_file.write_text(
+        "\n".join(
+            [
+                json.dumps(cache_map.schema),
+                *(json.dumps([key, value]) for key, value in sorted(cache_map.entries.items())),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lake_config = work / "lake-config.toml"
+    lake_config.write_text(
+        "\n".join(
+            (
+                "[[cache.service]]",
+                f"name = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_SERVICE)}",
+                'kind = "s3"',
+                f"artifactEndpoint = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_ENDPOINT + '/artifacts')}",
+                f"revisionEndpoint = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_ENDPOINT + '/revisions')}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    cache_env = build_env.copy()
+    cache_env.update(
+        {
+            "LAKE_CACHE_DIR": str(cache_dir.resolve()),
+            "LAKE_CONFIG": str(lake_config.resolve()),
+            "LAKE_NO_CACHE": "true",
+        }
+    )
+    cache_readable = sorted({*readable_paths, work.resolve()})
+    added = sandboxed_run(
+        [
+            str(lake),
+            "cache",
+            "add",
+            str(map_file.resolve()),
+            f"--service={TRUSTED_LAKE_CACHE_PROBE_SERVICE}",
+            f"--repo={config['repository']}",
+        ],
+        cwd=root_dir,
+        environment=cache_env,
+        writable_directories=[*writable, cache_dir.resolve()],
+        readable_paths=cache_readable,
+        executable_paths=executable_paths,
+        tools=tools,
+        timeout=EXECUTION_BUDGET_SECONDS,
+        check=False,
+    )
+    if added.returncode:
+        evidence["seconds"] = round(time.monotonic() - started, 3)
+        evidence["outcome"] = "lake-cache-add-failed"
+        return evidence, build_env
+
+    wanted = set(cache_map.entries.values())
+    by_hash = {LAKE_ARTIFACT_NAME_RE.fullmatch(name)["hash"]: name for name in wanted}
+    probe_url = re.compile(
+        re.escape(f"{TRUSTED_LAKE_CACHE_PROBE_ENDPOINT}/artifacts/{config['repository']}/")
+        + r"(?P<hash>[0-9a-f]{16})\.art"
+    )
+    attempted: set[str] = set()
+
+    def fetch(names: set[str]) -> None:
+        _download_trusted_lake_cache_artifacts(
+            names,
+            config,
+            artifacts=artifacts,
+            work=work,
+            environment=build_env,
+            executable_paths=executable_paths,
+            tools=tools,
+        )
+        attempted.update(names)
+        sizes = _downloaded_regular_files(artifacts, attempted)
+        total = sum(sizes.values())
+        if total > MAX_TRUSTED_LAKE_CACHE_BYTES:
+            raise VerificationError("trusted Lake cache downloads exceed the byte cap")
+        evidence["archives"] = len(sizes)
+        evidence["bytes"] = total
+
+    outcome = "restored"
+    while True:
+        if evidence["probes"] >= MAX_TRUSTED_LAKE_CACHE_WAVES:
+            fetch(wanted - attempted)
+            evidence["bulk"] = True
+            break
+        evidence["probes"] += 1
+        probe = sandboxed_run(
+            [str(lake), "build", "--no-build", "-v", *targets],
+            cwd=root_dir,
+            environment=cache_env,
+            writable_directories=writable,
+            readable_paths=cache_readable,
+            executable_paths=executable_paths,
+            tools=tools,
+            timeout=EXECUTION_BUDGET_SECONDS,
+            check=False,
+        )
+        if probe.returncode == 0:
+            break
+        transcript = f"{probe.stdout}\n{probe.stderr}"
+        requested = {
+            by_hash[match["hash"]]
+            for match in probe_url.finditer(transcript)
+            if match["hash"] in by_hash
+        } - attempted
+        if not requested:
+            if probe.returncode != 3:
+                outcome = "probe-failed"
+            break
+        fetch(requested)
+    evidence["outcome"] = outcome
+    evidence["seconds"] = round(time.monotonic() - started, 3)
+    return evidence, cache_env
+
+
+def _remove_trusted_lake_cache_work(work: Path) -> None:
+    """Delete a disposable cache directory even where Lake made files read-only."""
+    if not work.exists():
+        return
+    for current, directories, _files in os.walk(work):
+        for name in directories:
+            path = Path(current) / name
+            if not path.is_symlink():
+                path.chmod(0o700)
+    shutil.rmtree(work)
+
+
 def trusted_root_targets(root_dir: Path, imports: frozenset[str]) -> list[str] | None:
     """Lake module targets for the imports whose source lies in a trusted root.
 
@@ -2507,14 +3142,18 @@ def build_allowlisted_roots(
     executable_paths: list[Path],
     tools: dict[Path, str],
     required_imports: frozenset[str] | None = None,
-) -> None:
+    use_trusted_lake_cache: bool = True,
+) -> dict[str, dict[str, Any]]:
     """Build non-Mathlib trusted roots from freshly reset Lake state.
 
     With `required_imports`, only the root modules those imports reach are
     built; without it, the root's default targets are. Either way the build
-    runs from the root's verified source in the same sandbox.
+    runs from the root's verified source in the same sandbox. A root with a
+    `trusted_lake_cache` first restores what that channel holds; the returned
+    evidence records it per repository.
     """
     roots, aliases = allowed_roots()
+    evidence: dict[str, dict[str, Any]] = {}
     by_name = {package["name"]: package for package in packages}
     for root in sorted(roots, key=lambda item: item["trust_level"] != "high"):
         repository = str(root["repository"])
@@ -2572,20 +3211,52 @@ def build_allowlisted_roots(
             # Nothing reaches this root; its Lake state stays freshly reset.
             shutil.rmtree(nested)
             continue
+        strip_trusted_lake_cache_environment(build_env)
+        cache_work: Path | None = None
         try:
+            build_readable = readable_paths
+            if use_trusted_lake_cache and root.get("trusted_lake_cache") is not None:
+                cache_work = Path(
+                    tempfile.mkdtemp(prefix=".palomar-trusted-lake-cache-", dir=checkout.parent)
+                ).resolve()
+                work = cache_work
+                evidence[repository], build_env = restore_trusted_lake_cache(
+                    root,
+                    root_dir=root_dir,
+                    revision=root_package["revision"],
+                    git_env=git_environment(source, base_env),
+                    build_env=build_env,
+                    targets=targets or [],
+                    work=work,
+                    lake=lake,
+                    writable=writable,
+                    readable_paths=readable_paths,
+                    executable_paths=executable_paths,
+                    tools=tools,
+                )
+                build_readable = sorted({*readable_paths, work})
+            started = time.monotonic()
             sandboxed_run(
                 [str(lake), "build", *(targets or [])],
                 cwd=root_dir,
                 environment=build_env,
                 writable_directories=writable,
-                readable_paths=readable_paths,
+                readable_paths=build_readable,
                 executable_paths=executable_paths,
                 tools=tools,
                 timeout=EXECUTION_BUDGET_SECONDS,
             )
+            if repository in evidence:
+                evidence[repository]["build_seconds"] = round(time.monotonic() - started, 3)
         finally:
             if nested.is_dir():
                 shutil.rmtree(nested)
+            if cache_work is not None:
+                _remove_trusted_lake_cache_work(cache_work)
+        if repository in evidence:
+            # The cache directory is gone; nothing the restore wrote may point into it.
+            _validate_staged_build_tree(root_dir / ".lake" / "build", root_package["name"])
+    return evidence
 
 
 
@@ -6014,6 +6685,40 @@ def compile_canonical_challenge(
     return canonical_olean, dependencies, lean_paths
 
 
+def record_resource_exhaustion(
+    report: dict[str, Any], error: subprocess.TimeoutExpired | ResourceExhausted
+) -> None:
+    """Record a resource failure, offering a larger runner only for the submission's own work."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        bounded: VerificationError = ResourceExhausted(
+            "verification timed out outside the supervised workload; "
+            "report the workflow URL so Palomar can inspect it",
+        )
+    else:
+        bounded = error
+    if report.get("last_active_stage") in TRUSTED_DEPENDENCY_STAGES:
+        # Palomar's own dependency stages ran out, not the submission's build: a
+        # larger runner is not the remedy, and the submitter cannot act on it.
+        bounded = VerificationError(
+            f"{bounded} while Palomar prepared trusted dependency outputs "
+            f"(stage {report['last_active_stage']})",
+            code="palomar.trusted_dependency_resource_exhausted",
+            owner="palomar",
+            next_action=(
+                "Do not change the repository, and do not ask for a larger runner: "
+                "Palomar ran out of resources preparing the allowlisted dependencies "
+                "the project imports, which Palomar must fix. Report the workflow URL."
+            ),
+            retryable=True,
+        )
+    elif isinstance(bounded, ResourceExhausted) and bounded.kind in {"oom", "timeout"}:
+        # Only trusted cgroup telemetry or a supervisor deadline may
+        # authorize a larger runner. Candidate output is never a signal.
+        report["resource_failure"] = {"kind": bounded.kind}
+    report["errors"].append(str(bounded))
+    report_diagnostic(report, bounded, stage="resource-exhausted")
+
+
 def execute(args: argparse.Namespace) -> int:
     global _EXECUTION_DEADLINE, _RESOURCE_DISK_PATH, _RESOURCE_METRICS_PATH, _RESOURCE_PHASE
 
@@ -6110,7 +6815,7 @@ def execute(args: argparse.Namespace) -> int:
         for tool in (bwrap, metrics_wrapper, babysitter, delegate, verifier):
             if not tool.is_file():
                 raise VerificationError(f"missing verifier tool: {tool}")
-        env = os.environ.copy()
+        env = strip_trusted_lake_cache_environment(os.environ.copy())
         env.pop("LAKE_PKG_URL_MAP", None)
         env.update(
             {
@@ -6411,7 +7116,7 @@ def execute(args: argparse.Namespace) -> int:
         required_imports = (
             None if dependency_imports is None else candidate_imports | dependency_imports
         )
-        build_allowlisted_roots(
+        report["trusted_root_caches"] = build_allowlisted_roots(
             source,
             checkout=checkout,
             packages=packages,
@@ -6698,19 +7403,7 @@ def execute(args: argparse.Namespace) -> int:
         guarded_write()
         report["error_kind"] = "infrastructure/resource-exhausted"
         report["retryable"] = True
-        if isinstance(error, subprocess.TimeoutExpired):
-            bounded = ResourceExhausted(
-                "verification timed out outside the supervised workload; "
-                "report the workflow URL so Palomar can inspect it",
-            )
-        else:
-            bounded = error
-        if bounded.kind in {"oom", "timeout"}:
-            # Only trusted cgroup telemetry or a supervisor deadline may
-            # authorize a larger runner. Candidate output is never a signal.
-            report["resource_failure"] = {"kind": bounded.kind}
-        report["errors"].append(str(bounded))
-        report_diagnostic(report, bounded, stage="resource-exhausted")
+        record_resource_exhaustion(report, error)
         guarded_write()
     except Exception as error:  # noqa: BLE001 -- all verifier failures become a bounded report
         submitter_failure = (

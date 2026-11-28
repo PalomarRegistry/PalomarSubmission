@@ -132,7 +132,7 @@ The maintained test surfaces are:
   `README.md`, `SECURITY.md`, `LICENSE`,
   `docs/comparator-declaration-closure.md`,
   `docs/launch-security-review.md`, `docs/mathlib-cache-trust.md`,
-  `taxonomies/README.md`, and `taxonomies/LICENSE.md` skip the cold build. A new
+  `docs/tauceti-cache-trust.md`, `taxonomies/README.md`, and `taxonomies/LICENSE.md` skip the cold build. A new
   documentation path is not implicitly trusted. Every non-pull-request event
   runs the cold build, including manual dispatch and the weekly compatibility
   canary. The required `compatibility` gate passes only when classification
