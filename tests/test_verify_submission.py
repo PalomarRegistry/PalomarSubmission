@@ -5033,7 +5033,8 @@ class DispatchWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["jobs"]["profile"]["runs-on"], "ubuntu-24.04")
         self.assertEqual(
             set(workflow["on"]["workflow_call"]["inputs"]),
-            set(workflow["on"]["workflow_dispatch"]["inputs"]) | {"pipeline_commit"},
+            set(workflow["on"]["workflow_dispatch"]["inputs"])
+            | {"pipeline_commit", "source_url", "source_sha256", "tombstone_url"},
         )
         checkout = next(
             step

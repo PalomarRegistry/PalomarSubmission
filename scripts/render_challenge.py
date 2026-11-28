@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
+from scripts import confidential_source  # noqa: E402
 from scripts.render_report import (  # noqa: E402
     AcceptedRenderPaths,
     PreparedRenderReport,
@@ -897,7 +898,19 @@ def prepare(args: argparse.Namespace) -> int:
             lean_toolchain_path=args.lean_toolchain_path.strip(),
         )
         source = work / "source"
-        clone_commit(repository_url, commit, source)
+        confidential = confidential_source.confidential_inputs(
+            {
+                "source_url": getattr(args, "source_url", ""),
+                "source_sha256": getattr(args, "source_sha256", ""),
+                "tombstone_url": getattr(args, "tombstone_url", ""),
+            }
+        )
+        if confidential is None:
+            clone_commit(repository_url, commit, source)
+        else:
+            confidential_source.materialize(
+                confidential["source_url"], confidential["source_sha256"], source
+            )
         if tree_size(source) > MAX_SOURCE_BYTES:
             raise VerificationError("checked-out source exceeds the 500 MiB cap")
         project_relative = (
@@ -3409,6 +3422,11 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--comparator-config-path", required=True)
     prepare_parser.add_argument("--lakefile-path", required=True)
     prepare_parser.add_argument("--lean-toolchain-path", required=True)
+    # Blank for public renders. A confidential render supplies all three and
+    # reads the server's tarball instead of checking out GitHub.
+    prepare_parser.add_argument("--source-url", default="")
+    prepare_parser.add_argument("--source-sha256", default="")
+    prepare_parser.add_argument("--tombstone-url", default="")
     prepare_parser.add_argument("--work-dir", required=True)
     prepare_parser.add_argument("--output", required=True)
     prepare_parser.set_defaults(func=prepare)

@@ -22,6 +22,38 @@ jobs:
       request_id: preflight001
       mode: full
       options: '{"project_path":"tests/fixtures/reusable-preflight","comparator_config_path":"tests/fixtures/reusable-preflight/comparator.json","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
+  confidential_fixture:
+    if: github.repository == 'PalomarRegistry/PalomarSubmission'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      source_sha256: ${{ steps.tarball.outputs.sha256 }}
+    steps:
+      - name: Hash this commit's GitHub tarball
+        id: tarball
+        env:
+          SOURCE_URL: https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --proto '=https' --output "$RUNNER_TEMP/source.tar.gz" "$SOURCE_URL"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/source.tar.gz" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+  reusable_confidential_preflight:
+    # A confidential call reads a tarball, never a checkout. GitHub's tarball
+    # of this commit stands in for the server's R2 copy, and a URL that
+    # answers 404 stands in for an absent withdrawal tombstone.
+    needs: confidential_fixture
+    uses: ./.github/workflows/submission.yml
+    with:
+      repository: ${{ github.repository }}
+      commit: ${{ github.sha }}
+      pipeline_commit: ${{ github.sha }}
+      request_id: confpreflt01
+      mode: preflight
+      options: '{"project_path":"tests/fixtures/reusable-preflight","comparator_config_path":"tests/fixtures/reusable-preflight/comparator.json","authorization_relationship":"I am a Palomar Technical Maintainer testing the workflow"}'
+      source_url: https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.sha }}
+      source_sha256: ${{ needs.confidential_fixture.outputs.source_sha256 }}
+      tombstone_url: https://codeload.github.com/${{ github.repository }}/tar.gz/0000000000000000000000000000000000000000
   render_fixture:
     if: github.repository == 'PalomarRegistry/PalomarSubmission'
     runs-on: ubuntu-24.04
