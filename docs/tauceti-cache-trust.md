@@ -82,10 +82,10 @@ linked. For a root with `trusted_lake_cache`, before the usual build of the
 imported modules:
 
 1. If the import closure, estimated from the root's import headers, has fewer
-   than 750 modules, it skips the cache and builds from source: compiling
-   that many modules is faster than fetching a map's archives (about 0.17 s per module
-   from source on the default 16x32 runner, against about two minutes to fetch
-   and stage a whole map). The estimate only chooses the faster route.
+   than 400 modules, it skips the cache and builds from source: compiling
+   that many modules is faster than fetching a map's archives (about 0.18 s
+   per module from source on the default 16x32 runner, against about 50 s to
+   fetch and stage a whole map). The estimate only chooses the faster route.
 2. Otherwise it lists canonical-branch revisions near the pin, nearest first:
    the pin's first-parent ancestors, from a commit-only fetch of the canonical
    repository, and its first-parent descendants on the `main` head that

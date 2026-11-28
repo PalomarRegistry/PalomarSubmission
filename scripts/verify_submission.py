@@ -2506,8 +2506,8 @@ MAX_TRUSTED_LAKE_CACHE_FILE_BYTES = 256 * 1024**2
 MAX_TRUSTED_LAKE_CACHE_BYTES = 16 * 1024**3
 # Below this many root modules, compiling the import closure from source is faster than
 # fetching a whole map's archives. Measured on palomar-namespace-16x32-v1 (28 Nov 2026):
-# about 0.17 s per TauCeti module from source, about 130 s to fetch and stage a map.
-TRUSTED_LAKE_CACHE_MIN_MODULES = 750
+# about 0.18 s per TauCeti module from source, about 50 s to fetch and stage a map.
+TRUSTED_LAKE_CACHE_MIN_MODULES = 400
 TRUSTED_LAKE_CACHE_DOWNLOAD_SECONDS = 1800
 TRUSTED_LAKE_CACHE_DOWNLOAD_PROPERTIES = (
     "MemoryMax=2G",
