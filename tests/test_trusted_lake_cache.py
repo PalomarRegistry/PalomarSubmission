@@ -191,7 +191,7 @@ class TrustedLakeCacheRestoreTests(unittest.TestCase):
             )
 
     @staticmethod
-    def serve(command, maps):
+    def serve(command, maps, skip=None):
         config = Path(command[command.index("--config") + 1])
         lines = config.read_text().splitlines()
         for url_line, output_line in zip(lines[::2], lines[1::2], strict=True):
@@ -199,21 +199,19 @@ class TrustedLakeCacheRestoreTests(unittest.TestCase):
             output = Path(json.loads(output_line.removeprefix("output = ")))
             if url in maps:
                 output.write_text(maps[url])
-            elif url.startswith(CONFIG["artifact_endpoint"] + "/example/trusted/"):
+            elif url.startswith(CONFIG["artifact_endpoint"] + "/example/trusted/") and (
+                skip is None or skip not in url
+            ):
                 output.write_bytes(b"archive")
 
     def test_trusted_channel_is_fetched_by_curl_and_read_by_offline_lake(self):
         map_url = (f"{CONFIG['revision_endpoint']}/example/trusted/tc/"
                    f"leanprover--lean4---v4.36.0/{NEARBY}.jsonl")
         maps = {map_url: "\n".join([json.dumps("2026-03-17"),
-                                     json.dumps([INPUT_HASH, ARCHIVE])]) + "\n"}
+                                     json.dumps([INPUT_HASH, ARCHIVE]),
+                                     json.dumps(["1111111111111111", "2222222222222222.ltar"])])
+                + "\n"}
         calls: list[str] = []
-        probes = iter([
-            subprocess.CompletedProcess([], 3, "remote URL: "
-                f"{verifier.TRUSTED_LAKE_CACHE_PROBE_ENDPOINT}/artifacts/example/trusted/"
-                f"{ARCHIVE.removesuffix('.ltar')}.art\n", ""),
-            subprocess.CompletedProcess([], 0, "All targets up-to-date", ""),
-        ])
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             source, trusted = self.fixture(directory)
@@ -225,42 +223,67 @@ class TrustedLakeCacheRestoreTests(unittest.TestCase):
                     calls.append("curl")
                     self.assertTrue(network)
                     self.assertEqual(len(writable), 1)
-                    self.assertTrue(writable[0].name in {"maps", "artifacts"})
-                    self.serve(command, maps)
+                    self.assertIn(writable[0].name, {"maps", "artifacts"})
+                    self.serve(command, maps, skip="2222222222222222")
                     return subprocess.CompletedProcess(command, 0, "", "")
                 self.assertFalse(network)
                 environment = kwargs["environment"]
                 cache_dir = Path(environment["LAKE_CACHE_DIR"])
                 self.assertNotEqual(cache_dir, Path("/inherited"))
                 self.assertEqual(environment["LAKE_NO_CACHE"], "true")
+                self.assertEqual(Path(environment["LAKE_CONFIG"]).read_text(), "")
                 self.assertNotIn("LAKE_ARTIFACT_CACHE", environment)
                 if command[1:3] == ["cache", "add"]:
                     calls.append("add")
                     self.assertIn(cache_dir, writable)
-                    self.assertIn(f"--repo={CONFIG['repository']}", command)
+                    offered = Path(command[3]).read_text().splitlines()
+                    self.assertEqual(offered[1:], [json.dumps([INPUT_HASH, ARCHIVE])])
                     return subprocess.CompletedProcess(command, 0, "", "")
-                self.assertNotIn(cache_dir, writable)
-                self.assertTrue((cache_dir / "artifacts" / ARCHIVE).is_file() or "--no-build" in command)
-                if "--no-build" in command:
-                    calls.append("probe")
-                    return next(probes)
                 calls.append("build")
+                self.assertNotIn(cache_dir, writable)
+                self.assertTrue((cache_dir / "artifacts" / ARCHIVE).is_file())
                 self.assertEqual(command, ["/tools/lake", "build", "+Trusted.A"])
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            evidence = self.build(source, sandbox, maps)
-            self.assertEqual(calls, ["curl", "add", "probe", "curl", "probe", "build"])
+            with mock.patch.object(verifier, "TRUSTED_LAKE_CACHE_MIN_MODULES", 1):
+                evidence = self.build(source, sandbox, maps)
+            self.assertEqual(calls, ["curl", "curl", "add", "build"])
             record = evidence["example/trusted"]
-            self.assertEqual(record["outcome"], "restored")
+            self.assertEqual(record["outcome"], "staged")
+            self.assertEqual(record["closure_estimate"], 1)
             self.assertEqual(record["map_revisions"], [NEARBY])
-            self.assertEqual(record["map_entries"], 1)
-            self.assertEqual((record["probes"], record["archives"], record["bytes"]), (2, 1, 7))
-            self.assertFalse(record["bulk"])
+            self.assertEqual(record["map_entries"], 2)
+            self.assertEqual((record["archives"], record["bytes"]), (1, 7))
             self.assertEqual(
                 [path.name for path in directory.iterdir()], ["checkout"],
                 "the disposable cache directory must be removed",
             )
             self.assertFalse((trusted / ".lake" / "packages").exists())
+
+    def test_small_closure_builds_from_source_without_network(self):
+        calls: list[str] = []
+        with tempfile.TemporaryDirectory() as raw:
+            source, _trusted = self.fixture(Path(raw))
+
+            def sandbox(command, **kwargs):
+                calls.append(command[1])
+                self.assertFalse(kwargs.get("unrestricted_network", False))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            evidence = self.build(source, sandbox, {})
+            self.assertEqual(calls, ["build"])
+            self.assertEqual(evidence["example/trusted"]["outcome"], "small-closure")
+
+    def test_closure_estimate_follows_import_headers(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "R").mkdir()
+            (root / "R" / "A.lean").write_text("module\npublic import R.B\nimport Mathlib\n")
+            (root / "R" / "B.lean").write_text("module\nmeta import all R.C\n")
+            (root / "R" / "C.lean").write_text("module\n")
+            (root / "R" / "D.lean").write_text("module\n")
+            self.assertEqual(verifier.trusted_root_closure_size(root, ["+R.A"]), 3)
+            self.assertEqual(verifier.trusted_root_closure_size(root, []), 4)
 
     def test_missing_channel_builds_from_source_without_cache_settings(self):
         calls: list[str] = []
@@ -276,7 +299,8 @@ class TrustedLakeCacheRestoreTests(unittest.TestCase):
                     self.assertNotIn(name, kwargs["environment"])
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            evidence = self.build(source, sandbox, {})
+            with mock.patch.object(verifier, "TRUSTED_LAKE_CACHE_MIN_MODULES", 1):
+                evidence = self.build(source, sandbox, {})
             self.assertEqual(calls, ["curl", "build"])
             self.assertEqual(evidence["example/trusted"]["outcome"], "no-map")
 
@@ -289,7 +313,10 @@ class TrustedLakeCacheRestoreTests(unittest.TestCase):
                 (destination / "planted").write_text("x")
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with self.assertRaisesRegex(VerificationError, "unexpected trusted Lake cache download"):
+            with (
+                mock.patch.object(verifier, "TRUSTED_LAKE_CACHE_MIN_MODULES", 1),
+                self.assertRaisesRegex(VerificationError, "unexpected trusted Lake cache download"),
+            ):
                 self.build(source, sandbox, {})
 
 

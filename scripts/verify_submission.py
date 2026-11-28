@@ -2504,9 +2504,10 @@ MAX_TRUSTED_LAKE_CACHE_MAP_BYTES = 64 * 1024**2
 MAX_TRUSTED_LAKE_CACHE_ENTRIES = 250_000
 MAX_TRUSTED_LAKE_CACHE_FILE_BYTES = 256 * 1024**2
 MAX_TRUSTED_LAKE_CACHE_BYTES = 16 * 1024**3
-# Each probe restores one more layer of the import graph; past this depth the remaining
-# archives of the selected maps are fetched at once.
-MAX_TRUSTED_LAKE_CACHE_WAVES = 8
+# Below this many root modules, compiling the import closure from source is faster than
+# fetching a whole map's archives. Measured on palomar-namespace-16x32-v1 (28 Nov 2026):
+# about 0.17 s per TauCeti module from source, about 130 s to fetch and stage a map.
+TRUSTED_LAKE_CACHE_MIN_MODULES = 750
 TRUSTED_LAKE_CACHE_DOWNLOAD_SECONDS = 1800
 TRUSTED_LAKE_CACHE_DOWNLOAD_PROPERTIES = (
     "MemoryMax=2G",
@@ -2514,10 +2515,6 @@ TRUSTED_LAKE_CACHE_DOWNLOAD_PROPERTIES = (
     "LimitNOFILE=16384",
     f"LimitFSIZE={MAX_TRUSTED_LAKE_CACHE_FILE_BYTES}",
 )
-# A Lake cache service that cannot answer. Lake records it in each mapping, so the offline
-# probe build names every archive it would fetch instead of fetching it.
-TRUSTED_LAKE_CACHE_PROBE_SERVICE = "palomar-offline-probe"
-TRUSTED_LAKE_CACHE_PROBE_ENDPOINT = "file:///nonexistent/palomar-offline-probe"
 TRUSTED_LAKE_CACHE_ENVIRONMENT = ("LAKE_CACHE_DIR", "LAKE_CONFIG", "LAKE_NO_CACHE")
 
 
@@ -2760,7 +2757,7 @@ def _trusted_lake_cache_curl(
             "--parallel",
             "--parallel-immediate",
             "--parallel-max",
-            "64",
+            "128",
             "--retry",
             "3",
             "--connect-timeout",
@@ -2903,6 +2900,40 @@ def _download_trusted_lake_cache_artifacts(
     )
 
 
+LEAN_IMPORT_RE = re.compile(
+    r"^\s*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?(?P<module>[A-Za-z_][A-Za-z0-9_'.]*)"
+)
+
+
+def trusted_root_closure_size(root_dir: Path, targets: list[str]) -> int:
+    """Estimate how many root modules the targets reach, from import headers only.
+
+    This only chooses between fetching the cache and building from source, so a
+    misread header costs time, never soundness. No targets means the full default build.
+    """
+    boundary = root_dir.resolve()
+    if not targets:
+        return sum(1 for _ in boundary.rglob("*.lean"))
+    seen: set[str] = set()
+    pending = [target.removeprefix("+") for target in targets]
+    while pending:
+        module = pending.pop()
+        if module in seen or not MODULE_RE.fullmatch(module):
+            continue
+        path = boundary.joinpath(*module.split(".")).with_suffix(".lean")
+        if path.is_symlink() or not path.is_file():
+            continue
+        seen.add(module)
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:400]
+        except OSError:
+            continue
+        pending.extend(
+            match["module"] for line in lines if (match := LEAN_IMPORT_RE.match(line))
+        )
+    return len(seen)
+
+
 def restore_trusted_lake_cache(
     root: dict[str, Any],
     *,
@@ -2918,13 +2949,14 @@ def restore_trusted_lake_cache(
     executable_paths: list[Path],
     tools: dict[Path, str],
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Restore what the trusted channel holds; return the evidence and the build environment.
+    """Stage what the trusted channel holds; return the evidence and the build environment.
 
-    Network access is confined to the verifier's curl. Lake runs offline: `lake cache add`
-    records the merged map, and `lake build --no-build` probes name the archives the import
-    closure needs, one layer of the import graph at a time, which curl then fetches. The final
-    `lake build` restores those archives and builds anything else from source. Cache misses,
-    unavailable services and unusual map shapes therefore only cost build time.
+    Network access is confined to the verifier's curl, which fetches the nearest trusted
+    maps and their archives into a disposable directory. Lake runs offline: `lake cache add`
+    records the merged map there, and the caller's ordinary build restores what matches and
+    compiles everything else from source. A small import closure skips the cache, because
+    compiling it is faster than the download. Misses, unavailable services and unusual map
+    shapes therefore only cost build time.
     """
     started = time.monotonic()
     config = root["trusted_lake_cache"]
@@ -2932,20 +2964,25 @@ def restore_trusted_lake_cache(
         "repository": config["repository"],
         "revision_endpoint": config["revision_endpoint"],
         "artifact_endpoint": config["artifact_endpoint"],
+        "closure_estimate": trusted_root_closure_size(root_dir, targets),
         "map_revisions": [],
         "map_entries": 0,
-        "probes": 0,
-        "bulk": False,
         "archives": 0,
         "bytes": 0,
     }
+
+    def finish(outcome: str, environment: dict[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
+        evidence["outcome"] = outcome
+        evidence["seconds"] = round(time.monotonic() - started, 3)
+        return evidence, environment
+
+    if evidence["closure_estimate"] < TRUSTED_LAKE_CACHE_MIN_MODULES:
+        return finish("small-closure", build_env)
     try:
         toolchain = (root_dir / "lean-toolchain").read_text(encoding="utf-8").strip()
         lake_toolchain_scope(toolchain)
     except (OSError, UnicodeDecodeError, VerificationError):
-        evidence["seconds"] = round(time.monotonic() - started, 3)
-        evidence["outcome"] = "unsupported-toolchain"
-        return evidence, build_env
+        return finish("unsupported-toolchain", build_env)
     revisions = trusted_lake_cache_revisions(
         root_dir,
         revision,
@@ -2964,132 +3001,70 @@ def restore_trusted_lake_cache(
         tools=tools,
     )
     if cache_map is None:
-        evidence["seconds"] = round(time.monotonic() - started, 3)
-        evidence["outcome"] = "no-map"
-        return evidence, build_env
+        return finish("no-map", build_env)
     evidence["map_revisions"] = list(cache_map.revisions)
     evidence["map_entries"] = len(cache_map.entries)
 
     cache_dir = work / "lake-cache"
     artifacts = cache_dir / "artifacts"
     artifacts.mkdir(parents=True)
+    wanted = set(cache_map.entries.values())
+    _download_trusted_lake_cache_artifacts(
+        wanted,
+        config,
+        artifacts=artifacts,
+        work=work,
+        environment=build_env,
+        executable_paths=executable_paths,
+        tools=tools,
+    )
+    sizes = _downloaded_regular_files(artifacts, wanted)
+    evidence["archives"] = len(sizes)
+    evidence["bytes"] = sum(sizes.values())
+    if evidence["bytes"] > MAX_TRUSTED_LAKE_CACHE_BYTES:
+        raise VerificationError("trusted Lake cache downloads exceed the byte cap")
+    if not sizes:
+        return finish("no-archives", build_env)
+    # Offer Lake only mappings whose archive arrived, so a miss is an ordinary rebuild.
     map_file = work / "trusted-outputs.jsonl"
     map_file.write_text(
         "\n".join(
             [
                 json.dumps(cache_map.schema),
-                *(json.dumps([key, value]) for key, value in sorted(cache_map.entries.items())),
+                *(
+                    json.dumps([key, value])
+                    for key, value in sorted(cache_map.entries.items())
+                    if value in sizes
+                ),
             ]
         )
         + "\n",
-        encoding="utf-8",
-    )
-    lake_config = work / "lake-config.toml"
-    lake_config.write_text(
-        "\n".join(
-            (
-                "[[cache.service]]",
-                f"name = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_SERVICE)}",
-                'kind = "s3"',
-                f"artifactEndpoint = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_ENDPOINT + '/artifacts')}",
-                f"revisionEndpoint = {json.dumps(TRUSTED_LAKE_CACHE_PROBE_ENDPOINT + '/revisions')}",
-                "",
-            )
-        ),
         encoding="utf-8",
     )
     cache_env = build_env.copy()
     cache_env.update(
         {
             "LAKE_CACHE_DIR": str(cache_dir.resolve()),
-            "LAKE_CONFIG": str(lake_config.resolve()),
+            # No cache service is configured, so Lake can never fetch anything itself.
+            "LAKE_CONFIG": str((work / "empty-lake-config.toml").resolve()),
             "LAKE_NO_CACHE": "true",
         }
     )
-    cache_readable = sorted({*readable_paths, work.resolve()})
+    (work / "empty-lake-config.toml").write_text("", encoding="utf-8")
     added = sandboxed_run(
-        [
-            str(lake),
-            "cache",
-            "add",
-            str(map_file.resolve()),
-            f"--service={TRUSTED_LAKE_CACHE_PROBE_SERVICE}",
-            f"--repo={config['repository']}",
-        ],
+        [str(lake), "cache", "add", str(map_file.resolve())],
         cwd=root_dir,
         environment=cache_env,
         writable_directories=[*writable, cache_dir.resolve()],
-        readable_paths=cache_readable,
+        readable_paths=sorted({*readable_paths, work.resolve()}),
         executable_paths=executable_paths,
         tools=tools,
         timeout=EXECUTION_BUDGET_SECONDS,
         check=False,
     )
     if added.returncode:
-        evidence["seconds"] = round(time.monotonic() - started, 3)
-        evidence["outcome"] = "lake-cache-add-failed"
-        return evidence, build_env
-
-    wanted = set(cache_map.entries.values())
-    by_hash = {LAKE_ARTIFACT_NAME_RE.fullmatch(name)["hash"]: name for name in wanted}
-    probe_url = re.compile(
-        re.escape(f"{TRUSTED_LAKE_CACHE_PROBE_ENDPOINT}/artifacts/{config['repository']}/")
-        + r"(?P<hash>[0-9a-f]{16})\.art"
-    )
-    attempted: set[str] = set()
-
-    def fetch(names: set[str]) -> None:
-        _download_trusted_lake_cache_artifacts(
-            names,
-            config,
-            artifacts=artifacts,
-            work=work,
-            environment=build_env,
-            executable_paths=executable_paths,
-            tools=tools,
-        )
-        attempted.update(names)
-        sizes = _downloaded_regular_files(artifacts, attempted)
-        total = sum(sizes.values())
-        if total > MAX_TRUSTED_LAKE_CACHE_BYTES:
-            raise VerificationError("trusted Lake cache downloads exceed the byte cap")
-        evidence["archives"] = len(sizes)
-        evidence["bytes"] = total
-
-    outcome = "restored"
-    while True:
-        if evidence["probes"] >= MAX_TRUSTED_LAKE_CACHE_WAVES:
-            fetch(wanted - attempted)
-            evidence["bulk"] = True
-            break
-        evidence["probes"] += 1
-        probe = sandboxed_run(
-            [str(lake), "build", "--no-build", "-v", *targets],
-            cwd=root_dir,
-            environment=cache_env,
-            writable_directories=writable,
-            readable_paths=cache_readable,
-            executable_paths=executable_paths,
-            tools=tools,
-            timeout=EXECUTION_BUDGET_SECONDS,
-            check=False,
-        )
-        if probe.returncode == 0:
-            break
-        transcript = f"{probe.stdout}\n{probe.stderr}"
-        requested = {
-            by_hash[match["hash"]]
-            for match in probe_url.finditer(transcript)
-            if match["hash"] in by_hash
-        } - attempted
-        if not requested:
-            if probe.returncode != 3:
-                outcome = "probe-failed"
-            break
-        fetch(requested)
-    evidence["outcome"] = outcome
-    evidence["seconds"] = round(time.monotonic() - started, 3)
-    return evidence, cache_env
+        return finish("lake-cache-add-failed", build_env)
+    return finish("staged", cache_env)
 
 
 def _remove_trusted_lake_cache_work(work: Path) -> None:

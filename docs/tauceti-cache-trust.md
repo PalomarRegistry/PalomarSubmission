@@ -91,19 +91,21 @@ imported modules:
    `lean-toolchain` scope. It keeps the nearest ancestor and nearest descendant
    that have one, merging their entries. Maps that are oversized or not plain
    module-archive maps are ignored.
-3. With network disabled, `lake cache add` records the merged map in a fresh,
-   disposable Lake cache directory, naming a cache service whose endpoint does
-   not exist. Lake therefore cannot fetch anything itself.
-4. With network disabled, `lake build --no-build -v` over the same targets
-   restores what is already in that directory and names, in its log, each
-   further archive it would fetch. `curl` fetches exactly those names from the
-   trusted artifact endpoint, and the probe repeats, one layer of the import
-   graph per round. After eight rounds the rest of the selected maps' archives
-   are fetched at once. Unexpected file names, links, special files or sizes
-   fail closed; the 256 MiB per-file and 16 GiB total caps bound the downloads.
-5. The ordinary `lake build` of the imported modules then runs as before, with
+3. If the import closure, estimated from the root's import headers, has fewer
+   than 750 modules, it stops here and builds from source: compiling that many
+   modules is faster than fetching a map's archives (about 0.17 s per module
+   from source on the default 16x32 runner, against about two minutes to fetch
+   and stage a whole map). The estimate only chooses the faster route.
+4. Otherwise `curl` fetches every archive the merged map names from the trusted
+   artifact endpoint into a fresh Lake cache directory. Unexpected file names,
+   links, special files or sizes fail closed; the 256 MiB per-file and 16 GiB
+   total caps bound the downloads.
+5. With network disabled, `lake cache add` records the mappings whose archives
+   arrived in that directory. No Lake cache service is configured, so Lake
+   cannot fetch anything itself.
+6. The ordinary `lake build` of the imported modules then runs as before, with
    network disabled and the cache directory readable only. Lake restores what
-   it can and compiles everything else from the verified source. The cache
+   matches and compiles everything else from the verified source. The cache
    directory is deleted afterwards, and the build tree must contain no symlink
    or hard link that escapes it.
 
@@ -118,7 +120,7 @@ write protections before the candidate runs.
 A missing channel, map or archive, a toolchain Palomar cannot scope, or a Lake
 version without these commands only means more is built from source. The
 mechanical report records, per root, the map revisions used, the number of
-entries, probe rounds, archives and bytes fetched, and timings, under
+entries, the closure estimate, archives and bytes fetched, and timings, under
 `trusted_root_caches`.
 
 ## Failure and recovery implications
